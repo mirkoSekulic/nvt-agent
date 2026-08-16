@@ -182,7 +182,7 @@ func (resolver *Resolver) Resolve(authorization AuthorizationContext, request Lo
 	image, runtime, agentConfig, resources, lifecycle := resolver.effective(profile)
 	resolved := ResolvedAgentRun{
 		ContractVersion: ContractVersion, RunID: request.RunID, Principal: authorization.Principal,
-		Profile: profile.Name, Workflow: workflow.Name, Image: image, Runtime: runtime,
+		SourceURL: request.SourceURL, Profile: profile.Name, Workflow: workflow.Name, Image: image, Runtime: runtime,
 		AgentConfig: clone(agentConfig), Prompt: request.Prompt,
 		Repositories: clone(workflow.Repositories), CredentialProviders: clone(profile.CredentialProviders),
 		DefaultCredentialProvider: profile.DefaultCredentialProvider,

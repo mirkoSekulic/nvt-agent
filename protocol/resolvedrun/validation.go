@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -66,6 +67,29 @@ func ValidateLocalRunRequest(value LocalRunRequest) error {
 	if len(value.Prompt) > MaxPromptBytes || strings.ContainsRune(value.Prompt, 0) || !utf8.ValidString(value.Prompt) {
 		return errors.New("prompt is invalid")
 	}
+	if value.SourceURL != "" && ValidateSourceURL(value.SourceURL) != nil {
+		return errors.New("source_url is invalid")
+	}
+	return nil
+}
+
+// ValidateSourceURL validates optional display/navigation provenance. Source
+// URLs never participate in authorization, selection, or execution behavior.
+func ValidateSourceURL(value string) error {
+	if len(value) == 0 || len(value) > MaxSourceURLBytes || !utf8.ValidString(value) || value != strings.TrimSpace(value) ||
+		strings.IndexFunc(value, unicode.IsControl) != -1 {
+		return errors.New("source URL is invalid")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.Opaque != "" || parsed.String() != value {
+		return errors.New("source URL is invalid")
+	}
+	decodedQuery, err := url.QueryUnescape(parsed.RawQuery)
+	if err != nil || !utf8.ValidString(parsed.Path) || !utf8.ValidString(decodedQuery) || !utf8.ValidString(parsed.Fragment) ||
+		strings.IndexFunc(parsed.Path, unicode.IsControl) != -1 ||
+		strings.IndexFunc(decodedQuery, unicode.IsControl) != -1 || strings.IndexFunc(parsed.Fragment, unicode.IsControl) != -1 {
+		return errors.New("source URL is invalid")
+	}
 	return nil
 }
 
@@ -98,7 +122,7 @@ func ValidateResolvedAgentRun(value ResolvedAgentRun) error {
 	}
 	if err := ValidateLocalRunRequest(LocalRunRequest{
 		RunID: value.RunID, Profile: value.Profile, Workflow: value.Workflow,
-		Retention: value.Retention, Backend: value.Execution.Name, Prompt: value.Prompt,
+		Retention: value.Retention, Backend: value.Execution.Name, Prompt: value.Prompt, SourceURL: value.SourceURL,
 	}); err != nil {
 		return err
 	}

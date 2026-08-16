@@ -19,6 +19,7 @@ const (
 	MaxWorkspaceInstructionsBytes = 64 << 10
 	MaxAgentConfigBytes           = 256 << 10
 	MaxPromptBytes                = 64 << 10
+	MaxSourceURLBytes             = 2048
 )
 
 // Principal is the immutable authenticated owner. DisplayName is presentation
@@ -185,6 +186,7 @@ type ResolvedAgentRun struct {
 	ContractVersion string    `json:"contract_version"`
 	RunID           string    `json:"run_id"`
 	Principal       Principal `json:"principal"`
+	SourceURL       string    `json:"source_url,omitempty"`
 	Profile         string    `json:"profile"`
 	Workflow        string    `json:"workflow"`
 	Image           string    `json:"image"`
@@ -277,4 +279,5 @@ type LocalRunRequest struct {
 	Retention string `json:"retention"`
 	Backend   string `json:"backend,omitempty"`
 	Prompt    string `json:"prompt,omitempty"`
+	SourceURL string `json:"source_url,omitempty"`
 }

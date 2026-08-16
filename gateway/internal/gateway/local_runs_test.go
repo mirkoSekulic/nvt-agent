@@ -245,6 +245,26 @@ func TestLocalDashboardAndRoutesEnforceExactOwnerAndReadiness(t *testing.T) {
 	}
 }
 
+func TestLocalDashboardRendersExactSourceAndImmutableRequester(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	const sourceURL = "https://github.com/acme/widget/issues/7#issuecomment-5307105878"
+	run := testLocalRoute("source-run", "https://identity.example", "42", true)
+	run.SourceURL = sourceURL
+	workstation := testLocalRoute("workstation", "https://identity.example", "workstation", true)
+	server := testLocalGateway(t, upstream.URL, fakeLocalRunSource{runs: []localroutes.Run{run, workstation}}, false)
+	dashboard := httptest.NewRecorder()
+	server.ServeHTTP(dashboard, httptest.NewRequest(http.MethodGet, "http://localhost/agents/", nil))
+	body := dashboard.Body.String()
+	if dashboard.Code != http.StatusOK || !strings.Contains(body, `href="`+sourceURL+`"`) ||
+		!strings.Contains(body, `>Alice</td>`) || !strings.Contains(body, `>workstation</td>`) ||
+		strings.Count(body, `>Source</a>`) != 1 || strings.Contains(body, `>github.com</td>`) {
+		t.Fatalf("local source dashboard=%d body=%s", dashboard.Code, body)
+	}
+}
+
 func TestHTTPLocalRouteSourcePaginatesStrictlyAndFailsClosed(t *testing.T) {
 	tokenFile := writeLocalRouteToken(t, "route-token-00000000000000000000000000000000")
 	var mu sync.Mutex
@@ -290,6 +310,18 @@ func TestHTTPLocalRouteSourcePaginatesStrictlyAndFailsClosed(t *testing.T) {
 	source, _ = newHTTPLocalRunSource(config)
 	if _, err := source.List(context.Background()); err == nil {
 		t.Fatal("malformed controller response accepted")
+	}
+
+	malformedSource := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		run := testLocalRoute("run-1", "https://identity.example", "42", true)
+		run.SourceURL = "http://github.example/acme/widget/issues/7"
+		_, _ = response.Write([]byte(`{"api_version":"nvt.local-routes/v1","runs":[` + mustRouteJSON(t, run) + `]}`))
+	}))
+	defer malformedSource.Close()
+	config.ControllerURL = malformedSource.URL
+	source, _ = newHTTPLocalRunSource(config)
+	if _, err := source.List(context.Background()); err == nil {
+		t.Fatal("malformed source route metadata accepted")
 	}
 }
 

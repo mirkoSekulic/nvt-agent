@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/localroutes"
+	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 type fixedRouteProvider struct{}
@@ -28,7 +29,8 @@ func TestLocalRoutesAreDurableReadyAndDisappearOnlyAfterCleanup(t *testing.T) {
 	handler := newAuthorizedTestHandler(t, store, nil, fixedRouteProvider{}, nil)
 
 	pending := serveRequest(t, handler, http.MethodGet, "/v1/routes/persistent-route", nil, "")
-	if pending.Code != http.StatusOK || !containsAll(pending.Body.String(), `"ready":false`, `"path":"/agents/persistent-route/"`, `"host":"persistent-route.agent.localhost"`) {
+	if pending.Code != http.StatusOK || strings.Contains(pending.Body.String(), `"source_url"`) ||
+		!containsAll(pending.Body.String(), `"ready":false`, `"path":"/agents/persistent-route/"`, `"host":"persistent-route.agent.localhost"`) {
 		t.Fatalf("pending route = %d %s", pending.Code, pending.Body.String())
 	}
 	claimed := claimRun(t, store, run, "route-controller")
@@ -79,6 +81,45 @@ func TestLocalRoutesAreDurableReadyAndDisappearOnlyAfterCleanup(t *testing.T) {
 	var result localroutes.List
 	if listed.Code != http.StatusOK || json.Unmarshal(listed.Body.Bytes(), &result) != nil || len(result.Runs) != 1 || result.Runs[0].RunID != "persistent-route" {
 		t.Fatalf("terminal route listed = %d %s", listed.Code, listed.Body.String())
+	}
+}
+
+func TestLocalRoutePreservesExactSourceAcrossControllerRestart(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, path := openTestStore(t, clock, 2)
+	const sourceURL = "https://github.com/acme/widget/issues/7#issuecomment-5307105878"
+	raw := testResolvedRun(t, "source-route", false)
+	resolved, err := resolvedrun.DecodeResolvedAgentRun(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved.SourceURL = sourceURL
+	raw, err = json.Marshal(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.Create(context.Background(), CreateInput{IdempotencyKey: "idempotency-key-source-route", ResolvedRun: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newAuthorizedTestHandler(t, store, nil, fixedRouteProvider{}, nil)
+	before := serveRequest(t, handler, http.MethodGet, "/v1/routes/"+created.Run.RunID, nil, "")
+	decoded, err := localroutes.DecodeRun(before.Body.Bytes())
+	if before.Code != http.StatusOK || err != nil || decoded.SourceURL != sourceURL || decoded.Principal.DisplayName != "User" {
+		t.Fatalf("source route = %d %#v, %v", before.Code, decoded, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := OpenStore(context.Background(), path, StoreOptions{MaxActiveRuns: 2, MaxClaimLease: time.Minute, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	restartedHandler := newAuthorizedTestHandler(t, restarted, nil, fixedRouteProvider{}, nil)
+	after := serveRequest(t, restartedHandler, http.MethodGet, "/v1/routes/"+created.Run.RunID, nil, "")
+	if after.Code != http.StatusOK || after.Body.String() != before.Body.String() {
+		t.Fatalf("source route changed across restart: before=%s after=%s", before.Body.String(), after.Body.String())
 	}
 }
 

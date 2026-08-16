@@ -8,15 +8,17 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
 const (
-	APIVersion     = "nvt.local-routes/v1"
-	MaxRuns        = 500
-	MaxRunsPerPage = 8
-	MaxExposures   = 64
-	MaxNameBytes   = 63
+	APIVersion        = "nvt.local-routes/v1"
+	MaxRuns           = 500
+	MaxRunsPerPage    = 8
+	MaxExposures      = 64
+	MaxNameBytes      = 63
+	MaxSourceURLBytes = 2048
 )
 
 type Principal struct {
@@ -45,6 +47,7 @@ type Run struct {
 	State      string     `json:"state"`
 	Ready      bool       `json:"ready"`
 	Principal  Principal  `json:"principal"`
+	SourceURL  string     `json:"source_url,omitempty"`
 	Profile    string     `json:"profile"`
 	Workflow   string     `json:"workflow"`
 	CreatedAt  time.Time  `json:"created_at"`
@@ -61,6 +64,7 @@ type List struct {
 func ValidateRun(value Run) error {
 	if value.APIVersion != APIVersion || !validName(value.RunID) || !validState(value.State) ||
 		value.Ready != (value.State == "running") || !validPrincipal(value.Principal) ||
+		!validOptionalSourceURL(value.SourceURL) ||
 		!validName(value.Profile) || !validName(value.Workflow) || value.CreatedAt.IsZero() ||
 		value.CreatedAt.Location() != time.UTC || !validEndpoint(value.Session, true) ||
 		len(value.Exposures) > MaxExposures {
@@ -109,6 +113,24 @@ func validHTTPSIssuer(value string) bool {
 	return len(value) > 0 && len(value) <= 2048 && err == nil && parsed.Scheme == "https" && parsed.Host != "" &&
 		parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.String() == value &&
 		value == strings.TrimSpace(value) && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func validOptionalSourceURL(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > MaxSourceURLBytes || !utf8.ValidString(value) || value != strings.TrimSpace(value) ||
+		strings.IndexFunc(value, unicode.IsControl) != -1 {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.Opaque != "" || parsed.String() != value {
+		return false
+	}
+	decodedQuery, err := url.QueryUnescape(parsed.RawQuery)
+	return err == nil && utf8.ValidString(parsed.Path) && utf8.ValidString(decodedQuery) && utf8.ValidString(parsed.Fragment) &&
+		strings.IndexFunc(parsed.Path, unicode.IsControl) == -1 &&
+		strings.IndexFunc(decodedQuery, unicode.IsControl) == -1 && strings.IndexFunc(parsed.Fragment, unicode.IsControl) == -1
 }
 
 func validEndpoint(value Endpoint, requirePath bool) bool {

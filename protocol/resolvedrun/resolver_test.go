@@ -93,7 +93,7 @@ func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if resolved.ContractVersion != ContractVersion || resolved.RunID != request.RunID || resolved.Principal != authorization.Principal {
+	if resolved.ContractVersion != ContractVersion || resolved.RunID != request.RunID || resolved.Principal != authorization.Principal || resolved.SourceURL != request.SourceURL {
 		t.Fatalf("trusted identity was not frozen exactly: %#v", resolved)
 	}
 	if resolved.Image != "registry.example/nvt-profile:sha256-deadbeef" || resolved.Runtime.Type != "generic-agent" ||
@@ -140,6 +140,9 @@ func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 	var renderedConfig map[string]any
 	if err := json.Unmarshal(rendered, &renderedConfig); err != nil {
 		t.Fatal(err)
+	}
+	if bytes.Contains(rendered, []byte(request.SourceURL)) {
+		t.Fatalf("display-only source URL entered executable agent config: %s", rendered)
 	}
 	renderedRuntime := renderedConfig["runtime"].(map[string]any)
 	if renderedRuntime["initial-prompt"].(map[string]any)["text"] != request.Prompt ||
@@ -218,6 +221,45 @@ func TestCallerCannotSupplyPrincipalOrUnauthorizedProfileWorkflow(t *testing.T) 
 	invalidContext.Principal.Subject = ""
 	if _, err := resolver.Resolve(invalidContext, validRequest()); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("invalid trusted principal error = %v", err)
+	}
+}
+
+func TestSourceURLValidationPreservesExactFragmentAndFailsClosed(t *testing.T) {
+	t.Parallel()
+	const sourceURL = "https://github.com/acme/widget/issues/7?view=all#issuecomment-5307105878"
+	request := validRequest()
+	request.SourceURL = sourceURL
+	resolver, err := NewResolver(validConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolver.Resolve(validAuthorization(), request)
+	if err != nil || resolved.SourceURL != sourceURL {
+		t.Fatalf("exact source URL was not resolved: %#v, %v", resolved, err)
+	}
+	encoded, err := json.Marshal(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeResolvedAgentRun(encoded)
+	if err != nil || decoded.SourceURL != sourceURL {
+		t.Fatalf("exact source URL did not round trip: %#v, %v", decoded, err)
+	}
+	for name, source := range map[string]string{
+		"insecure":         "http://github.example/acme/widget/issues/7",
+		"userinfo":         "https://user@github.example/acme/widget/issues/7",
+		"encoded control":  "https://github.example/acme/widget/issues/7#issuecomment%0a7",
+		"encoded non-UTF8": "https://github.example/acme/widget/issues/7#issuecomment%ff7",
+		"malformed escape": "https://github.example/acme/widget/issues/%zz",
+		"oversized":        "https://github.example/" + strings.Repeat("x", MaxSourceURLBytes),
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := validRequest()
+			candidate.SourceURL = source
+			if _, err := resolver.Resolve(validAuthorization(), candidate); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("malformed source URL accepted: %q, %v", source, err)
+			}
+		})
 	}
 }
 
@@ -627,7 +669,10 @@ func TestResolverSnapshotsInputsAndIsDeterministic(t *testing.T) {
 }
 
 func validRequest() LocalRunRequest {
-	return LocalRunRequest{RunID: "infra", Profile: "engineering", Workflow: "development", Retention: "persistent", Prompt: "Implement the requested change."}
+	return LocalRunRequest{
+		RunID: "infra", Profile: "engineering", Workflow: "development", Retention: "persistent",
+		Prompt: "Implement the requested change.", SourceURL: "https://github.example/acme/widget/issues/7#issuecomment-1",
+	}
 }
 
 func validAuthorization() AuthorizationContext {

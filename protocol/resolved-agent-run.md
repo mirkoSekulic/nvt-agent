@@ -20,8 +20,9 @@ Resolution receives two different inputs:
    issuer plus immutable subject and the exact profile/workflow pairs that the
    caller may select; and
 2. a strictly decoded caller request containing only run ID, one authorized
-   profile/workflow selection, retention name, optional backend name, and an
-   optional initial prompt.
+   profile/workflow selection, retention name, optional backend name, an
+   optional initial prompt, and an optional bounded HTTPS source URL used only
+   for display/navigation provenance.
 
 Identity is deliberately absent from the caller request. The resolver freezes
 the principal from the trusted context and rejects a profile/workflow pair not
@@ -46,6 +47,8 @@ egress policy, execution configuration, persistence policy, or TTL.
 A resolved value contains:
 
 - contract version, run ID, trusted principal, and authorized profile/workflow;
+- an optional exact HTTPS source URL that is never fetched or rendered into
+  executable agent configuration;
 - image plus typed runtime identity, autonomy, user, container capabilities,
   Docker kernel-log-device policy, and required Docker networks;
 - a bounded immutable base `agent_config` JSON object carrying the existing
@@ -69,6 +72,11 @@ administrator input: it must not contain real credentials. Existing runtime
 configuration that declares non-managed plugins, exposures, tools, preseed, or
 code-server behavior is carried unchanged instead of being re-expressed
 through a lossy second schema.
+
+The optional source URL is limited to 2048 bytes, must use HTTPS without
+userinfo or control characters, and preserves valid query strings and
+fragments exactly. It is presentation metadata only: it does not participate
+in authorization, selection, routing, lifecycle, credentials, or execution.
 
 ### One runtime-rendering rule
 

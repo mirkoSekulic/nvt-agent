@@ -303,6 +303,7 @@ func validateStoredRun(record *storedRun) error {
 func populateRunMetadata(view *Run, resolved resolvedrun.ResolvedAgentRun) {
 	view.Issuer = resolved.Principal.Issuer
 	view.Subject = resolved.Principal.Subject
+	view.SourceURL = resolved.SourceURL
 	view.Profile = resolved.Profile
 	view.Workflow = resolved.Workflow
 	view.Retention = resolved.Retention
