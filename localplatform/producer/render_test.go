@@ -56,6 +56,18 @@ func TestConfigurationsRenderBuiltInAndBoundedExternalContracts(t *testing.T) {
 	}
 }
 
+func TestConfigurationsRejectsNonDNSWorkflow(t *testing.T) {
+	compiled, _ := producerFixture()
+	for index := range compiled.Producers {
+		if compiled.Producers[index].Kind == "github-comments" {
+			compiled.Producers[index].Workflow = "development.workflow"
+		}
+	}
+	if _, err := Configurations(compiled); err == nil {
+		t.Fatal("non-DNS built-in workflow was accepted")
+	}
+}
+
 func TestRenderComposeConfinesEveryProducer(t *testing.T) {
 	compiled, statePlan := producerFixture()
 	raw, err := RenderCompose(compiled, statePlan, Options{})

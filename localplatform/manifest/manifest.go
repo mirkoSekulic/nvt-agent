@@ -32,6 +32,7 @@ const (
 
 var (
 	namePattern       = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$`)
+	workflowPattern   = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$`)
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	integerPattern    = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)$`)
 	secretKeyPattern  = regexp.MustCompile(`(?i)(secret|token|password|passwd|private.?key|credential|api.?key)`)
@@ -344,7 +345,7 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, workflow := range m.Workflows {
-		if !validName(name) || !has(m.Profiles, workflow.Profile) || !has(m.Repositories, workflow.Repository) || !oneOf(workflow.Retention, "disposable", "retained") {
+		if !validWorkflowName(name) || !has(m.Profiles, workflow.Profile) || !has(m.Repositories, workflow.Repository) || !oneOf(workflow.Retention, "disposable", "retained") {
 			return fmt.Errorf("invalid workflow %q", name)
 		}
 		if !profileAllowsRepository(m.Profiles[workflow.Profile], m.Repositories[workflow.Repository]) {
@@ -424,6 +425,9 @@ func (m Manifest) Validate() error {
 }
 
 func validName(v string) bool { return len(v) <= MaxNameBytes && namePattern.MatchString(v) }
+func validWorkflowName(v string) bool {
+	return len(v) <= MaxNameBytes && workflowPattern.MatchString(v)
+}
 func validExternalRuntimeIdentity(identity *RuntimeIdentity) bool {
 	return identity != nil && identity.UID > 0 && identity.UID <= 1<<31-1 && identity.GID > 0 && identity.GID <= 1<<31-1
 }

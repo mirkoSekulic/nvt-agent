@@ -3,6 +3,7 @@ package producer
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	localmanifest "github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
@@ -10,17 +11,39 @@ import (
 )
 
 func TestGeneratedLocalManifestConfigurationLoadsWithRealValidator(t *testing.T) {
-	compiled := localmanifest.Compiled{
-		Version: localmanifest.APIVersion,
-		Producers: []localmanifest.ProducerIntent{{
-			Owner: "producer:github", Name: "github", Kind: "github-comments",
-			RuntimeIdentity: localmanifest.RuntimeIdentityIntent{UID: 65532, GID: 65532},
-			Workflow:        "development", AdmissionCredential: "producer-admission:github",
-			GitHub: &localmanifest.GitHubProducerIntent{
-				AppID: 123, InstallationID: 456, PrivateKeySecret: "github-key",
-				RepositoryOwner: "acme", RepositoryName: "widget", Prefix: "/nvtagent", AllowedAuthors: []string{"owner"},
-			},
-		}},
+	const raw = `apiVersion: nvt.dev/local/v1
+secrets:
+  github-key: {file: ./.nvt-local/secrets/github/key.pem}
+accounts:
+  github:
+    preset: github-app
+    appId: "123"
+    privateKeySecret: github-key
+    installations: {acme: "456"}
+profiles:
+  development:
+    runtime: {preset: shell, autonomy: read-only}
+    accounts: [github]
+repositories:
+  widget: {github: acme/widget, account: github}
+workflows:
+  development: {profile: development, repository: widget, retention: disposable}
+producers:
+  - name: github
+    preset: github-comments
+    account: github
+    repository: widget
+    prefix: /nvtagent
+    allowedAuthors: [owner]
+    workflow: development
+`
+	decoded, err := localmanifest.Decode(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode local manifest: %v", err)
+	}
+	compiled, err := localmanifest.Compile(decoded)
+	if err != nil {
+		t.Fatalf("compile local manifest: %v", err)
 	}
 	files, err := localproducer.Configurations(compiled)
 	if err != nil || len(files) != 1 {
