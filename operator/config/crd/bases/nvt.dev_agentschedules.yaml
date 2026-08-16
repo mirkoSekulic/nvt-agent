@@ -104,9 +104,6 @@ spec:
                         maxLength: 65536
                       lifecycle:
                         type: object
-                        x-kubernetes-validations:
-                          - rule: "!has(self.completeOn) || !has(self.failOn) || self.completeOn.all(e, !(e in self.failOn))"
-                            message: lifecycle completeOn and failOn events must not overlap
                         properties:
                           completeOn:
                             type: array
