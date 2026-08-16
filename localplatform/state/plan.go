@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -66,6 +67,13 @@ type preparedPlan struct {
 	configVolume string
 	static       []staticInput
 	generated    []generatedInputPlan
+	directories  []directoryPlan
+}
+
+type directoryPlan struct {
+	volume   string
+	uid, gid int
+	mode     int64
 }
 
 type staticInput struct {
@@ -122,11 +130,17 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 	brokerData := addVolume("broker-data", "broker-database-audit", "broker", "broker")
 	brokerPrivate := addVolume("broker-private", "broker-identities-canonical-credentials", "broker", "broker")
 	controllerData := addVolume("controller-data", "local-controller-database-audit", "local-controller", "local-controller")
+	result.directories = append(result.directories,
+		directoryPlan{volume: brokerData.Name, uid: 0, gid: 0, mode: 0o700},
+		directoryPlan{volume: brokerPrivate.Name, uid: 0, gid: 0, mode: 0o700},
+		directoryPlan{volume: controllerData.Name, uid: 0, gid: 0, mode: 0o700},
+	)
 	addDirectoryMount("broker", brokerData, "/var/lib/nvt/broker", false)
 	addDirectoryMount("broker", brokerPrivate, "/private", false)
 	addDirectoryMount("local-controller", controllerData, "/var/lib/nvt/local-controller", false)
 	if portalEnabled {
 		credentialSeeds := addVolume("credential-seeds", "credential-portal-seed", "credential-portal", "broker", "credential-portal")
+		result.directories = append(result.directories, directoryPlan{volume: credentialSeeds.Name, uid: 1000, gid: 1000, mode: 0o700})
 		addDirectoryMount("credential-portal", credentialSeeds, "/seed", false)
 		addDirectoryMount("broker", credentialSeeds, "/portal-seed", true)
 	}
@@ -308,6 +322,7 @@ func generatedBytes(random io.Reader, encoding string) ([]byte, error) {
 }
 
 func portalConfiguration(accounts []manifest.PortalAccountIntent) ([]byte, error) {
+	const maxPortalSlots = 128
 	type slot struct {
 		Name           string            `json:"name"`
 		Label          string            `json:"label"`
@@ -319,7 +334,12 @@ func portalConfiguration(accounts []manifest.PortalAccountIntent) ([]byte, error
 	}
 	accounts = append([]manifest.PortalAccountIntent(nil), accounts...)
 	sort.Slice(accounts, func(i, j int) bool { return accounts[i].Name < accounts[j].Name })
+	if len(accounts) == 0 || len(accounts) > maxPortalSlots {
+		return nil, errors.New("credential portal requires 1..128 accounts")
+	}
 	slots := []slot{}
+	seenNames := map[string]struct{}{}
+	seenDestinations := map[string]struct{}{}
 	for _, account := range accounts {
 		adapter := ""
 		switch account.Preset {
@@ -331,7 +351,16 @@ func portalConfiguration(accounts []manifest.PortalAccountIntent) ([]byte, error
 			return nil, fmt.Errorf("unsupported credential portal account %q", account.Name)
 		}
 		slotName := portalSlotName(account.Name)
-		slots = append(slots, slot{slotName, account.Name, map[string]string{"issuer": "local://workstation", "subject": "developer"}, adapter, account.Name, "local-seed", slotName + ".json"})
+		dataKey := slotName + ".json"
+		if _, exists := seenNames[slotName]; exists {
+			return nil, errors.New("credential portal slot mapping collision")
+		}
+		if _, exists := seenDestinations[dataKey]; exists {
+			return nil, errors.New("credential portal destination mapping collision")
+		}
+		seenNames[slotName] = struct{}{}
+		seenDestinations[dataKey] = struct{}{}
+		slots = append(slots, slot{slotName, account.Name, map[string]string{"issuer": "local://workstation", "subject": "developer"}, adapter, account.Name, "local-seed", dataKey})
 	}
 	document := map[string]any{
 		"auth":      map[string]any{"mode": "local", "session": map[string]any{"cookieName": "nvt_local_credentials", "maxAgeSeconds": 3600, "secure": false}, "local": map[string]any{"principal": map[string]string{"issuer": "local://workstation", "subject": "developer", "displayName": "Local developer"}}},
@@ -343,13 +372,7 @@ func portalConfiguration(accounts []manifest.PortalAccountIntent) ([]byte, error
 }
 
 func portalSlotName(account string) string {
-	if !strings.Contains(account, ".") {
-		return account
-	}
-	base := strings.ReplaceAll(account, ".", "-")
-	suffix := "-" + shortID(account)[:8]
-	if len(base)+len(suffix) > manifest.MaxNameBytes {
-		base = strings.TrimRight(base[:manifest.MaxNameBytes-len(suffix)], "-")
-	}
-	return base + suffix
+	digest := sha256.Sum256([]byte("nvt.local-credential-slot/v1\x00" + account))
+	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:])
+	return "slot-" + strings.ToLower(encoded)
 }

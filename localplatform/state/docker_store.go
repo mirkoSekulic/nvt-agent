@@ -93,6 +93,14 @@ func (store DockerStore) verifyVolume(ctx context.Context, volume Volume) error 
 }
 
 func (store DockerStore) ReplaceFiles(ctx context.Context, volume string, files []StateFile) error {
+	return store.writeFiles(ctx, volume, files, false)
+}
+
+func (store DockerStore) InitializePrivateSource(ctx context.Context, volume string, files []StateFile) error {
+	return store.writeFiles(ctx, volume, files, true)
+}
+
+func (store DockerStore) writeFiles(ctx context.Context, volume string, files []StateFile, initialize bool) error {
 	if !safeVolumeName(volume) || len(files) == 0 || len(files) > 512 {
 		return errors.New("invalid state update")
 	}
@@ -147,11 +155,63 @@ tar -xpf - -C /state/.next
 if [ -e /state/current ]; then mv /state/current /state/current.old; fi
 mv /state/.next /state/current
 rm -rf /state/current.old`
+	if initialize {
+		script = `set -eu
+umask 077
+test ! -e /state/current
+rm -rf /state/.next /state/current.old
+mkdir /state/.next
+tar -xpf - -C /state/.next
+mv /state/.next /state/current`
+	}
 	_, err := store.runHelper(ctx, bytes.NewReader(payload), []string{"--mount", "type=volume,src=" + volume + ",dst=/state"}, script)
 	if err != nil {
 		return errors.New("state volume update failed")
 	}
 	return nil
+}
+
+func (store DockerStore) EnsureDirectory(ctx context.Context, volume string, uid, gid int, mode int64) error {
+	if !safeVolumeName(volume) || uid < 0 || gid < 0 || mode < 0 || mode > 0o777 {
+		return errors.New("invalid state directory")
+	}
+	script := `set -eu
+test -d /state
+chown "$1:$2" /state
+chmod "$3" /state`
+	_, err := store.runHelper(ctx, nil, []string{"--mount", "type=volume,src=" + volume + ",dst=/state"}, script, strconv.Itoa(uid), strconv.Itoa(gid), strconv.FormatInt(mode, 8))
+	if err != nil {
+		return errors.New("state directory initialization failed")
+	}
+	return nil
+}
+
+func (store DockerStore) InspectPrivateSource(ctx context.Context, volume string) (PrivateSourceState, error) {
+	if !safeVolumeName(volume) {
+		return PrivateSourceInvalid, errors.New("invalid private source")
+	}
+	script := `set -eu
+if [ ! -e /source/current ]; then
+  printf 'empty'
+elif [ -d /source/current ] && [ ! -L /source/current/.initialized ] && [ ! -L /source/current/value ] && [ -f /source/current/.initialized ] && [ -s /source/current/value ] && [ "$(cat /source/current/.initialized)" = 'nvt.local-platform.private-source/v1' ] && [ "$(stat -c '%u:%g:%a' /source/current/.initialized)" = '0:0:400' ] && [ "$(stat -c '%u:%g:%a' /source/current/value)" = '0:0:400' ]; then
+  printf 'ready'
+else
+  printf 'corrupt'
+fi`
+	output, err := store.runHelper(ctx, nil, []string{"--mount", "type=volume,src=" + volume + ",dst=/source,readonly"}, script)
+	if err != nil {
+		return PrivateSourceInvalid, errors.New("private source inspection failed")
+	}
+	switch string(bytes.TrimSpace(output)) {
+	case "empty":
+		return PrivateSourceEmpty, nil
+	case "ready":
+		return PrivateSourceReady, nil
+	case "corrupt":
+		return PrivateSourceCorrupt, nil
+	default:
+		return PrivateSourceInvalid, errors.New("private source inspection returned invalid state")
+	}
 }
 
 func (store DockerStore) CopyPrivateFile(ctx context.Context, source, destination string, uid, gid int) error {
@@ -160,7 +220,14 @@ func (store DockerStore) CopyPrivateFile(ctx context.Context, source, destinatio
 	}
 	script := `set -eu
 umask 077
+test -d /source/current
+test ! -L /source/current/.initialized
+test ! -L /source/current/value
+test -f /source/current/.initialized
 test -s /source/current/value
+test "$(cat /source/current/.initialized)" = 'nvt.local-platform.private-source/v1'
+test "$(stat -c '%u:%g:%a' /source/current/.initialized)" = '0:0:400'
+test "$(stat -c '%u:%g:%a' /source/current/value)" = '0:0:400'
 rm -rf /state/.next /state/current.old
 mkdir /state/.next
 cp /source/current/value /state/.next/value

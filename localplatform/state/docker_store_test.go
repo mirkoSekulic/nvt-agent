@@ -15,8 +15,10 @@ type dockerCommand struct {
 	stdin     []byte
 }
 type fakeDocker struct {
-	volumes  map[string]map[string]string
-	commands []dockerCommand
+	volumes   map[string]map[string]string
+	commands  []dockerCommand
+	runOutput []byte
+	runErr    error
 }
 
 func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...string) ([]byte, error) {
@@ -53,9 +55,42 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		}
 	}
 	if len(arguments) > 0 && arguments[0] == "run" {
-		return nil, nil
+		return docker.runOutput, docker.runErr
 	}
 	return nil, errors.New("unexpected command")
+}
+
+func TestDockerStoreInitializesDirectoryAndClassifiesSources(t *testing.T) {
+	docker := &fakeDocker{volumes: map[string]map[string]string{}}
+	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("c", 64)}
+	if err := store.EnsureDirectory(context.Background(), "local-test-seeds", 1000, 1000, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directoryCommand := docker.commands[0]
+	for _, expected := range []string{"1000", "700"} {
+		if !containsArgument(directoryCommand.arguments, expected) {
+			t.Fatalf("directory init omitted %q: %v", expected, directoryCommand.arguments)
+		}
+	}
+	for output, expected := range map[string]PrivateSourceState{"empty": PrivateSourceEmpty, "ready": PrivateSourceReady, "corrupt": PrivateSourceCorrupt} {
+		docker.runOutput = []byte(output)
+		state, err := store.InspectPrivateSource(context.Background(), "local-test-source")
+		if err != nil || state != expected {
+			t.Fatalf("inspect %q = %v, %v", output, state, err)
+		}
+	}
+	secret := []byte("INITIAL-GENERATED-PRIVATE")
+	docker.runOutput = nil
+	if err := store.InitializePrivateSource(context.Background(), "local-test-source", []StateFile{{Name: ".initialized", Mode: 0o400, Data: bytes.NewBufferString(privateSourceMarker)}, {Name: "value", Mode: 0o400, Data: bytes.NewReader(secret)}}); err != nil {
+		t.Fatal(err)
+	}
+	command := docker.commands[len(docker.commands)-1]
+	if bytes.Contains([]byte(strings.Join(command.arguments, "\x00")), secret) || !bytes.Contains(command.stdin, secret) {
+		t.Fatal("source initialization did not keep private bytes on stdin")
+	}
+	if !strings.Contains(strings.Join(command.arguments, "\n"), "test ! -e /state/current") {
+		t.Fatal("source initialization is not create-only")
+	}
 }
 
 func TestDockerStoreCreatesAndAdoptsOnlyExactlyLabeledVolumes(t *testing.T) {

@@ -23,9 +23,23 @@ type StateFile struct {
 // never copy Data into commands, environment values, labels, output, or logs.
 type Store interface {
 	EnsureVolumes(context.Context, []Volume) (map[string]bool, error)
+	EnsureDirectory(context.Context, string, int, int, int64) error
+	InspectPrivateSource(context.Context, string) (PrivateSourceState, error)
+	InitializePrivateSource(context.Context, string, []StateFile) error
 	ReplaceFiles(context.Context, string, []StateFile) error
 	CopyPrivateFile(context.Context, string, string, int, int) error
 }
+
+type PrivateSourceState uint8
+
+const (
+	PrivateSourceInvalid PrivateSourceState = iota
+	PrivateSourceEmpty
+	PrivateSourceReady
+	PrivateSourceCorrupt
+)
+
+const privateSourceMarker = "nvt.local-platform.private-source/v1\n"
 
 type Manager struct {
 	Store  Store
@@ -47,9 +61,22 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 	if err != nil {
 		return Plan{}, errors.New("generated configuration is invalid")
 	}
-	created, err := manager.Store.EnsureVolumes(ctx, prepared.Volumes)
+	_, err = manager.Store.EnsureVolumes(ctx, prepared.Volumes)
 	if err != nil {
 		return Plan{}, errors.New("trusted state volume ownership conflict or storage failure")
+	}
+	for _, directory := range prepared.directories {
+		if err := manager.Store.EnsureDirectory(ctx, directory.volume, directory.uid, directory.gid, directory.mode); err != nil {
+			return Plan{}, errors.New("trusted state directory initialization failed")
+		}
+	}
+	sourceStates := map[string]PrivateSourceState{}
+	for _, input := range prepared.generated {
+		state, err := manager.Store.InspectPrivateSource(ctx, input.sourceVolume)
+		if err != nil || state == PrivateSourceInvalid || state == PrivateSourceCorrupt {
+			return Plan{}, errors.New("generated private state is missing or corrupt")
+		}
+		sourceStates[input.sourceVolume] = state
 	}
 	if err := manager.Store.ReplaceFiles(ctx, prepared.configVolume, configuration); err != nil {
 		return Plan{}, errors.New("generated configuration storage failed")
@@ -64,12 +91,15 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 		}
 	}
 	for _, input := range prepared.generated {
-		if created[input.sourceVolume] {
+		if sourceStates[input.sourceVolume] == PrivateSourceEmpty {
 			value, err := generatedBytes(manager.Random, input.encoding)
 			if err != nil {
 				return Plan{}, err
 			}
-			writeErr := manager.Store.ReplaceFiles(ctx, input.sourceVolume, []StateFile{{Name: "value", Mode: 0o400, UID: 0, GID: 0, Data: bytes.NewReader(value)}})
+			writeErr := manager.Store.InitializePrivateSource(ctx, input.sourceVolume, []StateFile{
+				{Name: ".initialized", Mode: 0o400, UID: 0, GID: 0, Data: bytes.NewBufferString(privateSourceMarker)},
+				{Name: "value", Mode: 0o400, UID: 0, GID: 0, Data: bytes.NewReader(value)},
+			})
 			clear(value)
 			if writeErr != nil {
 				return Plan{}, errors.New("generated private state storage failed")

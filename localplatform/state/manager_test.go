@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"testing"
@@ -13,14 +14,16 @@ import (
 )
 
 type memoryStore struct {
-	volumes  map[string]Volume
-	files    map[string]map[string][]byte
-	conflict bool
-	writes   int
+	volumes     map[string]Volume
+	files       map[string]map[string][]byte
+	directories map[string]directoryPlan
+	conflict    bool
+	writes      int
+	failVolume  string
 }
 
 func newMemoryStore() *memoryStore {
-	return &memoryStore{volumes: map[string]Volume{}, files: map[string]map[string][]byte{}}
+	return &memoryStore{volumes: map[string]Volume{}, files: map[string]map[string][]byte{}, directories: map[string]directoryPlan{}}
 }
 func (store *memoryStore) EnsureVolumes(_ context.Context, volumes []Volume) (map[string]bool, error) {
 	if store.conflict {
@@ -40,6 +43,10 @@ func (store *memoryStore) EnsureVolumes(_ context.Context, volumes []Volume) (ma
 	return created, nil
 }
 func (store *memoryStore) ReplaceFiles(_ context.Context, volume string, files []StateFile) error {
+	if store.failVolume == volume {
+		store.failVolume = ""
+		return errors.New("injected write failure")
+	}
 	if _, ok := store.volumes[volume]; !ok {
 		return errors.New("missing volume")
 	}
@@ -55,7 +62,36 @@ func (store *memoryStore) ReplaceFiles(_ context.Context, volume string, files [
 	store.writes++
 	return nil
 }
+
+func (store *memoryStore) EnsureDirectory(_ context.Context, volume string, uid, gid int, mode int64) error {
+	if _, ok := store.volumes[volume]; !ok {
+		return errors.New("missing volume")
+	}
+	store.directories[volume] = directoryPlan{volume: volume, uid: uid, gid: gid, mode: mode}
+	return nil
+}
+
+func (store *memoryStore) InspectPrivateSource(_ context.Context, volume string) (PrivateSourceState, error) {
+	files := store.files[volume]
+	if len(files) == 0 {
+		return PrivateSourceEmpty, nil
+	}
+	if string(files[".initialized"]) == privateSourceMarker && len(files["value"]) > 0 {
+		return PrivateSourceReady, nil
+	}
+	return PrivateSourceCorrupt, nil
+}
+
+func (store *memoryStore) InitializePrivateSource(ctx context.Context, volume string, files []StateFile) error {
+	if len(store.files[volume]) != 0 {
+		return errors.New("source already initialized")
+	}
+	return store.ReplaceFiles(ctx, volume, files)
+}
 func (store *memoryStore) CopyPrivateFile(_ context.Context, source, destination string, _, _ int) error {
+	if state, _ := store.InspectPrivateSource(context.Background(), source); state != PrivateSourceReady {
+		return errors.New("corrupt source")
+	}
 	value := store.files[source]["value"]
 	if len(value) == 0 {
 		return errors.New("missing source")
@@ -116,6 +152,9 @@ func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
 	brokerSeed := assertMount("broker", "/portal-seed", true)
 	if seed.Volume != brokerSeed.Volume {
 		t.Fatal("portal seed and broker import storage diverged")
+	}
+	if initialized := store.directories[seed.Volume]; initialized.uid != 1000 || initialized.gid != 1000 || initialized.mode != 0o700 {
+		t.Fatalf("portal seed directory ownership = %#v", initialized)
 	}
 	assertMount("broker", "/private", false)
 	assertMount("credential-portal", "/etc/nvt-local/credential-portal.json", true)
@@ -191,6 +230,53 @@ func TestManagerFailsBeforeWritesOnOwnershipConflict(t *testing.T) {
 	}
 }
 
+func TestManagerRecoversEmptySourceAfterPartialWriteFailure(t *testing.T) {
+	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	store := newMemoryStore()
+	store.failVolume = "local-test-generated-config"
+	manager := Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x51}, 1024))}
+	if _, err := manager.Ensure(context.Background(), "local-test", compiled, inputs); err == nil {
+		t.Fatal("injected partial failure succeeded")
+	}
+	for name, volume := range store.volumes {
+		if volume.Role == "generated-private-source" && len(store.files[name]) != 0 {
+			t.Fatalf("source initialized before config failure: %s", name)
+		}
+	}
+	if _, err := manager.Ensure(context.Background(), "local-test", compiled, inputs); err != nil {
+		t.Fatalf("retry did not recover empty sources: %v", err)
+	}
+	for name, volume := range store.volumes {
+		if volume.Role == "generated-private-source" {
+			if state, _ := store.InspectPrivateSource(context.Background(), name); state != PrivateSourceReady {
+				t.Fatalf("source %s state=%v", name, state)
+			}
+		}
+	}
+}
+
+func TestManagerRejectsMarkedSourceWithoutValue(t *testing.T) {
+	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	store := newMemoryStore()
+	plan, err := preparePlan("local-test", compiled, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureVolumes(context.Background(), plan.Volumes); err != nil {
+		t.Fatal(err)
+	}
+	source := plan.generated[0].sourceVolume
+	store.files[source] = map[string][]byte{".initialized": []byte(privateSourceMarker)}
+	if _, err := (Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x61}, 1024))}).Ensure(context.Background(), "local-test", compiled, inputs); err == nil {
+		t.Fatal("corrupt initialized source was rotated")
+	}
+	if _, exists := store.files[source]["value"]; exists {
+		t.Fatal("corrupt source was silently regenerated")
+	}
+}
+
 func TestPlanOmitsCredentialPortalStateWithoutOAuthAccounts(t *testing.T) {
 	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
 	inputs := &Inputs{private: map[inputKey][]byte{}}
@@ -220,7 +306,7 @@ func TestPlanOmitsCredentialPortalStateWithoutOAuthAccounts(t *testing.T) {
 }
 
 func TestPortalConfigurationUsesUniqueCanonicalLocalDestinations(t *testing.T) {
-	raw, err := portalConfiguration([]manifest.PortalAccountIntent{{Name: "codex.second", Preset: "codex-oauth"}, {Name: "codex", Preset: "codex-oauth"}, {Name: "claude", Preset: "claude-oauth"}})
+	raw, err := portalConfiguration([]manifest.PortalAccountIntent{{Name: "a.b", Preset: "codex-oauth"}, {Name: "a-b-2e7336dc", Preset: "codex-oauth"}, {Name: "claude", Preset: "claude-oauth"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,6 +329,24 @@ func TestPortalConfigurationUsesUniqueCanonicalLocalDestinations(t *testing.T) {
 	}
 	if len(seenNames) != 3 {
 		t.Fatalf("slots = %#v", document.Slots)
+	}
+}
+
+func TestPortalAccountLimitFailsBeforeVolumeWrites(t *testing.T) {
+	accounts := make([]manifest.PortalAccountIntent, 129)
+	for index := range accounts {
+		accounts[index] = manifest.PortalAccountIntent{Name: fmt.Sprintf("account-%03d", index), Preset: "codex-oauth"}
+	}
+	if _, err := portalConfiguration(accounts[:128]); err != nil {
+		t.Fatalf("portal rejected its exact slot limit: %v", err)
+	}
+	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway", CredentialPortalAccounts: accounts}}
+	store := newMemoryStore()
+	if _, err := (Manager{Store: store}).Ensure(context.Background(), "local-test", compiled, &Inputs{private: map[inputKey][]byte{}}); err == nil {
+		t.Fatal("oversized portal slot set accepted")
+	}
+	if len(store.volumes) != 0 || store.writes != 0 {
+		t.Fatal("invalid portal config changed Docker state")
 	}
 }
 

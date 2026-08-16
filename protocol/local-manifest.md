@@ -107,6 +107,9 @@ credential state, local-controller database/audit data, and—when an OAuth
 account enables the portal—the portal seed handoff. Portal seed storage is
 writable only by the credential portal and read-only to the broker seed
 supervisor; broker canonical credentials remain in the broker-private volume.
+Before startup, the seed volume root is fixed to the packaged portal identity
+`1000:1000` with mode `0700`, so the non-root portal can create its private
+staging directory without broadening access.
 
 Static inputs are snapshotted into exact per-consumer volumes. Generated inputs
 use a persistent private source plus an exact copy for each consumer. Every
@@ -127,12 +130,20 @@ All volumes carry exactly these labels:
 
 Existing same-name volumes are adopted only when the complete label map is
 byte-for-byte equal. All existing volumes are checked before any state is
-written. Missing generated source volumes receive fresh 256-bit material;
-ordinary restarts preserve them, a missing consumer copy is reconstructed from
-its source, and source replacement rotates all consumer copies together before
-any later service startup. The helper image itself must be pinned by SHA-256,
-runs without networking or a writable root filesystem, and receives no private
+written. An empty, unmarked generated source left by an interrupted first
+initialization can retry safely. A durable marker plus the exact source file is
+required thereafter, so loss or corruption of an initialized value fails
+closed rather than silently rotating it. Ordinary restarts preserve generated
+material, a missing consumer copy is reconstructed from its source, and source
+volume replacement rotates all consumer copies together before any later
+service startup. The helper image itself must be pinned by SHA-256, runs
+without networking or a writable root filesystem, and receives no private
 value through Docker inspection surfaces.
+
+Credential-portal account projection is bounded to the portal contract's 128
+slots before volume creation. Slot and local destination names use a
+domain-separated full SHA-256 mapping of the logical account name; any duplicate
+mapping is rejected before state is written.
 
 This slice prepares state and mount intent only. It does not render or start a
 producer, workstation, workflow, or replacement Compose project; those remain
