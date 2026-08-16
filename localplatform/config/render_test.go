@@ -129,3 +129,27 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		t.Fatalf("multi-installation default policy did not fail closed: %v", err)
 	}
 }
+
+func TestBrokerRejectsDerivedProviderNameCollision(t *testing.T) {
+	file, err := os.Open(filepath.Join("..", "manifest", "testdata", "valid.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := manifest.Decode(file)
+	_ = file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	github := decoded.Accounts["github"]
+	github.Installations = map[string]string{"mirkoSekulic": "123", "owner-one": "456", "owner-two": "789"}
+	decoded.Accounts["github"] = github
+	decoded.Secrets["collision-token"] = manifest.Secret{File: "./.nvt-local/secrets/collision-token"}
+	decoded.Accounts["github-70864727"] = manifest.Account{Preset: "github-pat", TokenSecret: "collision-token"}
+	compiled, err := manifest.Compile(decoded)
+	if err != nil {
+		t.Fatalf("collision fixture is not schema-valid: %v", err)
+	}
+	if _, err := serviceconfig.Broker(compiled); err == nil || !strings.Contains(err.Error(), `provider name "github-70864727" is not unique`) {
+		t.Fatalf("derived provider collision did not fail closed: %v", err)
+	}
+}

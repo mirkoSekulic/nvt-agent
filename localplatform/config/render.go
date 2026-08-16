@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -401,6 +402,17 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 		default:
 			return nil, errors.New("compiled broker account preset is invalid")
 		}
+	}
+	providerNames := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		name, ok := provider["name"].(string)
+		if !ok || name == "" {
+			return nil, errors.New("rendered broker provider name is invalid")
+		}
+		if _, exists := providerNames[name]; exists {
+			return nil, fmt.Errorf("rendered broker provider name %q is not unique", name)
+		}
+		providerNames[name] = struct{}{}
 	}
 	encoded, err := json.Marshal(map[string]any{"provider-plugins": []any{}, "providers": providers})
 	if err != nil || len(encoded) > manifest.MaxDocumentBytes {

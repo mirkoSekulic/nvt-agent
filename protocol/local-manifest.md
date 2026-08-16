@@ -62,6 +62,11 @@ example, receives resolved numeric App and installation IDs, repository
 coordinates, and its own private-key input reference; the broker independently
 owns its copy of that same logical key.
 
+Broker rendering validates the final provider namespace before publishing any
+managed state. This includes provider names derived for individual GitHub App
+installations: a derived name may not collide with another derived provider or
+with any user-authored account name.
+
 The controller projection also contains one producer admission binding per
 producer: stable producer identity, exactly one workflow, and a logical
 generated credential name. Each binding contains a non-empty bounded principal
