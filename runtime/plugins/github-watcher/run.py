@@ -19,6 +19,7 @@ from github_watcher_lib import (
     render_template,
     seen_path,
     should_accept_author,
+    should_ignore_comment,
     static_watches,
     string_value,
     update_watermark,
@@ -102,6 +103,9 @@ def process_comments(watch, seen):
         if timestamp <= max_seen:
             continue
         if not should_accept_author(comment, config["author-associations"]):
+            update_watermark(seen, key, timestamp)
+            continue
+        if should_ignore_comment(comment.get("body") or "", watch.get("ignored-comment-prefixes", [])):
             update_watermark(seen, key, timestamp)
             continue
         payload = event_payload(
