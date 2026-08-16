@@ -1,0 +1,300 @@
+package state
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"maps"
+	"testing"
+
+	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
+)
+
+type memoryStore struct {
+	volumes  map[string]Volume
+	files    map[string]map[string][]byte
+	conflict bool
+	writes   int
+}
+
+func newMemoryStore() *memoryStore {
+	return &memoryStore{volumes: map[string]Volume{}, files: map[string]map[string][]byte{}}
+}
+func (store *memoryStore) EnsureVolumes(_ context.Context, volumes []Volume) (map[string]bool, error) {
+	if store.conflict {
+		return nil, errors.New("conflict")
+	}
+	created := map[string]bool{}
+	for _, volume := range volumes {
+		if existing, ok := store.volumes[volume.Name]; ok {
+			if !maps.Equal(existing.Labels, volume.Labels) {
+				return nil, errors.New("conflict")
+			}
+			continue
+		}
+		store.volumes[volume.Name] = volume
+		created[volume.Name] = true
+	}
+	return created, nil
+}
+func (store *memoryStore) ReplaceFiles(_ context.Context, volume string, files []StateFile) error {
+	if _, ok := store.volumes[volume]; !ok {
+		return errors.New("missing volume")
+	}
+	next := map[string][]byte{}
+	for _, file := range files {
+		value, err := io.ReadAll(file.Data)
+		if err != nil {
+			return err
+		}
+		next[file.Name] = value
+	}
+	store.files[volume] = next
+	store.writes++
+	return nil
+}
+func (store *memoryStore) CopyPrivateFile(_ context.Context, source, destination string, _, _ int) error {
+	value := store.files[source]["value"]
+	if len(value) == 0 {
+		return errors.New("missing source")
+	}
+	store.files[destination] = map[string][]byte{"value": append([]byte(nil), value...)}
+	store.writes++
+	return nil
+}
+
+func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
+	secret := []byte("STATIC-PRIVATE-VALUE")
+	inputs := &Inputs{private: map[inputKey][]byte{{owner: "broker", name: "github-key"}: append([]byte(nil), secret...)}, Instructions: []Instruction{{Owner: "local-controller", Name: "development", Content: []byte("instructions")}}}
+	defer inputs.Close()
+	compiled := manifest.Compiled{
+		Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway", CredentialPortalAccounts: []manifest.PortalAccountIntent{{Name: "codex", Preset: "codex-oauth"}}},
+		PrivateInputs: []manifest.PrivateInputIntent{
+			{Owner: "local-controller", Name: "development", File: "instructions.md", Purpose: "instructions"},
+			{Owner: "broker", Name: "github-key", File: ".nvt-local/secrets/key", Purpose: "secret"},
+		},
+		GeneratedPrivateInputs: []manifest.GeneratedPrivateInputIntent{{Owner: "local-platform-state", Name: "producer-admission:test", Purpose: "schedule-admission-token", Consumers: []string{"local-controller", "producer:test"}}},
+	}
+	store := newMemoryStore()
+	manager := Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x11}, 4096))}
+	plan, err := manager.Ensure(context.Background(), "local-test", compiled, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for volume, files := range store.files {
+		if value := files["compiled.json"]; bytes.Contains(value, secret) {
+			t.Fatalf("secret entered compiled config volume %s", volume)
+		}
+		if value := files["state-plan.json"]; bytes.Contains(value, secret) {
+			t.Fatalf("secret entered plan config volume %s", volume)
+		}
+	}
+	for _, mount := range plan.Mounts {
+		if mount.Service == "agent" {
+			t.Fatal("agent received state")
+		}
+		if stringsContainsSecret(mount.Service+mount.Volume+mount.Subpath+mount.Target, secret) {
+			t.Fatal("secret entered mount metadata")
+		}
+	}
+	assertMount := func(service, target string, readOnly bool) Mount {
+		t.Helper()
+		for _, mount := range plan.Mounts {
+			if mount.Service == service && mount.Target == target {
+				if mount.ReadOnly != readOnly {
+					t.Fatalf("mount %s/%s readOnly=%v", service, target, mount.ReadOnly)
+				}
+				return mount
+			}
+		}
+		t.Fatalf("missing mount %s/%s", service, target)
+		return Mount{}
+	}
+	seed := assertMount("credential-portal", "/seed", false)
+	brokerSeed := assertMount("broker", "/portal-seed", true)
+	if seed.Volume != brokerSeed.Volume {
+		t.Fatal("portal seed and broker import storage diverged")
+	}
+	assertMount("broker", "/private", false)
+	assertMount("credential-portal", "/etc/nvt-local/credential-portal.json", true)
+	sources := map[string][]byte{}
+	for name, volume := range store.volumes {
+		if volume.Role == "generated-private-source" {
+			sources[name] = append([]byte(nil), store.files[name]["value"]...)
+		}
+	}
+	if len(sources) != 6 {
+		t.Fatalf("generated source count = %d", len(sources))
+	}
+	var staticVolume string
+	for _, mount := range plan.Mounts {
+		if mount.Service == "broker" && mount.Target == privateTarget("github-key") {
+			staticVolume = mount.Volume
+		}
+	}
+	if staticVolume == "" || !bytes.Equal(store.files[staticVolume]["value"], secret) {
+		t.Fatal("static private input was not stored exactly")
+	}
+	replacementSecret := []byte("REPLACED-PRIVATE-VALUE")
+	clear(inputs.private[inputKey{owner: "broker", name: "github-key"}])
+	inputs.private[inputKey{owner: "broker", name: "github-key"}] = append([]byte(nil), replacementSecret...)
+
+	manager.Random = bytes.NewReader(bytes.Repeat([]byte{0x22}, 4096))
+	if _, err := manager.Ensure(context.Background(), "local-test", compiled, inputs); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(store.files[staticVolume]["value"], replacementSecret) {
+		t.Fatal("static input replacement was not applied")
+	}
+	for _, files := range store.files {
+		for name, value := range files {
+			if name != "value" && bytes.Contains(value, replacementSecret) {
+				t.Fatal("replacement secret entered generated configuration")
+			}
+		}
+	}
+	for name, value := range sources {
+		if !bytes.Equal(store.files[name]["value"], value) {
+			t.Fatalf("restart rotated %s", name)
+		}
+	}
+
+	var replacedCopy string
+	for name, volume := range store.volumes {
+		if volume.Role == "generated-private-input" {
+			replacedCopy = name
+			break
+		}
+	}
+	delete(store.volumes, replacedCopy)
+	delete(store.files, replacedCopy)
+	if _, err := manager.Ensure(context.Background(), "local-test", compiled, inputs); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.files[replacedCopy]["value"]) == 0 {
+		t.Fatal("replacement consumer volume was not restored")
+	}
+}
+
+func TestManagerFailsBeforeWritesOnOwnershipConflict(t *testing.T) {
+	store := newMemoryStore()
+	store.conflict = true
+	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	if _, err := (Manager{Store: store}).Ensure(context.Background(), "local-test", compiled, inputs); err == nil {
+		t.Fatal("ownership conflict accepted")
+	}
+	if store.writes != 0 {
+		t.Fatal("state changed before ownership validation")
+	}
+}
+
+func TestPlanOmitsCredentialPortalStateWithoutOAuthAccounts(t *testing.T) {
+	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	plan, err := BuildPlan("local-test", compiled, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, volume := range plan.Volumes {
+		if stringsContains(volume.Name, "credential-seeds") || volume.Owner == "credential-portal" || containsString(volume.Consumers, "credential-portal") || containsString(volume.Consumers, "credential-runner") {
+			t.Fatalf("disabled portal received volume: %#v", volume)
+		}
+	}
+	for _, mount := range plan.Mounts {
+		if mount.Service == "credential-portal" || mount.Service == "credential-runner" || stringsContains(mount.Volume+mount.Target, "credential") {
+			t.Fatalf("disabled portal received mount: %#v", mount)
+		}
+	}
+	files, err := configurationFiles(compiled, inputs, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if file.Name == "credential-portal.json" {
+			t.Fatal("disabled portal received configuration")
+		}
+	}
+}
+
+func TestPortalConfigurationUsesUniqueCanonicalLocalDestinations(t *testing.T) {
+	raw, err := portalConfiguration([]manifest.PortalAccountIntent{{Name: "codex.second", Preset: "codex-oauth"}, {Name: "codex", Preset: "codex-oauth"}, {Name: "claude", Preset: "claude-oauth"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Slots []struct {
+			Name           string `json:"name"`
+			DataKey        string `json:"dataKey"`
+			BrokerProvider string `json:"brokerProvider"`
+		} `json:"slots"`
+	}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	seenNames, seenKeys := map[string]bool{}, map[string]bool{}
+	for _, slot := range document.Slots {
+		if slot.Name == "" || stringsContains(slot.Name, ".") || seenNames[slot.Name] || seenKeys[slot.DataKey] || slot.BrokerProvider == "" {
+			t.Fatalf("invalid portal slot: %#v", slot)
+		}
+		seenNames[slot.Name], seenKeys[slot.DataKey] = true, true
+	}
+	if len(seenNames) != 3 {
+		t.Fatalf("slots = %#v", document.Slots)
+	}
+}
+
+func TestGeneratedSourceReplacementRotatesAllConsumersTogether(t *testing.T) {
+	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}, GeneratedPrivateInputs: []manifest.GeneratedPrivateInputIntent{{Owner: "local-platform-state", Name: "shared", Purpose: "test", Consumers: []string{"gateway", "local-controller"}}}}
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	store := newMemoryStore()
+	manager := Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x31}, 4096))}
+	plan, err := manager.Ensure(context.Background(), "local-test", compiled, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "local-test-generated-" + shortID("shared")
+	copies := []string{}
+	for _, mount := range plan.Mounts {
+		if mount.Target == privateTarget("shared") {
+			copies = append(copies, mount.Volume)
+		}
+	}
+	if source == "" || len(copies) != 2 {
+		t.Fatalf("source=%q copies=%v", source, copies)
+	}
+	old := append([]byte(nil), store.files[source]["value"]...)
+	delete(store.volumes, source)
+	delete(store.files, source)
+	manager.Random = bytes.NewReader(bytes.Repeat([]byte{0x42}, 4096))
+	if _, err := manager.Ensure(context.Background(), "local-test", compiled, inputs); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(store.files[source]["value"], old) {
+		t.Fatal("replaced source did not rotate")
+	}
+	for _, copyName := range copies {
+		if !bytes.Equal(store.files[copyName]["value"], store.files[source]["value"]) {
+			t.Fatal("consumer copies diverged after replacement")
+		}
+	}
+}
+
+func stringsContainsSecret(value string, secret []byte) bool {
+	return bytes.Contains([]byte(value), secret)
+}
+
+func stringsContains(value, target string) bool {
+	return bytes.Contains([]byte(value), []byte(target))
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
