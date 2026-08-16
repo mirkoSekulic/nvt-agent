@@ -266,23 +266,34 @@ func validateIntent(intent manifest.ProducerIntent) error {
 }
 
 func validateMounts(intent manifest.ProducerIntent, mounts []plancontract.Mount, volumes map[string]plancontract.Volume, project string) error {
-	expected := map[string]bool{
-		ConfigPath: true,
-		plancontract.PrivateTarget(intent.AdmissionCredential): true,
+	type expectedMount struct {
+		readOnly bool
+		volume   string
+	}
+	service := "producer:" + intent.Name
+	expected := map[string]expectedMount{
+		ConfigPath: {readOnly: true, volume: plancontract.VolumeName(project, plancontract.GeneratedConfigSuffix)},
+		plancontract.PrivateTarget(intent.AdmissionCredential): {
+			readOnly: true, volume: plancontract.VolumeName(project, plancontract.GeneratedInputSuffix(intent.AdmissionCredential, service)),
+		},
 	}
 	if intent.Kind == "github-comments" {
-		expected[plancontract.PrivateTarget(intent.GitHub.PrivateKeySecret)] = true
-		expected[StatePath] = false
+		expected[plancontract.PrivateTarget(intent.GitHub.PrivateKeySecret)] = expectedMount{
+			readOnly: true, volume: plancontract.VolumeName(project, plancontract.StaticInputSuffix(service, intent.GitHub.PrivateKeySecret)),
+		}
+		expected[StatePath] = expectedMount{volume: plancontract.VolumeName(project, plancontract.ProducerStateSuffix(intent.Name))}
 	} else {
 		for _, secret := range intent.Secrets {
-			expected[plancontract.PrivateTarget(secret)] = true
+			expected[plancontract.PrivateTarget(secret)] = expectedMount{
+				readOnly: true, volume: plancontract.VolumeName(project, plancontract.StaticInputSuffix(service, secret)),
+			}
 		}
 	}
 	seen := map[string]struct{}{}
 	for _, mount := range mounts {
-		readOnly, ok := expected[mount.Target]
+		planned, ok := expected[mount.Target]
 		volume, volumeOK := volumes[mount.Volume]
-		if !ok || !volumeOK || mount.ReadOnly != readOnly || mount.Volume == "" || mount.Target == "" ||
+		if !ok || !volumeOK || mount.ReadOnly != planned.readOnly || mount.Volume != planned.volume || mount.Target == "" ||
 			!validProducerVolume(volume, mount, intent, project) {
 			return errors.New("producer mount plan exceeds compiled intent")
 		}

@@ -144,6 +144,28 @@ func TestRenderComposeRejectsExpandedAuthority(t *testing.T) {
 	if _, err := RenderCompose(compiled, statePlan, Options{}); err == nil {
 		t.Fatal("non-credential volume was substituted for the admission credential")
 	}
+	compiled, statePlan = producerFixture()
+	firstTarget := plancontract.PrivateTarget("chat-hook")
+	secondTarget := plancontract.PrivateTarget("chat-secondary")
+	firstIndex, secondIndex := -1, -1
+	for index := range statePlan.Mounts {
+		if statePlan.Mounts[index].Service != "producer:chat" {
+			continue
+		}
+		switch statePlan.Mounts[index].Target {
+		case firstTarget:
+			firstIndex = index
+		case secondTarget:
+			secondIndex = index
+		}
+	}
+	if firstIndex < 0 || secondIndex < 0 {
+		t.Fatal("two-secret fixture is incomplete")
+	}
+	statePlan.Mounts[firstIndex].Volume, statePlan.Mounts[secondIndex].Volume = statePlan.Mounts[secondIndex].Volume, statePlan.Mounts[firstIndex].Volume
+	if _, err := RenderCompose(compiled, statePlan, Options{}); err == nil {
+		t.Fatal("same-role producer secret volume swap was accepted")
+	}
 }
 
 func producerFixture() (manifest.Compiled, plancontract.Plan) {
@@ -159,28 +181,41 @@ func producerFixture() (manifest.Compiled, plancontract.Plan) {
 		Owner: "producer:chat", Name: "chat", Kind: "oci",
 		Image:           "ghcr.io/example/chat@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1000, GID: 1000}, Workflow: "development",
-		PublicConfig: map[string]any{"prefix": "/agent"}, Secrets: map[string]string{"hook": "chat-hook"},
+		PublicConfig: map[string]any{"prefix": "/agent"}, Secrets: map[string]string{"hook": "chat-hook", "secondary": "chat-secondary"},
 		AdmissionCredential: "producer-admission:chat",
 	}
 	compiled := manifest.Compiled{Version: manifest.APIVersion, Producers: []manifest.ProducerIntent{external, github}}
 	statePlan := plancontract.Plan{Version: "1", Project: "local", Volumes: []plancontract.Volume{}, Mounts: []plancontract.Mount{}}
-	addMount := func(service, suffix, role, owner, subpath, target string, readOnly bool) {
-		volume := "local-" + suffix
+	addVolume := func(volume, role, owner string, consumers ...string) {
 		statePlan.Volumes = append(statePlan.Volumes, plancontract.Volume{
-			Name: volume, Role: role, Owner: owner, Consumers: []string{service},
+			Name: volume, Role: role, Owner: owner, Consumers: consumers,
 			Labels: map[string]string{
 				"nvt.dev/local-platform-owner": "local", "nvt.dev/local-platform-custodian": owner,
 				"nvt.dev/local-platform-role": role, "nvt.dev/local-platform-volume": volume, "nvt.dev/local-platform-version": "1",
 			},
 		})
+	}
+	addMount := func(service, volume, subpath, target string, readOnly bool) {
 		statePlan.Mounts = append(statePlan.Mounts, plancontract.Mount{Service: service, Volume: volume, Subpath: subpath, Target: target, ReadOnly: readOnly})
 	}
-	addMount("producer:chat", "chat-config", "generated-config", "local-platform-state", "current/producers/chat.json", ConfigPath, true)
-	addMount("producer:chat", "chat-token", "generated-private-input", "local-platform-state", "current/value", plancontract.PrivateTarget("producer-admission:chat"), true)
-	addMount("producer:chat", "chat-hook", "static-private-input", "producer:chat", "current/value", plancontract.PrivateTarget("chat-hook"), true)
-	addMount("producer:github", "github-config", "generated-config", "local-platform-state", "current/producers/github.json", ConfigPath, true)
-	addMount("producer:github", "github-token", "generated-private-input", "local-platform-state", "current/value", plancontract.PrivateTarget("producer-admission:github"), true)
-	addMount("producer:github", "github-key", "static-private-input", "producer:github", "current/value", plancontract.PrivateTarget("github-key"), true)
-	addMount("producer:github", "github-state", "producer-state", "producer:github", "", StatePath, false)
+	configVolume := plancontract.VolumeName("local", plancontract.GeneratedConfigSuffix)
+	addVolume(configVolume, "generated-config", "local-platform-state", "producer:chat", "producer:github")
+	addMount("producer:chat", configVolume, "current/producers/chat.json", ConfigPath, true)
+	addMount("producer:github", configVolume, "current/producers/github.json", ConfigPath, true)
+	for service, logicalName := range map[string]string{"producer:chat": "producer-admission:chat", "producer:github": "producer-admission:github"} {
+		volume := plancontract.VolumeName("local", plancontract.GeneratedInputSuffix(logicalName, service))
+		addVolume(volume, "generated-private-input", "local-platform-state", service)
+		addMount(service, volume, "current/value", plancontract.PrivateTarget(logicalName), true)
+	}
+	for service, logicalNames := range map[string][]string{"producer:chat": {"chat-hook", "chat-secondary"}, "producer:github": {"github-key"}} {
+		for _, logicalName := range logicalNames {
+			volume := plancontract.VolumeName("local", plancontract.StaticInputSuffix(service, logicalName))
+			addVolume(volume, "static-private-input", service, service)
+			addMount(service, volume, "current/value", plancontract.PrivateTarget(logicalName), true)
+		}
+	}
+	stateVolume := plancontract.VolumeName("local", plancontract.ProducerStateSuffix("github"))
+	addVolume(stateVolume, "producer-state", "producer:github", "producer:github")
+	addMount("producer:github", stateVolume, "", StatePath, false)
 	return compiled, statePlan
 }

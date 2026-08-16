@@ -51,3 +51,19 @@ func ShortID(value string) string {
 }
 
 func PrivateTarget(name string) string { return "/run/nvt-private/" + ShortID(name) }
+
+const GeneratedConfigSuffix = "generated-config"
+
+func StaticInputSuffix(owner, name string) string {
+	return "input-" + ShortID(owner+"\x00"+name)
+}
+
+func GeneratedInputSuffix(name, consumer string) string {
+	return "generated-" + ShortID(name+"\x00"+consumer)
+}
+
+func ProducerStateSuffix(name string) string {
+	return "producer-" + ShortID(name) + "-state"
+}
+
+func VolumeName(project, suffix string) string { return project + "-" + suffix }

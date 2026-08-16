@@ -115,7 +115,7 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 	for _, producer := range compiled.Producers {
 		configConsumers = append(configConsumers, "producer:"+producer.Name)
 	}
-	config := addVolume("generated-config", "generated-config", "local-platform-state", configConsumers...)
+	config := addVolume(plancontract.GeneratedConfigSuffix, "generated-config", "local-platform-state", configConsumers...)
 	result.configVolume = config.Name
 	addDirectoryMount := func(service string, volume Volume, target string, readOnly bool) {
 		result.Mounts = append(result.Mounts, Mount{Service: service, Volume: volume.Name, Target: target, ReadOnly: readOnly})
@@ -144,7 +144,7 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 			Target: "/etc/nvt-producer/config.json", ReadOnly: true,
 		})
 		if producer.Kind == "github-comments" {
-			state := addVolume("producer-"+shortID(producer.Name)+"-state", "producer-state", service, service)
+			state := addVolume(plancontract.ProducerStateSuffix(producer.Name), "producer-state", service, service)
 			result.directories = append(result.directories, directoryPlan{volume: state.Name, uid: producer.RuntimeIdentity.UID, gid: producer.RuntimeIdentity.GID, mode: 0o700})
 			addDirectoryMount(service, state, "/var/lib/nvt-producer", false)
 		}
@@ -179,7 +179,7 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 		if !identityOK {
 			return preparedPlan{}, errors.New("private input runtime identity is unavailable")
 		}
-		suffix := "input-" + shortID(input.Owner+"\x00"+input.Name)
+		suffix := plancontract.StaticInputSuffix(input.Owner, input.Name)
 		volume := addVolume(suffix, "static-private-input", input.Owner, input.Owner)
 		result.static = append(result.static, staticInput{input.Owner, input.Name, volume.Name, uid, gid})
 		result.Mounts = append(result.Mounts, Mount{Service: input.Owner, Volume: volume.Name, Subpath: "current/value", Target: privateTarget(input.Name), ReadOnly: true})
@@ -242,7 +242,7 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 			if !identityOK {
 				return preparedPlan{}, errors.New("generated private input runtime identity is unavailable")
 			}
-			copyVolume := addVolume("generated-"+shortID(input.name+"\x00"+consumer), "generated-private-input", "local-platform-state", consumer)
+			copyVolume := addVolume(plancontract.GeneratedInputSuffix(input.name, consumer), "generated-private-input", "local-platform-state", consumer)
 			entry.consumer = append(entry.consumer, consumerCopy{consumer, copyVolume.Name, uid, gid})
 			result.Mounts = append(result.Mounts, Mount{Service: consumer, Volume: copyVolume.Name, Subpath: "current/value", Target: privateTarget(input.name), ReadOnly: true})
 		}
