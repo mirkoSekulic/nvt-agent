@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 func TestValidFixtureCompilesDeterministically(t *testing.T) {
@@ -72,6 +74,9 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 		"built-in manual secret":                   strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    secrets: {key: github-key}", 1),
 		"missing runtime account":                  strings.Replace(string(valid), "      account: codex", "      account: github", 1),
 		"GitHub App missing checkout installation": strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent", "github: Altinn/nvt-agent", 1),
+		"external producer missing issuer":         strings.Replace(string(valid), "    allowedPrincipalIssuers: [https://chat.example]\n", "", 1),
+		"external producer unsafe issuer":          strings.Replace(string(valid), "https://chat.example", "http://chat.example", 1),
+		"built-in producer issuer override":        strings.Replace(string(valid), "    prefix: /nvtagent\n", "    prefix: /nvtagent\n    allowedPrincipalIssuers: [https://github.com]\n", 1),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -98,7 +103,8 @@ func TestCompiledSectionsAreOwnerSufficient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(compiled.Controller.Profiles) != 1 || compiled.Controller.Profiles[0].Profile.Runtime.Preset != "codex" || compiled.Controller.Profiles[0].DefaultCredentialProvider != "codex" || compiled.Controller.Profiles[0].EgressProxyProvider != "codex" || len(compiled.Controller.Profiles[0].CredentialProviders) != 3 || len(compiled.Controller.Profiles[0].BrokerGrants) != 2 || len(compiled.Controller.Repositories) != 2 {
+	controllerProfile := compiled.Controller.Profiles[0]
+	if len(compiled.Controller.Profiles) != 1 || controllerProfile.Profile.Runtime.Preset != "codex" || controllerProfile.RuntimeProvider == nil || controllerProfile.RuntimeProvider.Name != "codex" || controllerProfile.DefaultCredentialProvider != "github" || controllerProfile.EgressProxyProvider != "codex" || len(controllerProfile.CredentialProviders) != 2 || len(controllerProfile.BrokerGrants) != 3 || controllerProfile.BrokerGrants[0].Purpose != "runtime-injection" || len(compiled.Controller.Repositories) != 2 {
 		t.Fatalf("controller projection is incomplete: %#v", compiled.Controller)
 	}
 	if len(compiled.Broker.Profiles) != 1 || len(compiled.Broker.Profiles[0].Accounts) != 3 || len(compiled.Broker.Repositories) != 2 {
@@ -127,6 +133,45 @@ func TestCompiledSectionsAreOwnerSufficient(t *testing.T) {
 	}
 }
 
+func TestControllerProfileProjectionSatisfiesResolvedRunContract(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := compiled.Controller.Profiles[0]
+	profile := resolvedrun.Profile{Name: intent.Name, DefaultCredentialProvider: intent.DefaultCredentialProvider, AllowedBackends: []string{"local"}, DefaultBackend: "local", AllowedRetentions: []string{"disposable"}}
+	for _, provider := range intent.CredentialProviders {
+		var targets []string
+		for _, repository := range compiled.Controller.Repositories {
+			if repository.Account == provider.Name {
+				targets = append(targets, repository.CheckoutTarget)
+			}
+		}
+		profile.CredentialProviders = append(profile.CredentialProviders, resolvedrun.CredentialProviderMapping{Name: provider.Name, BrokerProvider: provider.Name, CredentialKind: "mediated", MatchTargets: targets})
+	}
+	for _, grant := range intent.BrokerGrants {
+		host := map[string]string{"codex-oauth": "api.openai.com:443", "github-app": "github.com:443", "azure-devops-pat": "dev.azure.com:443"}[grant.Preset]
+		profile.Broker.Grants = append(profile.Broker.Grants, resolvedrun.BrokerGrant{Provider: grant.Account, Repositories: grant.Repositories, Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: []string{host}, Git: grant.Purpose == "repository"})
+	}
+	profile.Egress = resolvedrun.Egress{Mode: "mediated", Transport: "forward-proxy", Enforced: true, ProxyProvider: intent.EgressProxyProvider, PairedEgressRequired: true}
+	configuration := resolvedrun.TrustedConfiguration{
+		Defaults: resolvedrun.PlatformDefaults{Image: "nvt-agent-runtime:latest", Runtime: resolvedrun.Runtime{Type: "local-agent", Autonomy: "trusted-local", User: "root"}, AgentConfig: []byte(`{"runtime":{"command":"bash","args":[]},"plugins":[]}`)},
+		Profiles: []resolvedrun.Profile{profile}, Workflows: []resolvedrun.Workflow{{Name: "development"}},
+		ExecutionBackends: []resolvedrun.ExecutionBackend{{Name: "local", Kind: "container"}}, RetentionPolicies: []resolvedrun.RetentionPolicy{{Name: "disposable"}},
+	}
+	if _, err := resolvedrun.NewResolver(configuration); err != nil {
+		t.Fatalf("controller-only projection produced invalid resolvedrun profile: %v profile=%#v", err, profile)
+	}
+}
+
 func TestControllerAdmissionsAreExactlyProducerScoped(t *testing.T) {
 	raw, err := os.ReadFile("testdata/valid.yaml")
 	if err != nil {
@@ -149,8 +194,9 @@ func TestControllerAdmissionsAreExactlyProducerScoped(t *testing.T) {
 		t.Fatalf("admission projection is incomplete: %#v", compiled.Controller.ProducerAdmissions)
 	}
 	want := map[string]string{"external-chat": "infrastructure", "nvt-comments": "nvt-development"}
+	wantIssuer := map[string]string{"external-chat": "https://chat.example", "nvt-comments": "https://github.com"}
 	for _, binding := range compiled.Controller.ProducerAdmissions {
-		if want[binding.Producer] != binding.Workflow || binding.Identity != "producer:"+binding.Producer || binding.Credential != "producer-admission:"+binding.Producer {
+		if want[binding.Producer] != binding.Workflow || binding.Identity != "producer:"+binding.Producer || binding.Credential != "producer-admission:"+binding.Producer || strings.Join(binding.AllowedPrincipalIssuers, ",") != wantIssuer[binding.Producer] {
 			t.Fatalf("invalid admission binding: %#v", binding)
 		}
 		delete(want, binding.Producer)

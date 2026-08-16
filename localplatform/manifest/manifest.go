@@ -61,13 +61,14 @@ type Account struct {
 }
 
 type Profile struct {
-	Runtime      Runtime  `json:"runtime"`
-	Accounts     []string `json:"accounts,omitempty"`
-	Tools        Tools    `json:"tools,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
-	Instructions *FileRef `json:"instructions,omitempty"`
-	Editor       Editor   `json:"editor,omitempty"`
-	Plugins      []string `json:"plugins,omitempty"`
+	Runtime                  Runtime  `json:"runtime"`
+	Accounts                 []string `json:"accounts,omitempty"`
+	DefaultRepositoryAccount string   `json:"defaultRepositoryAccount,omitempty"`
+	Tools                    Tools    `json:"tools,omitempty"`
+	Capabilities             []string `json:"capabilities,omitempty"`
+	Instructions             *FileRef `json:"instructions,omitempty"`
+	Editor                   Editor   `json:"editor,omitempty"`
+	Plugins                  []string `json:"plugins,omitempty"`
 }
 
 type Runtime struct {
@@ -112,16 +113,17 @@ type Workflow struct {
 }
 
 type Producer struct {
-	Name           string            `json:"name"`
-	Preset         string            `json:"preset,omitempty"`
-	Image          string            `json:"image,omitempty"`
-	Account        string            `json:"account,omitempty"`
-	Repository     string            `json:"repository,omitempty"`
-	Prefix         string            `json:"prefix,omitempty"`
-	AllowedAuthors []string          `json:"allowedAuthors,omitempty"`
-	Workflow       string            `json:"workflow"`
-	PublicConfig   map[string]any    `json:"publicConfig,omitempty"`
-	Secrets        map[string]string `json:"secrets,omitempty"`
+	Name                    string            `json:"name"`
+	Preset                  string            `json:"preset,omitempty"`
+	Image                   string            `json:"image,omitempty"`
+	Account                 string            `json:"account,omitempty"`
+	Repository              string            `json:"repository,omitempty"`
+	Prefix                  string            `json:"prefix,omitempty"`
+	AllowedAuthors          []string          `json:"allowedAuthors,omitempty"`
+	Workflow                string            `json:"workflow"`
+	AllowedPrincipalIssuers []string          `json:"allowedPrincipalIssuers,omitempty"`
+	PublicConfig            map[string]any    `json:"publicConfig,omitempty"`
+	Secrets                 map[string]string `json:"secrets,omitempty"`
 }
 
 // Decode parses exactly one bounded YAML document and validates all references.
@@ -343,6 +345,12 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("workflow %q profile does not allow repository account", name)
 		}
 	}
+	for name, profile := range m.Profiles {
+		repositoryAccounts := profileRepositoryAccounts(m, name)
+		if profile.DefaultRepositoryAccount != "" && !contains(repositoryAccounts, profile.DefaultRepositoryAccount) || len(repositoryAccounts) > 1 && profile.DefaultRepositoryAccount == "" || len(repositoryAccounts) == 0 && profile.DefaultRepositoryAccount != "" {
+			return fmt.Errorf("profile %q has an invalid default repository account", name)
+		}
+	}
 	seenProducers := map[string]struct{}{}
 	for _, producer := range m.Producers {
 		if !validName(producer.Name) || !has(m.Workflows, producer.Workflow) {
@@ -373,6 +381,19 @@ func (m Manifest) Validate() error {
 		if err := uniqueStrings(producer.AllowedAuthors); err != nil {
 			return err
 		}
+		if producer.Preset == "github-comments" && len(producer.AllowedPrincipalIssuers) != 0 {
+			return fmt.Errorf("built-in producer %q overrides its issuer policy", producer.Name)
+		}
+		if producer.Image != "" {
+			if len(producer.AllowedPrincipalIssuers) == 0 || len(producer.AllowedPrincipalIssuers) > 32 || uniqueStrings(producer.AllowedPrincipalIssuers) != nil {
+				return fmt.Errorf("external producer %q has invalid issuer policy", producer.Name)
+			}
+			for _, issuer := range producer.AllowedPrincipalIssuers {
+				if !validIssuer(issuer) {
+					return fmt.Errorf("external producer %q has invalid issuer", producer.Name)
+				}
+			}
+		}
 		for _, ref := range producer.Secrets {
 			if !has(m.Secrets, ref) {
 				return fmt.Errorf("producer %q references an unknown secret", producer.Name)
@@ -391,6 +412,10 @@ func (m Manifest) Validate() error {
 }
 
 func validName(v string) bool { return len(v) <= MaxNameBytes && namePattern.MatchString(v) }
+func validIssuer(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.String() == value && value == strings.TrimSpace(value) && !strings.ContainsAny(value, "\x00\r\n")
+}
 func validRuntimeAccount(profile Profile, accounts map[string]Account) bool {
 	if profile.Runtime.Preset == "shell" {
 		return profile.Runtime.Account == ""
@@ -413,6 +438,35 @@ func profileAllowsRepository(profile Profile, repository Repository) bool {
 	}
 	for _, account := range profile.Accounts {
 		if account == repository.Account {
+			return true
+		}
+	}
+	return false
+}
+func profileRepositoryAccounts(m Manifest, profileName string) []string {
+	seen := map[string]struct{}{}
+	add := func(repositoryName string) {
+		if account := m.Repositories[repositoryName].Account; account != "" {
+			seen[account] = struct{}{}
+		}
+	}
+	for _, workflow := range m.Workflows {
+		if workflow.Profile == profileName {
+			add(workflow.Repository)
+		}
+	}
+	for _, workstation := range m.Workstations {
+		if workstation.Profile == profileName {
+			for _, repository := range workstation.Repositories {
+				add(repository)
+			}
+		}
+	}
+	return SortedNames(seen)
+}
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
 			return true
 		}
 	}

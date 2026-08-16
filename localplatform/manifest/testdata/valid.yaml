@@ -23,6 +23,7 @@ profiles:
       autonomy: trusted-local
       account: codex
     accounts: [github, codex, azure]
+    defaultRepositoryAccount: github
     tools:
       packages: [jq, git]
       mise: [go@latest]
@@ -66,5 +67,6 @@ producers:
   - name: external-chat
     image: ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     workflow: nvt-development
+    allowedPrincipalIssuers: [https://chat.example]
     publicConfig:
       commandPrefix: /agent

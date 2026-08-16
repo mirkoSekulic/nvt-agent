@@ -20,10 +20,13 @@ referenced private value is accepted or emitted. The explicitly named
 
 Every Codex or Claude profile explicitly selects one compatible runtime account
 from its account list. Shell profiles select none. The controller projection
-duplicates the selected accounts' preset identities and that profile's exact
-broker grants, allowing local preset packaging to render credential providers,
-the default provider, broker policy, and egress proxy choice without consulting
-the broker-owned section.
+keeps that selection separate as the runtime/egress provider and emits its
+required injection grant. Git credential mappings are derived only from
+repository accounts. When multiple repository accounts are selected, the
+profile must declare `defaultRepositoryAccount`; it is never inferred from the
+runtime account. The projection duplicates preset identities and exact grants,
+allowing local preset packaging to render the existing resolved-run profile
+without consulting the broker-owned section.
 
 Each repository supplies an HTTPS URL, exact checkout target, optional checkout
 path and upstream, broker repository identity, and optional credential account.
@@ -58,9 +61,11 @@ owns its copy of that same logical key.
 
 The controller projection also contains one producer admission binding per
 producer: stable producer identity, exactly one workflow, and a logical
-generated credential name. The corresponding generated-private-input entry is
-owned by local-platform state and lists only the controller and that producer as
-consumers.
+generated credential name. Each binding contains a non-empty bounded principal
+issuer allowlist: `github-comments` expands to `https://github.com`, while an
+external OCI producer declares its issuers explicitly. The corresponding
+generated-private-input entry is owned by local-platform state and lists only
+the controller and that producer as consumers.
 
 Generated configuration belongs in administrator-owned Docker volumes. It is
 never written into `.broker`, the workspace, or another user-authored host
