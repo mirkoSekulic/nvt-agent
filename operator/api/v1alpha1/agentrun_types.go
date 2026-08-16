@@ -168,6 +168,15 @@ type AgentRunPrincipal struct {
 type AgentRunRuntime struct {
 	Type     string `json:"type"`
 	Autonomy string `json:"autonomy"`
+	// Model is an opaque runtime-owned model identifier. Omitted preserves the
+	// runtime CLI's default model.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Model string `json:"model,omitempty"`
+	// Effort selects a runtime-supported reasoning effort. Omitted preserves the
+	// runtime CLI's default effort.
+	// +kubebuilder:validation:Enum=minimal;low;medium;high;xhigh;max
+	Effort string `json:"effort,omitempty"`
 	// User selects the container user: root (default, unchanged) or non-root
 	// (uid/gid 1000, HOME=/home/agent, passwordless sudo).
 	User AgentRunRuntimeUser `json:"user,omitempty"`

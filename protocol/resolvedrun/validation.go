@@ -194,6 +194,12 @@ func validateRuntime(value Runtime) error {
 		(value.User != "root" && value.User != "non-root") {
 		return errors.New("runtime autonomy or user is invalid")
 	}
+	if value.Model != "" && (!validBoundedText(value.Model, 256, false) || strings.TrimSpace(value.Model) != value.Model) {
+		return errors.New("runtime model is invalid")
+	}
+	if err := validateRuntimeSelection(value); err != nil {
+		return err
+	}
 	if value.Container != nil {
 		if len(value.Container.Capabilities) > maxRuntimeCapabilities ||
 			validateUniqueStrings(value.Container.Capabilities, func(item string) bool {
@@ -216,6 +222,25 @@ func validateRuntime(value Runtime) error {
 			}
 			seen[network.Name] = struct{}{}
 		}
+	}
+	return nil
+}
+
+func validateRuntimeSelection(value Runtime) error {
+	if value.Model == "" && value.Effort == "" {
+		return nil
+	}
+	switch value.Type {
+	case "codex":
+		if value.Effort != "" && !containsString([]string{"minimal", "low", "medium", "high", "xhigh"}, value.Effort) {
+			return errors.New("runtime effort is unsupported for codex")
+		}
+	case "claude":
+		if value.Effort != "" && !containsString([]string{"low", "medium", "high", "xhigh", "max"}, value.Effort) {
+			return errors.New("runtime effort is unsupported for claude")
+		}
+	default:
+		return errors.New("runtime model or effort selection is unsupported")
 	}
 	return nil
 }

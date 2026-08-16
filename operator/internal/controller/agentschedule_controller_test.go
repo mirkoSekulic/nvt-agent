@@ -147,6 +147,13 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if crdPath(t, properties, "profiles", "items", "properties", "agentRuntimeConfig", "x-kubernetes-preserve-unknown-fields") != true {
 		t.Fatalf("expected profile runtime config preservation schema, got %#v", properties["profiles"])
 	}
+	if crdPath(t, properties, "profiles", "items", "properties", "runtime", "properties", "model", "maxLength") != float64(256) {
+		t.Fatal("profile runtime model schema is missing")
+	}
+	effortEnum := crdPath(t, properties, "profiles", "items", "properties", "runtime", "properties", "effort", "enum").([]any)
+	if len(effortEnum) != 6 {
+		t.Fatalf("profile runtime effort schema = %#v", effortEnum)
+	}
 	profileCapabilities := crdPath(t, properties, "profiles", "items", "properties", "runtime", "properties",
 		"container", "properties", "capabilities", "properties", "add").(map[string]any)
 	if profileCapabilities["x-kubernetes-list-type"] != "set" ||

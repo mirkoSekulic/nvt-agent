@@ -93,6 +93,8 @@ workflow name is recorded separately in immutable `profileProvenance`.
 runtime:
   type: codex          # codex | claude
   autonomy: trusted-local
+  model: gpt-5.6-sol   # optional opaque runtime model identifier
+  effort: high         # optional runtime-supported effort
   user: root           # root | non-root
 ```
 
@@ -104,9 +106,26 @@ contract consumed by runtime bootstrap. `trusted-local` adds
 `--sandbox danger-full-access --ask-for-approval never` for Codex and
 `--dangerously-skip-permissions` for Claude; `interactive` adds no autonomy
 arguments. An explicitly configured `agent.config.runtime.args` list is a
-complete override and is preserved exactly, so the operator never appends
-potentially contradictory defaults. An explicit non-empty
+complete autonomy override. When `model` or `effort` is selected, the operator
+appends the corresponding selectors to both the fresh arguments and any
+configured `runtime.resume.args`. A raw model or effort selector in either list
+is rejected instead of relying on CLI argument order. When both typed fields
+are omitted, explicit arguments remain unchanged. An explicit non-empty
 `agent.config.runtime.command` is likewise preserved.
+
+For Claude Code the equivalent selection is:
+
+```yaml
+runtime:
+  type: claude
+  autonomy: trusted-local
+  model: opus
+  effort: high
+```
+
+Model names are runtime-owned opaque strings. Codex supports `minimal`, `low`,
+`medium`, `high`, and `xhigh` effort; Claude supports `low`, `medium`, `high`,
+`xhigh`, and `max`. Omitting either field leaves that CLI's default in effect.
 
 Optional `runtimeAuth` copies files from a same-namespace Secret into a
 writable runtime home:

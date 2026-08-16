@@ -112,6 +112,18 @@ Producer work, workflow selection, prompts, and agent input cannot add or
 override it. See the AgentRun documentation for the container-only portability
 and security limits.
 
+Profiles may optionally pin the runtime model and reasoning effort. These
+administrator-owned values are snapshotted into each AgentRun; producer input
+cannot supply or override them:
+
+```yaml
+profiles:
+  - name: codex-high
+    runtime: {type: codex, autonomy: trusted-local, model: gpt-5.6-sol, effort: high}
+  - name: claude-high
+    runtime: {type: claude, autonomy: trusted-local, model: opus, effort: high}
+```
+
 Forward-proxy and transparent execution profiles may set the generic
 `egressMaxConcurrentTunnels` bound from 1 through 4096. It is snapshotted into
 the AgentRun with the other profile-owned egress settings. Omission uses

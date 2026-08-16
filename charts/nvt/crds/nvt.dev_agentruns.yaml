@@ -82,6 +82,13 @@ spec:
                       x-kubernetes-preserve-unknown-fields: true
                 runtime:
                   type: object
+                  x-kubernetes-validations:
+                    - rule: "!has(self.effort) || self.type == 'codex' || self.type == 'claude'"
+                      message: selected runtime does not support effort
+                    - rule: "!has(self.effort) || self.type != 'codex' || self.effort in ['minimal', 'low', 'medium', 'high', 'xhigh']"
+                      message: codex effort must be minimal, low, medium, high, or xhigh
+                    - rule: "!has(self.effort) || self.type != 'claude' || self.effort in ['low', 'medium', 'high', 'xhigh', 'max']"
+                      message: claude effort must be low, medium, high, xhigh, or max
                   required:
                     - type
                     - autonomy
@@ -96,6 +103,19 @@ spec:
                       enum:
                         - trusted-local
                         - interactive
+                    model:
+                      type: string
+                      minLength: 1
+                      maxLength: 256
+                    effort:
+                      type: string
+                      enum:
+                        - minimal
+                        - low
+                        - medium
+                        - high
+                        - xhigh
+                        - max
                     user:
                       type: string
                       default: root

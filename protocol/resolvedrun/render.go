@@ -3,6 +3,7 @@ package resolvedrun
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 )
@@ -32,6 +33,9 @@ func RenderAgentConfig(run ResolvedAgentRun, bindings AgentConfigBindings) (json
 		return nil, ErrInvalidRenderBinding
 	}
 	runtime := cloneStringAnyMap(root["runtime"].(map[string]any))
+	if err := applyRuntimeSelection(runtime, run.Runtime); err != nil {
+		return nil, ErrInvalidRenderBinding
+	}
 	if run.Prompt != "" {
 		runtime["initial-prompt"] = map[string]any{"delivery": "argument", "text": run.Prompt}
 	}
@@ -51,6 +55,62 @@ func RenderAgentConfig(run ResolvedAgentRun, bindings AgentConfigBindings) (json
 		return nil, ErrInvalidRenderBinding
 	}
 	return rendered, nil
+}
+
+func applyRuntimeSelection(config map[string]any, selection Runtime) error {
+	if selection.Model == "" && selection.Effort == "" {
+		return nil
+	}
+	args, ok := stringArguments(config["args"])
+	if !ok {
+		return errors.New("runtime args are invalid")
+	}
+	updated, err := selectedRuntimeArguments(args, selection)
+	if err != nil {
+		return err
+	}
+	config["args"] = updated
+	if rawResume, exists := config["resume"]; exists {
+		resume, ok := rawResume.(map[string]any)
+		if !ok {
+			return errors.New("runtime resume is invalid")
+		}
+		resume = cloneStringAnyMap(resume)
+		resumeArgs, ok := stringArguments(resume["args"])
+		if !ok {
+			return errors.New("runtime resume args are invalid")
+		}
+		resumeArgs, err = selectedRuntimeArguments(resumeArgs, selection)
+		if err != nil {
+			return err
+		}
+		resume["args"] = resumeArgs
+		config["resume"] = resume
+	}
+	return nil
+}
+
+func stringArguments(raw any) ([]string, bool) {
+	if raw == nil {
+		return []string{}, true
+	}
+	args, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	result := make([]string, 0, len(args))
+	for _, rawArg := range args {
+		arg, ok := rawArg.(string)
+		if !ok {
+			return nil, false
+		}
+		result = append(result, arg)
+	}
+	return result, true
+}
+
+func selectedRuntimeArguments(args []string, selection Runtime) ([]string, error) {
+	return ApplyRuntimeSelectionArguments(args, selection)
 }
 
 func decodeAgentConfigObject(raw json.RawMessage) (map[string]any, error) {

@@ -40,6 +40,8 @@ spec:
       runtime:
         type: codex
         autonomy: trusted-local
+        model: gpt-5.6-sol
+        effort: high
       agentRuntimeConfig:
         command: codex
         proxy:
@@ -58,6 +60,8 @@ spec:
       runtime:
         type: claude
         autonomy: trusted-local
+        model: opus
+        effort: high
       agentRuntimeConfig:
         command: claude
         proxy:
