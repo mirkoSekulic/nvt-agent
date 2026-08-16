@@ -362,11 +362,11 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 		switch account.Preset {
 		case "codex-oauth":
 			providers = append(providers, map[string]any{"name": named.Name, "plugin": "codex-oauth", "config": map[string]any{
-				"auth-file": "/private/portal/" + plancontract.CredentialSlotName(named.Name) + ".json", "injection-hosts": []string{"chatgpt.com"},
+				"auth-file": "/private/portal/" + plancontract.CredentialSlotName(named.Name), "injection-hosts": []string{"chatgpt.com"},
 			}})
 		case "claude-oauth":
 			providers = append(providers, map[string]any{"name": named.Name, "plugin": "claude-oauth", "config": map[string]any{
-				"credentials-file": "/private/portal/" + plancontract.CredentialSlotName(named.Name) + ".json", "injection-hosts": []string{"api.anthropic.com", "mcp-proxy.anthropic.com"},
+				"credentials-file": "/private/portal/" + plancontract.CredentialSlotName(named.Name), "injection-hosts": []string{"api.anthropic.com", "mcp-proxy.anthropic.com"},
 				"injection-extra-headers": map[string]string{"anthropic-beta": "oauth-2025-04-20"},
 				"placeholder-file":        map[string]any{"path": ".claude/.credentials.json", "hosts": []string{"api.anthropic.com", "mcp-proxy.anthropic.com"}},
 			}})

@@ -40,7 +40,7 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		[]byte(`"token-file":"` + plancontract.PrivateTarget("azure-token") + `"`),
 		[]byte(`"app-id":3912708`),
 		[]byte(`"installation-id":123`),
-		[]byte(`"auth-file":"/private/portal/` + plancontract.CredentialSlotName("codex") + `.json"`),
+		[]byte(`"auth-file":"/private/portal/` + plancontract.CredentialSlotName("codex") + `"`),
 	} {
 		if !bytes.Contains(broker, expected) {
 			t.Fatalf("broker configuration omitted private file reference %s: %s", expected, broker)
@@ -48,6 +48,15 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	}
 	if bytes.Contains(broker, []byte(".nvt-local")) || bytes.Contains(broker, []byte("PRIVATE KEY")) {
 		t.Fatalf("host path or credential entered broker configuration: %s", broker)
+	}
+	if bytes.Contains(broker, []byte(plancontract.CredentialSlotName("codex")+".json")) {
+		t.Fatalf("broker OAuth path does not match the portal-persisted slot name: %s", broker)
+	}
+	claudeCompiled := compiled
+	claudeCompiled.Broker.Accounts = append(append([]manifest.NamedAccount(nil), compiled.Broker.Accounts...), manifest.NamedAccount{Name: "claude", Account: manifest.Account{Preset: "claude-oauth"}})
+	claudeBroker, err := serviceconfig.Broker(claudeCompiled)
+	if err != nil || !bytes.Contains(claudeBroker, []byte(`"credentials-file":"/private/portal/`+plancontract.CredentialSlotName("claude")+`"`)) || bytes.Contains(claudeBroker, []byte(plancontract.CredentialSlotName("claude")+".json")) {
+		t.Fatalf("Claude broker path does not match the portal-persisted slot name: %v %s", err, claudeBroker)
 	}
 
 	controller, err := serviceconfig.Controller(compiled, serviceconfig.Instructions{"development": "bounded instructions"})
@@ -79,10 +88,10 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	if got := agentConfig.Runtime.Resume.Args; len(got) != 3 || got[0] != "resume" || got[1] != "--last" || got[2] != "--dangerously-bypass-approvals-and-sandbox" {
 		t.Fatalf("Codex resume command is incomplete: %#v", got)
 	}
-	claudeCompiled := compiled
-	claudeCompiled.Controller.Profiles = append([]manifest.ControllerProfileIntent(nil), compiled.Controller.Profiles...)
-	claudeCompiled.Controller.Profiles[0].Profile.Runtime.Preset = "claude"
-	claudeController, err := serviceconfig.Controller(claudeCompiled, serviceconfig.Instructions{"development": "bounded instructions"})
+	claudeRuntimeCompiled := compiled
+	claudeRuntimeCompiled.Controller.Profiles = append([]manifest.ControllerProfileIntent(nil), compiled.Controller.Profiles...)
+	claudeRuntimeCompiled.Controller.Profiles[0].Profile.Runtime.Preset = "claude"
+	claudeController, err := serviceconfig.Controller(claudeRuntimeCompiled, serviceconfig.Instructions{"development": "bounded instructions"})
 	if err != nil {
 		t.Fatal(err)
 	}

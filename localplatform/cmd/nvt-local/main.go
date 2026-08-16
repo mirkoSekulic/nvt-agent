@@ -325,7 +325,7 @@ func (application app) ownedObjects(ctx context.Context, kind string) ([]string,
 				return nil, inspectErr
 			}
 			platformOwned := labels["nvt.dev/local-platform-owner"] == application.project && labels["nvt.dev/local-platform-version"] == "1"
-			runOwned := labels["nvt.dev/local-controller-owner"] == application.project && labels["nvt.dev/local-run-id"] != "" && regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(labels["nvt.dev/local-run-digest"])
+			runOwned := labels["nvt.dev/local-controller-owner"] == application.project && labels["nvt.dev/local-run-id"] != "" && digestPattern.MatchString(labels["nvt.dev/local-run-digest"])
 			if !platformOwned && !runOwned {
 				return nil, fmt.Errorf("refusing ambiguous local %s %s", kind, name)
 			}
@@ -341,7 +341,18 @@ func (application app) ownedObjects(ctx context.Context, kind string) ([]string,
 			seen[name] = struct{}{}
 		}
 	}
-	return sortedKeys(seen), nil
+	names := sortedKeys(seen)
+	if kind == "volume" {
+		configVolume := plancontract.VolumeName(application.project, plancontract.GeneratedConfigSuffix)
+		for index, name := range names {
+			if name == configVolume {
+				copy(names[index:], names[index+1:])
+				names[len(names)-1] = configVolume
+				break
+			}
+		}
+	}
+	return names, nil
 }
 
 func (application app) expectedPlatformVolumes(ctx context.Context) (map[string]map[string]string, error) {

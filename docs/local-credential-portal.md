@@ -10,6 +10,8 @@ labeled Docker volumes. OAuth values are written only to the portal seed
 volume, imported by the broker seed supervisor, and retained in broker-private
 canonical storage. They do not enter the workspace, generated configuration,
 command arguments, environment values, or agent containers.
+The portal persists each value under its generated slot name, and the broker
+provider reads that same extensionless canonical filename after seed import.
 
 `make local-down` preserves enrolled accounts. `make local-reset` explicitly
 destroys their exact-owned volumes with the selected local project. Kubernetes

@@ -82,7 +82,7 @@ func TestOwnedVolumesRequireCompletePersistedLabelMap(t *testing.T) {
 	}
 	docker := &resetDocker{project: project, plan: encoded, platformVolumes: []string{configName, brokerName, retiredName}, labels: map[string]map[string]string{configName: configLabels, brokerName: brokerLabels, retiredName: retiredLabels}}
 	application := app{project: project, docker: docker}
-	if names, err := application.ownedObjects(context.Background(), "volume"); err != nil || len(names) != 3 {
+	if names, err := application.ownedObjects(context.Background(), "volume"); err != nil || len(names) != 3 || names[len(names)-1] != configName {
 		t.Fatalf("exact volume inventory = %#v, %v", names, err)
 	}
 	if docker.outputLimit <= 64<<10 {
