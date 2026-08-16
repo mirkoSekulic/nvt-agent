@@ -1341,6 +1341,42 @@ func profiledAdmissionBody(t *testing.T, workID string, principal *scheduleAdmis
 	return mustJSON(t, profiledAdmissionPayload(workID, principal, input))
 }
 
+func TestProfiledAdmissionActiveWorkGroupPrecedesCapacityAndTerminalAllowsReplacement(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.MaxParallelism = 1
+	fixture := newProfileAdmissionFixture(t, schedule)
+	const group = "github:acme/widget:issue:7:intent:pr-continue"
+	// A pre-group pr-continue run used the stable group value as its work ID.
+	// Keep that active session mutually exclusive across the rolling upgrade.
+	active := scheduledRun("continue-active", schedule, group, nvtv1alpha1.AgentRunPhaseRunning)
+	if err := fixture.client.Create(context.Background(), active); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := profiledAdmissionPayload("continue-comment-202", nil, map[string]any{"prompt": "continue"})
+	payload["work"].(map[string]any)["group"] = group
+	response := fixture.serve(t, mustJSON(t, payload), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusAccepted, &decoded)
+	if decoded.Scheduled || decoded.Reason != "duplicate-work" {
+		t.Fatalf("active group at capacity = %#v", decoded)
+	}
+
+	active.Status.Phase = nvtv1alpha1.AgentRunPhaseCompleted
+	if err := fixture.client.Status().Update(context.Background(), active); err != nil {
+		t.Fatal(err)
+	}
+	response = fixture.serve(t, mustJSON(t, payload), "Bearer projected-token")
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	if !decoded.Scheduled || decoded.AgentRun == nil {
+		t.Fatalf("terminal group blocked replacement = %#v", decoded)
+	}
+	replacement := fixture.run(t, decoded.AgentRun.Name)
+	if replacement.Annotations[workGroupAnnotation] != group || replacement.Annotations[workIDAnnotation] != "continue-comment-202" {
+		t.Fatalf("replacement work metadata = %#v", replacement.Annotations)
+	}
+}
+
 func profiledAdmissionPayload(workID string, principal *scheduleAdmissionPrincipal, input map[string]any) map[string]any {
 	work := map[string]any{
 		"id": workID, "title": "Profiled work", "url": "https://example.test/work/1", "repository": "example/repo",

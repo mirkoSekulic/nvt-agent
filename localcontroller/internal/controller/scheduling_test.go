@@ -282,6 +282,53 @@ func TestLocalSchedulingAuthorizesSelectionIsIdempotentAndSupportsStatusCancel(t
 	}
 }
 
+func TestLocalSchedulingActiveWorkGroupPrecedesCapacityAndTerminalAllowsReplacement(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 1)
+	scheduler := testScheduler(t, store, schedulingTestToken)
+	handler := NewHTTPHandlerWithServices(store, nil, nil, nil, scheduler)
+	const group = "github:acme/widget:issue:7:intent:pr-continue"
+	// Before the group field existed, pr-continue used the stable group value as
+	// its work ID. A rolling upgrade must still recognize that active session.
+	firstBody := testAdmissionBodyWithWork(t, group, "")
+	secondBody := testAdmissionBodyWithWork(t, "continue-comment-202", group)
+
+	created := scheduleRequest(t, handler, http.MethodPost, "/v1/schedules/github/admissions", firstBody, schedulingTestToken)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("first admission = %d %s", created.Code, created.Body.String())
+	}
+	duplicate := scheduleRequest(t, handler, http.MethodPost, "/v1/schedules/github/admissions", secondBody, schedulingTestToken)
+	if duplicate.Code != http.StatusAccepted || duplicate.Body.String() != `{"scheduled":false,"reason":"duplicate-work"}`+"\n" {
+		t.Fatalf("active group at capacity = %d %s", duplicate.Code, duplicate.Body.String())
+	}
+
+	listed, err := store.List(context.Background(), 10, "")
+	if err != nil || len(listed.Runs) != 1 {
+		t.Fatalf("runs = %#v err=%v", listed, err)
+	}
+	stopping, _, err := store.Delete(context.Background(), listed.Runs[0].RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed := claimRun(t, store, stopping, "cleanup")
+	if _, err := store.UpdateStatus(context.Background(), StatusInput{
+		RunID: claimed.RunID, Owner: "cleanup", ExpectedRevision: claimed.Revision,
+		State: StateCompleted, Reason: "cleanup-complete",
+	}); !errors.Is(err, ErrGone) {
+		t.Fatalf("terminal transition = %v", err)
+	}
+
+	replacement := scheduleRequest(t, handler, http.MethodPost, "/v1/schedules/github/admissions", secondBody, schedulingTestToken)
+	if replacement.Code != http.StatusCreated {
+		t.Fatalf("replacement admission = %d %s", replacement.Code, replacement.Body.String())
+	}
+	thirdBody := testAdmissionBodyWithWork(t, "continue-comment-303", group)
+	duplicate = scheduleRequest(t, handler, http.MethodPost, "/v1/schedules/github/admissions", thirdBody, schedulingTestToken)
+	if duplicate.Code != http.StatusAccepted || !strings.Contains(duplicate.Body.String(), `"reason":"duplicate-work"`) {
+		t.Fatalf("replacement group was not exclusive = %d %s", duplicate.Code, duplicate.Body.String())
+	}
+}
+
 func TestWorkstationsAndDisposableSchedulesSharePolicyAcrossRestart(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 	store, path := openTestStore(t, clock, 8)
@@ -663,6 +710,21 @@ func testAdmissionBody(t *testing.T, issuer, subject, workflow, prompt string) [
 			"principal": map[string]any{"issuer": issuer, "subject": subject, "displayName": "Alice"},
 		},
 		"input": map[string]any{"prompt": prompt},
+	})
+}
+
+func testAdmissionBodyWithWork(t *testing.T, workID, group string) []byte {
+	t.Helper()
+	return mustJSON(t, map[string]any{
+		"workflow": "development",
+		"work": map[string]any{
+			"id": workID, "group": group, "title": "PR maintenance",
+			"url": "https://github.example/acme/widget/pull/7", "repository": "acme/widget",
+			"principal": map[string]any{
+				"issuer": "https://identity.example.test", "subject": "subject-1", "displayName": "Alice",
+			},
+		},
+		"input": map[string]any{"prompt": "Continue maintaining this PR"},
 	})
 }
 

@@ -81,7 +81,11 @@ func TestBuildIntentPromptsAreDelimitedAndCooperative(t *testing.T) {
 			for _, text := range []string{
 				"Check out the PR branch",
 				"PR comments",
+				"Do not use `gh-auth auth status`",
+				"explicit `--repo acme/widget`",
 				"Register `github-watch` for ongoing PR activity",
+				"github-watch register --repo acme/widget --number 9 --label work",
+				"Do not invoke `nvt-work complete` or `nvt-work fail`",
 				"merged or closed",
 			} {
 				if !strings.Contains(prompt, text) {
@@ -93,5 +97,15 @@ func TestBuildIntentPromptsAreDelimitedAndCooperative(t *testing.T) {
 		if !strings.Contains(prompt, "same source thread") || !strings.Contains(prompt, "exact user instructions") {
 			t.Fatalf("run prompt lacks source/result contract:\n%s", prompt)
 		}
+	}
+}
+
+func TestBuildPRContinuePromptUsesConfiguredControlPrefix(t *testing.T) {
+	prompt := BuildPrompt(PromptInput{
+		Intent: CommandIntentPRContinue, CommandPrefix: "/nvtlocal",
+		Owner: "acme", Repo: "widget", Issue: Issue{Number: 9},
+	})
+	if !strings.Contains(prompt, "commands like `/nvtlocal ...`") || strings.Contains(prompt, "commands like `/nvtagent ...`") {
+		t.Fatalf("prompt did not preserve configured prefix:\n%s", prompt)
 	}
 }

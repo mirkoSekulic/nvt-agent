@@ -134,7 +134,18 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 				p.Logger.Warn("help request missing parseable issue URL", "repo", key, "commentID", comment.ID)
 				continue
 			}
+			claimed, err := p.State.ClaimHelpResponse(ctx, key, comment.ID, p.now())
+			if err != nil {
+				return fmt.Errorf("claim help response: %w", err)
+			}
+			if !claimed {
+				p.Logger.Info("skipping duplicate help request already answered", "repo", key, "commentID", comment.ID, "issue", issueNumber)
+				continue
+			}
 			if err := p.GitHub.CreateIssueComment(ctx, repo, issueNumber, helpResponse(command.Prefix)); err != nil {
+				if releaseErr := p.State.ReleaseHelpResponse(ctx, key, comment.ID); releaseErr != nil {
+					return errors.Join(err, fmt.Errorf("release failed help response claim: %w", releaseErr))
+				}
 				return err
 			}
 			continue
@@ -246,26 +257,45 @@ func validCommandPlacement(intent CommandIntent, isPullRequest bool) bool {
 }
 
 func helpResponse(prefix string) string {
-	return "Available commands:\n\n" + strings.Join([]string{
-		"Syntax:",
+	return "```text\n" + strings.Join([]string{
+		"NVT GitHub Producer",
 		"",
-		fmt.Sprintf("%s --help", prefix),
+		"USAGE",
+		fmt.Sprintf("  %s --help", prefix),
+		fmt.Sprintf("  %s pr create [-- <instructions>]", prefix),
+		fmt.Sprintf("  %s review [-- <instructions>]", prefix),
+		fmt.Sprintf("  %s run -- <instructions>", prefix),
+		fmt.Sprintf("  %s pr continue [-- <instructions>]", prefix),
 		"",
-		"Commands:",
-		fmt.Sprintf("%s pr create -- <instructions>", prefix),
-		"  Create and ship a pull request from an ordinary issue thread.",
-		fmt.Sprintf("%s review", prefix),
-		"  Open a review workflow on the current PR and post findings as a PR comment.",
-		fmt.Sprintf("%s run -- <instructions>", prefix),
-		"  Execute one bounded cooperative task on issues and pull requests.",
-		fmt.Sprintf("%s pr continue -- <optional instructions>", prefix),
-		"  Enter PR maintenance mode, inspect prior reviews/comments/checks,",
-		"  address actionable items, register github-watch, and keep running.",
-		"- pr create is valid on ordinary issues.",
-		"- review and pr continue are valid only on pull requests.",
-		"- run is valid on issues and pull requests.",
-		"- pr continue runs a long-lived PR maintenance workflow.",
-	}, "\n")
+		"COMMANDS",
+		"  --help",
+		"      Show this command reference. Valid on issues and pull requests.",
+		"",
+		"  pr create",
+		"      Create and deliver a pull request. Valid only on ordinary issues.",
+		"      Additional instructions are optional.",
+		"",
+		"  review",
+		"      Review the current pull request and post findings without approving,",
+		"      requesting changes, or modifying product code. Valid only on pull requests.",
+		"      Additional focus instructions are optional.",
+		"",
+		"  run",
+		"      Perform one bounded task, post the result to the originating thread,",
+		"      and exit. Valid on issues and pull requests. Instructions are required.",
+		"",
+		"  pr continue",
+		"      Start a durable pull-request maintenance session. The agent checks out",
+		"      the PR branch, reads reviews, comments, and checks, addresses actionable",
+		"      issues, watches for later activity, and remains active until merge or close.",
+		"      Valid only on pull requests. Additional instructions are optional.",
+		"",
+		"INSTRUCTIONS",
+		"  Put the command on the first non-empty line. Add instructions either after",
+		"  a standalone -- on that line, or on the following lines. If both forms are",
+		"  used, the inline text is followed by a newline and then the multiline text.",
+		"  Bare trailing text without -- is invalid.",
+	}, "\n") + "\n```"
 }
 
 func (p *Poller) reactionForOutcome(outcome schedulingOutcome) string {

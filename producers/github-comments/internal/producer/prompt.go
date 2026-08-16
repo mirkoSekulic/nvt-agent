@@ -25,6 +25,7 @@ type IssueComment struct {
 
 type PromptInput struct {
 	Intent                 CommandIntent
+	CommandPrefix          string
 	Owner                  string
 	Repo                   string
 	Issue                  Issue
@@ -53,13 +54,19 @@ func BuildPrompt(input PromptInput) string {
 			"Only after that final comment succeeds, invoke `nvt-work complete`.",
 		}, " "))
 	case CommandIntentPRContinue:
+		prefix := firstNonEmpty(input.CommandPrefix, "/nvtagent")
+		repository := input.Owner + "/" + input.Repo
 		fmt.Fprint(&b, strings.Join([]string{
 			"Check out the PR branch and inspect the PR body, all existing PR comments, review threads, and checks.",
 			"Address current actionable issues and continue iterating until the issue is fully resolved.",
+			"After each maintenance pass, post a concise comment on the PR summarizing changes or explaining why no change was needed.",
+			"Do not use `gh-auth auth status` to test access; mediated grants may intentionally deny account identity probes.",
+			fmt.Sprintf("Run each required `gh-auth` repository command with an explicit `--repo %s`.", repository),
 			"Register `github-watch` for ongoing PR activity using:",
-			"  github-watch register --repo OWNER/REPO --number PR_NUMBER --label work",
+			fmt.Sprintf("  github-watch register --repo %s --number %d --label work", repository, input.Issue.Number),
 			"Keep the workflow alive until the pull request is merged or closed.",
-			"Ignoring control comments in this PR-thread (commands like `/nvtagent ...`) is required.",
+			"Do not invoke `nvt-work complete` or `nvt-work fail`; maintenance ends only when the PR is merged or closed.",
+			fmt.Sprintf("Ignore control comments in this PR thread (commands like `%s ...`) when handling watcher activity.", prefix),
 		}, " "))
 	default:
 		fmt.Fprint(&b, strings.Join([]string{

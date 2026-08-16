@@ -33,6 +33,7 @@ var (
 	ErrNotFound          = errors.New("local run not found")
 	ErrGone              = errors.New("local run was deleted")
 	ErrConflict          = errors.New("local run conflict")
+	ErrActiveGroup       = errors.New("local run active group already exists")
 	ErrCapacityExceeded  = errors.New("local run capacity exceeded")
 	ErrInvalidTransition = errors.New("invalid local-run state transition")
 	ErrOwnershipConflict = errors.New("local-run reconciliation ownership conflict")
@@ -73,6 +74,7 @@ func transitionAllowed(from, to State) bool {
 
 type CreateInput struct {
 	IdempotencyKey string
+	ActiveGroup    string
 	ResolvedRun    json.RawMessage
 }
 

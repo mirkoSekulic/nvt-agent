@@ -103,6 +103,7 @@ type scheduleAdmissionRequest struct {
 
 type scheduleAdmissionWork struct {
 	ID         string                     `json:"id"`
+	Group      string                     `json:"group,omitempty"`
 	Title      string                     `json:"title"`
 	URL        string                     `json:"url"`
 	Repository string                     `json:"repository"`
@@ -515,10 +516,21 @@ func (scheduler *Scheduler) admit(server *HTTPServer, response http.ResponseWrit
 		scheduler.writeResponse(server, response, http.StatusServiceUnavailable, scheduleAdmissionResponse{Reason: "scheduling-unavailable"})
 		return http.StatusServiceUnavailable, "scheduling-unavailable", ""
 	}
-	created, err := scheduler.store.Create(request.Context(), CreateInput{IdempotencyKey: key, ResolvedRun: encoded})
+	group := ""
+	if input.Work.Group != "" {
+		group, _ = localWorkIdentity(configured.name, policy.identity, input.Work.Group)
+	}
+	created, err := scheduler.store.Create(request.Context(), CreateInput{
+		IdempotencyKey: key,
+		ActiveGroup:    group,
+		ResolvedRun:    encoded,
+	})
 	clear(encoded)
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrActiveGroup):
+			scheduler.writeResponse(server, response, http.StatusAccepted, scheduleAdmissionResponse{Reason: "duplicate-work"})
+			return http.StatusAccepted, "duplicate-work", runID
 		case errors.Is(err, ErrCapacityExceeded):
 			scheduler.writeResponse(server, response, http.StatusTooManyRequests, scheduleAdmissionResponse{Reason: "max-parallelism-reached"})
 			return http.StatusTooManyRequests, "max-parallelism-reached", runID
@@ -582,7 +594,8 @@ func scheduleWorkQuery(request *http.Request) (string, bool) {
 }
 
 func validScheduleWork(value scheduleAdmissionWork) bool {
-	return validWorkID(value.ID) && validScheduleText(value.Title, 512, true) && validScheduleText(value.Repository, 512, false) &&
+	return validWorkID(value.ID) && (value.Group == "" || validWorkID(value.Group)) &&
+		validScheduleText(value.Title, 512, true) && validScheduleText(value.Repository, 512, false) &&
 		validScheduleURL(value.URL) && validIssuer(value.Principal.Issuer) && validScheduleText(value.Principal.Subject, 1024, false) &&
 		validScheduleText(value.Principal.DisplayName, 512, true)
 }

@@ -617,6 +617,53 @@ func TestSubmitScheduleAdmissionDuplicateWorkIsNoOpSuccess(t *testing.T) {
 	}
 }
 
+func TestSubmitScheduleAdmissionPRContinueSendsCommentWorkAndIssueGroup(t *testing.T) {
+	var gotWork profiledScheduleAdmissionWork
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var payload profiledScheduleAdmissionRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		gotWork = payload.Work
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"scheduled":true,"agentRun":{"namespace":"nvt","name":"ok"}}`))
+	}))
+	defer server.Close()
+	submitter := NewAgentRunSubmitterWithHTTP(nil, server.Client(), Config{
+		Submission: SubmissionConfig{
+			Mode:               SubmissionModeScheduleAdmission,
+			AdmissionMode:      AdmissionModeProfiled,
+			AdmissionBaseURL:   server.URL,
+			AdmissionTokenFile: writeTestAdmissionToken(t, testAdmissionToken("c2lnMQ")),
+			ScheduleName:       "default",
+			CommandWorkflows: map[CommandIntent]string{
+				CommandIntentPRContinue: "continue-pr",
+			},
+		},
+		AgentRun: AgentRunConfig{Namespace: "nvt"},
+	})
+	created, _, err := submitter.Submit(
+		context.Background(),
+		Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{Number: 7, PullRequest: &GitHubPullRequest{URL: "https://api.github.com/repos/acme/widget/pulls/7"}},
+		nil,
+		GitHubIssueComment{ID: 101, User: GitHubUser{ID: 42, Login: "alice"}},
+		Command{Prefix: "/nvtagent", Intent: CommandIntentPRContinue},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatalf("expected accepted schedule admission with created work")
+	}
+	if gotWork.ID != "github:acme/widget:issue:7:comment:101:intent:pr-continue" {
+		t.Fatalf("work id = %q", gotWork.ID)
+	}
+	if gotWork.Group != "github:acme/widget:issue:7:intent:pr-continue" {
+		t.Fatalf("work group = %q", gotWork.Group)
+	}
+}
+
 func TestSubmitScheduleAdmissionMaxParallelismIsDeferred(t *testing.T) {
 	submitter := scheduleAdmissionSubmitterForStatus(t, http.StatusTooManyRequests, `{"scheduled":false,"reason":"max-parallelism-reached"}`)
 	created, key, err := submitter.Submit(

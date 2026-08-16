@@ -53,6 +53,7 @@ type scheduleAdmissionRequest struct {
 
 type scheduleAdmissionWork struct {
 	ID         string                      `json:"id"`
+	Group      string                      `json:"group,omitempty"`
 	Title      string                      `json:"title,omitempty"`
 	URL        string                      `json:"url,omitempty"`
 	Repository string                      `json:"repository,omitempty"`
@@ -218,6 +219,25 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		http.Error(response, "missing work.id\n", http.StatusBadRequest)
 		return
 	}
+	workGroup := strings.TrimSpace(admission.Work.Group)
+	if admission.Work.Group != workGroup || workGroup != "" && !validAdmissionWorkKey(workGroup) {
+		http.Error(response, "invalid work.group\n", http.StatusBadRequest)
+		return
+	}
+
+	runs, err := ListScheduledRuns(ctx, reader, schedule)
+	if err != nil {
+		http.Error(response, "list scheduled AgentRuns failed\n", http.StatusInternalServerError)
+		return
+	}
+	if retainedWorkExists(runs, workID) || activeWorkGroupExists(runs, workGroup) {
+		h.recordRejected(ctx, schedule, "duplicate-work")
+		writeScheduleAdmissionJSON(response, http.StatusAccepted, scheduleAdmissionResponse{
+			Scheduled: false,
+			Reason:    "duplicate-work",
+		})
+		return
+	}
 
 	if schedule.Spec.Suspend {
 		h.recordRejected(ctx, schedule, "schedule-suspended")
@@ -254,11 +274,6 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		}
 	}
 
-	runs, err := ListScheduledRuns(ctx, reader, schedule)
-	if err != nil {
-		http.Error(response, "list scheduled AgentRuns failed\n", http.StatusInternalServerError)
-		return
-	}
 	activeRuns := countActiveScheduledRuns(runs)
 	if activeRuns >= EffectiveMaxParallelism(schedule) {
 		h.recordRejected(ctx, schedule, maxParallelismReachedReason)
@@ -276,15 +291,6 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		})
 		return
 	}
-	if retainedWorkExists(runs, workID) {
-		h.recordRejected(ctx, schedule, "duplicate-work")
-		writeScheduleAdmissionJSON(response, http.StatusAccepted, scheduleAdmissionResponse{
-			Scheduled: false,
-			Reason:    "duplicate-work",
-		})
-		return
-	}
-
 	var run nvtv1alpha1.AgentRun
 	if profiled {
 		if h.profileResolver == nil {
@@ -498,6 +504,7 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 	if err := PrepareScheduledAgentRun(schedule, &run, scheduleAdmissionWorkMetadata{
 		ID:         workID,
+		Group:      workGroup,
 		Title:      admission.Work.Title,
 		URL:        admission.Work.URL,
 		Repository: admission.Work.Repository,
@@ -568,7 +575,7 @@ func validateProfiledAdmissionShape(raw map[string]json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	if err := validateJSONKeys(work, "id", "title", "url", "repository", "principal"); err != nil {
+	if err := validateJSONKeys(work, "id", "group", "title", "url", "repository", "principal"); err != nil {
 		return err
 	}
 	if principalRaw, present := work["principal"]; present {
@@ -590,6 +597,18 @@ func validateProfiledAdmissionShape(raw map[string]json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+func validAdmissionWorkKey(value string) bool {
+	if len(value) < 16 || len(value) > 256 {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x21 || character > 0x7e || strings.ContainsRune("%\\?#", character) {
+			return false
+		}
+	}
+	return true
 }
 
 func rawJSONObject(raw json.RawMessage) (map[string]json.RawMessage, error) {

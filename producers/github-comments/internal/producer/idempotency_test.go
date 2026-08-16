@@ -35,13 +35,14 @@ func TestCommentIntentIdentitySeparatesCommands(t *testing.T) {
 	}
 }
 
-func TestIssueIntentIdentityPreventsDuplicateActivePRContinueWork(t *testing.T) {
-	got := IssueIntentIdempotencyKey("owner", "repo", 42, CommandIntentPRContinue)
-	if got != "github:owner/repo:issue:42:intent:pr-continue" {
-		t.Fatalf("issue intent key = %q", got)
+func TestPRContinueUsesDistinctWorkAndStableGroupKeys(t *testing.T) {
+	work := CommentIntentIdempotencyKey("owner", "repo", 42, 9001, CommandIntentPRContinue)
+	if work != "github:owner/repo:issue:42:comment:9001:intent:pr-continue" {
+		t.Fatalf("work key = %q", work)
 	}
-	if got := IssueIntentAgentRunName("owner", "repo", 42, CommandIntentPRContinue); got == "" {
-		t.Fatalf("issue intent name must be non-empty")
+	group := IssueIntentIdempotencyKey("owner", "repo", 42, CommandIntentPRContinue)
+	if group != "github:owner/repo:issue:42:intent:pr-continue" {
+		t.Fatalf("group key = %q", group)
 	}
 }
 

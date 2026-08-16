@@ -10,12 +10,13 @@ This producer polls GitHub issue comments with GitHub App installation authentic
 
 The default prefix is `/nvtagent`, but it is configuration only. GitHub-specific trigger logic lives in this producer, not in the operator or runtime image.
 
-Available producer commands:
+`/nvtagent --help` posts a formal command reference to the originating issue or
+pull request. Its usage section is:
 
 ```text
 /nvtagent --help
-/nvtagent pr create -- <instructions>
-/nvtagent review
+/nvtagent pr create [-- <instructions>]
+/nvtagent review [-- <instructions>]
 /nvtagent pr continue [-- <optional instructions>]
 /nvtagent run -- <instructions>
 ```
@@ -251,6 +252,11 @@ the PR thread and is expected to continue responding to new activity.
 Because it does not emit bounded work-completion events, it should use only
 `plugin.github.pr.merged` / `plugin.github.pr.closed` terminal completion and no
 work-control work-complete/fail lifecycle hooks.
+Each command comment has a distinct admission work ID. The producer also sends
+a stable, non-secret work group for that repository pull request. Both the
+operator and local controller reject a second active member of the group as an
+accepted duplicate before applying schedule capacity. Once the prior member is
+terminal, a later command comment can start a replacement maintenance session.
 
 Workflow selection only chooses administrator-authored workflow instructions;
 it does not enable plugins or lifecycle events. Cooperative `review` and `run`
