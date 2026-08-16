@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"strings"
 	"testing"
 
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
@@ -240,6 +241,57 @@ func TestManagerFailsBeforeWritesOnOwnershipConflict(t *testing.T) {
 	}
 	if store.writes != 0 {
 		t.Fatal("state changed before ownership validation")
+	}
+}
+
+func TestManagerRejectsExpandedGeneratedFileBeforeVolumeCreation(t *testing.T) {
+	document := manifest.Manifest{
+		APIVersion:   manifest.APIVersion,
+		Profiles:     map[string]manifest.Profile{},
+		Repositories: map[string]manifest.Repository{"repo": {GitHub: "owner/repo"}},
+		Workflows:    map[string]manifest.Workflow{"work": {Profile: "profile-000", Repository: "repo", Retention: "disposable"}},
+	}
+	instructionPath := "instructions/" + strings.Repeat("a", 3000)
+	for index := 0; index < manifest.MaxItems; index++ {
+		name := fmt.Sprintf("profile-%03d", index)
+		document.Profiles[name] = manifest.Profile{
+			Runtime:      manifest.Runtime{Preset: "shell", Autonomy: "read-only"},
+			Instructions: &manifest.FileRef{File: instructionPath},
+		}
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > manifest.MaxDocumentBytes {
+		t.Fatalf("test manifest exceeds accepted document size: %d", len(raw))
+	}
+	decoded, err := manifest.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("valid expanded manifest was rejected: %v", err)
+	}
+	compiled, err := manifest.Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := compiled.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(canonical) <= maxStateFileBytes {
+		t.Fatalf("test compiled.json did not exceed state-file limit: %d", len(canonical))
+	}
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	for _, input := range compiled.PrivateInputs {
+		inputs.Instructions = append(inputs.Instructions, Instruction{Owner: input.Owner, Name: input.Name, Content: []byte("instruction")})
+	}
+	defer inputs.Close()
+	store := newMemoryStore()
+	if _, err := (Manager{Store: store}).Ensure(context.Background(), "local-test", compiled, inputs); err == nil {
+		t.Fatal("oversized compiled.json was accepted")
+	}
+	if len(store.volumes) != 0 || len(store.directories) != 0 || store.writes != 0 {
+		t.Fatal("oversized generated state changed managed volumes")
 	}
 }
 

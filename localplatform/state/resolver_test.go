@@ -60,6 +60,47 @@ func TestResolveSeparatesInstructionsFromPrivateMaterial(t *testing.T) {
 	}
 }
 
+func TestResolveSnapshotsSharedSecretOnceAcrossOwners(t *testing.T) {
+	rootPath := t.TempDir()
+	name := ".nvt-local/secrets/shared"
+	full := filepath.Join(rootPath, filepath.FromSlash(name))
+	oldValue := []byte("old-shared-value")
+	newValue := []byte("new-shared-value")
+	mustWrite(t, full, 0o600, oldValue)
+	compiled := manifest.Compiled{PrivateInputs: []manifest.PrivateInputIntent{
+		{Owner: "broker", Name: "shared", File: "./" + name, Purpose: "secret"},
+		{Owner: "producer:external", Name: "shared", File: name, Purpose: "secret:shared"},
+	}}
+	reads := 0
+	inputs, err := resolveWithReader(filepath.Join(rootPath, "nvt.local.yaml"), compiled, func(root *os.Root, source string, maximum int64, rejectSymlinks, privateMode bool) ([]byte, error) {
+		reads++
+		content, readErr := readStable(root, source, maximum, rejectSymlinks, privateMode)
+		if readErr == nil && reads == 1 {
+			replacement := filepath.Join(rootPath, ".nvt-local", "secrets", "replacement")
+			mustWrite(t, replacement, 0o600, newValue)
+			if renameErr := os.Rename(replacement, full); renameErr != nil {
+				t.Fatal(renameErr)
+			}
+		}
+		return content, readErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inputs.Close()
+	if reads != 1 {
+		t.Fatalf("shared logical source reads = %d", reads)
+	}
+	broker := inputs.private[inputKey{owner: "broker", name: "shared"}]
+	producer := inputs.private[inputKey{owner: "producer:external", name: "shared"}]
+	if !bytes.Equal(broker, oldValue) || !bytes.Equal(producer, oldValue) || !bytes.Equal(broker, producer) {
+		t.Fatalf("shared secret projections diverged: broker=%q producer=%q", broker, producer)
+	}
+	if current, readErr := os.ReadFile(full); readErr != nil || !bytes.Equal(current, newValue) {
+		t.Fatalf("test rotation did not occur: value=%q err=%v", current, readErr)
+	}
+}
+
 func TestResolveRejectsUnsafeInputs(t *testing.T) {
 	cases := map[string]func(*testing.T, string) manifest.PrivateInputIntent{
 		"missing instruction": func(t *testing.T, root string) manifest.PrivateInputIntent {

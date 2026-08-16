@@ -44,10 +44,16 @@ type inputKey struct {
 	name  string
 }
 
+type stableInputReader func(*os.Root, string, int64, bool, bool) ([]byte, error)
+
 // Resolve opens all referenced files relative to the directory containing the
 // manifest. It reads each file through an os.Root, rechecks stable file
 // identity, and returns no partial result on failure.
 func Resolve(manifestPath string, compiled manifest.Compiled) (*Inputs, error) {
+	return resolveWithReader(manifestPath, compiled, readStable)
+}
+
+func resolveWithReader(manifestPath string, compiled manifest.Compiled, readInput stableInputReader) (*Inputs, error) {
 	absolute, err := filepath.Abs(manifestPath)
 	if err != nil || filepath.Base(absolute) == "." || filepath.Base(absolute) == string(filepath.Separator) {
 		return nil, errors.New("local manifest path is invalid")
@@ -69,6 +75,7 @@ func Resolve(manifestPath string, compiled manifest.Compiled) (*Inputs, error) {
 	}
 	seenInstructions := map[inputKey]struct{}{}
 	seenSecrets := map[inputKey]string{}
+	secretSnapshots := map[string][]byte{}
 	for _, input := range compiled.PrivateInputs {
 		key := inputKey{owner: input.Owner, name: input.Name}
 		if input.Purpose == "instructions" {
@@ -93,18 +100,24 @@ func Resolve(manifestPath string, compiled manifest.Compiled) (*Inputs, error) {
 		if !trustedPrivateOwner(input.Owner) || !safeInputPath(input.File, true) {
 			return fail("secret input ownership or path is unsafe")
 		}
+		source := filepath.Clean(strings.TrimPrefix(input.File, "./"))
 		if previous, exists := seenSecrets[key]; exists {
-			if previous != input.File {
+			if previous != source {
 				return fail("secret input has conflicting paths")
 			}
 			continue
 		}
-		content, readErr := readStable(root, input.File, MaxSecretBytes, true, true)
-		if readErr != nil || len(content) == 0 {
-			clear(content)
-			return fail("secret input is missing, unsafe, or oversized")
+		content, exists := secretSnapshots[source]
+		if !exists {
+			var readErr error
+			content, readErr = readInput(root, source, MaxSecretBytes, true, true)
+			if readErr != nil || len(content) == 0 {
+				clear(content)
+				return fail("secret input is missing, unsafe, or oversized")
+			}
+			secretSnapshots[source] = content
 		}
-		seenSecrets[key] = input.File
+		seenSecrets[key] = source
 		result.private[key] = content
 	}
 	sort.Slice(result.Instructions, func(i, j int) bool {

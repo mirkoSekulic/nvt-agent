@@ -180,6 +180,9 @@ func configurationFiles(compiled manifest.Compiled, inputs *Inputs, plan Plan) (
 	sort.Strings(names)
 	result := make([]StateFile, 0, len(names))
 	for _, name := range names {
+		if len(values[name]) > maxStateFileBytes {
+			return nil, errors.New("generated state file is oversized")
+		}
 		result = append(result, StateFile{Name: name, Mode: 0o444, UID: 0, GID: 0, Data: bytes.NewReader(values[name])})
 	}
 	return result, nil
