@@ -1,7 +1,9 @@
 package producer
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -82,9 +84,34 @@ func TestConfigurationsRejectsNonDNSProducerName(t *testing.T) {
 	}
 }
 
+func TestConfigurationsEnforcesControllerScheduleCapacity(t *testing.T) {
+	compiled := manifest.Compiled{Version: manifest.APIVersion}
+	for index := 0; index < manifest.MaxProducers; index++ {
+		name := fmt.Sprintf("producer-%02d", index)
+		compiled.Producers = append(compiled.Producers, manifest.ProducerIntent{
+			Owner: "producer:" + name, Name: name, Kind: "oci",
+			Image:           "ghcr.io/example/chat@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1000, GID: 1000}, Workflow: "development",
+			AdmissionCredential: "producer-admission:" + name,
+		})
+	}
+	if files, err := Configurations(compiled); err != nil || len(files) != manifest.MaxProducers {
+		t.Fatalf("render producer boundary: files=%d err=%v", len(files), err)
+	}
+	compiled.Producers = append(compiled.Producers, manifest.ProducerIntent{
+		Owner: "producer:overflow", Name: "overflow", Kind: "oci",
+		Image:           "ghcr.io/example/chat@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1000, GID: 1000}, Workflow: "development",
+		AdmissionCredential: "producer-admission:overflow",
+	})
+	if _, err := Configurations(compiled); err == nil {
+		t.Fatal("compiled producers exceeding controller schedule capacity were accepted")
+	}
+}
+
 func TestRenderComposeConfinesEveryProducer(t *testing.T) {
 	compiled, statePlan := producerFixture()
-	raw, err := RenderCompose(compiled, statePlan, Options{})
+	raw, err := RenderCompose(context.Background(), compiled, statePlan, renderOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +135,7 @@ func TestRenderComposeConfinesEveryProducer(t *testing.T) {
 		}
 	}
 	external := document.Services["producer-chat"]
-	if len(external.Environment) != 3 || external.Environment["NVT_SCHEDULE_ADMISSION_URL"] != "http://local-controller:7480/v1/schedules/chat/admissions" ||
+	if external.Image != testResolvedImageID || len(external.Environment) != 3 || external.Environment["NVT_SCHEDULE_ADMISSION_URL"] != "http://local-controller:7480/v1/schedules/chat/admissions" ||
 		external.Environment["NVT_SCHEDULE_ADMISSION_TOKEN_FILE"] != plancontract.PrivateTarget("producer-admission:chat") {
 		t.Fatalf("external environment = %#v", external.Environment)
 	}
@@ -132,18 +159,32 @@ func TestRenderComposeConfinesEveryProducer(t *testing.T) {
 	}
 }
 
+func TestRenderComposeRejectsImageDeclaredWritableVolumes(t *testing.T) {
+	compiled, statePlan := producerFixture()
+	if _, err := RenderCompose(context.Background(), compiled, statePlan, Options{}); err == nil {
+		t.Fatal("external producer without resolved image inspection was accepted")
+	}
+	options := renderOptions()
+	options.ImageInspector = ImageInspectorFunc(func(context.Context, string) (ResolvedImage, error) {
+		return ResolvedImage{ID: testResolvedImageID, DeclaredVolumes: []string{"/producer-state"}}, nil
+	})
+	if _, err := RenderCompose(context.Background(), compiled, statePlan, options); err == nil {
+		t.Fatal("external image-declared writable volume was accepted")
+	}
+}
+
 func TestRenderComposeRejectsExpandedAuthority(t *testing.T) {
 	compiled, statePlan := producerFixture()
 	statePlan.Mounts = append(statePlan.Mounts, plancontract.Mount{
 		Service: "producer:chat", Volume: "local-broker-private", Target: "/broker", ReadOnly: true,
 	})
 	statePlan.Volumes = append(statePlan.Volumes, plancontract.Volume{Name: "local-broker-private"})
-	if _, err := RenderCompose(compiled, statePlan, Options{}); err == nil {
+	if _, err := RenderCompose(context.Background(), compiled, statePlan, renderOptions()); err == nil {
 		t.Fatal("arbitrary broker mount was accepted")
 	}
 	compiled, statePlan = producerFixture()
 	compiled.Producers[0].Image = "ghcr.io/example/chat:latest"
-	if _, err := RenderCompose(compiled, statePlan, Options{}); err == nil {
+	if _, err := RenderCompose(context.Background(), compiled, statePlan, renderOptions()); err == nil {
 		t.Fatal("mutable external image was accepted")
 	}
 	compiled, statePlan = producerFixture()
@@ -152,7 +193,7 @@ func TestRenderComposeRejectsExpandedAuthority(t *testing.T) {
 			statePlan.Mounts[index].ReadOnly = false
 		}
 	}
-	if _, err := RenderCompose(compiled, statePlan, Options{}); err == nil {
+	if _, err := RenderCompose(context.Background(), compiled, statePlan, renderOptions()); err == nil {
 		t.Fatal("writable admission credential was accepted")
 	}
 	compiled, statePlan = producerFixture()
@@ -167,7 +208,7 @@ func TestRenderComposeRejectsExpandedAuthority(t *testing.T) {
 			statePlan.Mounts[index].Volume = configVolume
 		}
 	}
-	if _, err := RenderCompose(compiled, statePlan, Options{}); err == nil {
+	if _, err := RenderCompose(context.Background(), compiled, statePlan, renderOptions()); err == nil {
 		t.Fatal("non-credential volume was substituted for the admission credential")
 	}
 	compiled, statePlan = producerFixture()
@@ -189,9 +230,17 @@ func TestRenderComposeRejectsExpandedAuthority(t *testing.T) {
 		t.Fatal("two-secret fixture is incomplete")
 	}
 	statePlan.Mounts[firstIndex].Volume, statePlan.Mounts[secondIndex].Volume = statePlan.Mounts[secondIndex].Volume, statePlan.Mounts[firstIndex].Volume
-	if _, err := RenderCompose(compiled, statePlan, Options{}); err == nil {
+	if _, err := RenderCompose(context.Background(), compiled, statePlan, renderOptions()); err == nil {
 		t.Fatal("same-role producer secret volume swap was accepted")
 	}
+}
+
+const testResolvedImageID = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+func renderOptions() Options {
+	return Options{ImageInspector: ImageInspectorFunc(func(context.Context, string) (ResolvedImage, error) {
+		return ResolvedImage{ID: testResolvedImageID}, nil
+	})}
 }
 
 func producerFixture() (manifest.Compiled, plancontract.Plan) {

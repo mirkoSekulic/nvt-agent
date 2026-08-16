@@ -15,6 +15,8 @@ import (
 	producerrender "github.com/mirkoSekulic/nvt-agent/localplatform/producer"
 )
 
+var _ producerrender.ImageInspectRunner = DockerCLI{}
+
 type memoryStore struct {
 	volumes     map[string]Volume
 	files       map[string]map[string][]byte
@@ -138,7 +140,11 @@ func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	producerCompose, err := producerrender.RenderCompose(compiled, plan, producerrender.Options{})
+	producerCompose, err := producerrender.RenderCompose(context.Background(), compiled, plan, producerrender.Options{
+		ImageInspector: producerrender.ImageInspectorFunc(func(context.Context, string) (producerrender.ResolvedImage, error) {
+			return producerrender.ResolvedImage{ID: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, nil
+		}),
+	})
 	if err != nil || !bytes.Contains(producerCompose, []byte("producer-test")) {
 		t.Fatalf("managed plan did not render producer Compose: %v %s", err, producerCompose)
 	}

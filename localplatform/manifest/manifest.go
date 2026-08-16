@@ -26,6 +26,7 @@ const (
 	MaxDocumentNodes = 32768
 	MaxDocumentDepth = 64
 	MaxItems         = 256
+	MaxProducers     = 64
 	MaxNameBytes     = 63
 	MaxStringBytes   = 4096
 )
@@ -243,6 +244,9 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("too many %s", label)
 		}
 	}
+	if len(m.Producers) > MaxProducers {
+		return errors.New("too many producers")
+	}
 	for name, secret := range m.Secrets {
 		if !validName(name) || !safeRelativePath(secret.File, ".nvt-local/secrets/") {
 			return fmt.Errorf("invalid secret %q", name)
@@ -285,7 +289,7 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, profile := range m.Profiles {
-		if !validName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required", "read-only") {
+		if !validRunIDName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required", "read-only") {
 			return fmt.Errorf("invalid profile %q", name)
 		}
 		if err := uniqueRefs(profile.Accounts, m.Accounts, "account"); err != nil {

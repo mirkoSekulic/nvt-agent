@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -54,6 +55,8 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dottedProfile := strings.Replace(string(valid), "  development:\n    runtime:", "  engineering.team:\n    runtime:", 1)
+	dottedProfile = strings.ReplaceAll(dottedProfile, "profile: development", "profile: engineering.team")
 	cases := map[string]string{
 		"unknown field":                              strings.Replace(string(valid), "apiVersion:", "unexpected: true\napiVersion:", 1),
 		"duplicate key":                              strings.Replace(string(valid), "apiVersion: nvt.dev/local/v1", "apiVersion: nvt.dev/local/v1\napiVersion: nvt.dev/local/v1", 1),
@@ -69,6 +72,7 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 		"unknown repository":                         strings.Replace(string(valid), "repository: nvt-agent", "repository: absent", 1),
 		"non-DNS workflow name":                      strings.ReplaceAll(string(valid), "nvt-development", "nvt.development"),
 		"non-DNS producer name":                      strings.Replace(string(valid), "name: nvt-comments", "name: nvt.comments", 1),
+		"non-DNS profile name":                       dottedProfile,
 		"undeclared external config":                 strings.Replace(string(valid), "publicConfig:", "config:", 1),
 		"GitHub repository Azure account":            strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent\n    account: github", "github: mirkoSekulic/nvt-agent\n    account: azure", 1),
 		"Azure repository GitHub account":            strings.Replace(string(valid), "path: infrastructure\n    account: azure", "path: infrastructure\n    account: github", 1),
@@ -92,6 +96,34 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 	}
 	if _, err := Decode(bytes.NewReader(bytes.Repeat([]byte{'x'}, MaxDocumentBytes+1))); err == nil {
 		t.Fatal("oversized input accepted")
+	}
+}
+
+func TestProducerLimitMatchesControllerScheduleCapacity(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prototype := decoded.Producers[1]
+	decoded.Producers = make([]Producer, 0, MaxProducers+1)
+	for index := 0; index < MaxProducers; index++ {
+		producer := prototype
+		producer.Name = fmt.Sprintf("producer-%02d", index)
+		decoded.Producers = append(decoded.Producers, producer)
+	}
+	compiled, err := Compile(decoded)
+	if err != nil || len(compiled.Producers) != MaxProducers {
+		t.Fatalf("compile producer boundary: producers=%d err=%v", len(compiled.Producers), err)
+	}
+	producer := prototype
+	producer.Name = "producer-64"
+	decoded.Producers = append(decoded.Producers, producer)
+	if _, err := Compile(decoded); err == nil {
+		t.Fatal("manifest exceeding controller schedule capacity was accepted")
 	}
 }
 

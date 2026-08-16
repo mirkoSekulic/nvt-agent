@@ -3,6 +3,7 @@
 package producer
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/url"
@@ -30,6 +31,7 @@ type Options struct {
 	ControlNetwork      string
 	EgressNetwork       string
 	GitHubCommentsImage string
+	ImageInspector      ImageInspector
 }
 
 type ConfigFile struct {
@@ -96,7 +98,7 @@ type composeVolumeSpec struct {
 // Configurations renders one non-secret, read-only configuration file per
 // producer. Private inputs are represented only by their fixed mount paths.
 func Configurations(compiled manifest.Compiled) ([]ConfigFile, error) {
-	if compiled.Version != manifest.APIVersion || len(compiled.Producers) > manifest.MaxItems {
+	if compiled.Version != manifest.APIVersion || len(compiled.Producers) > manifest.MaxProducers {
 		return nil, errors.New("compiled producer configuration is invalid")
 	}
 	producers := append([]manifest.ProducerIntent(nil), compiled.Producers...)
@@ -162,9 +164,9 @@ func githubConfiguration(intent manifest.ProducerIntent) map[string]any {
 
 // RenderCompose emits an independently reviewable producer-only Compose
 // document. Every volume is selected from the exact redacted state plan.
-func RenderCompose(compiled manifest.Compiled, statePlan plancontract.Plan, options Options) ([]byte, error) {
+func RenderCompose(ctx context.Context, compiled manifest.Compiled, statePlan plancontract.Plan, options Options) ([]byte, error) {
 	options = withDefaults(options, statePlan.Project)
-	if err := validateOptions(options); err != nil || compiled.Version != manifest.APIVersion || statePlan.Version != "1" || !localProjectPattern.MatchString(statePlan.Project) {
+	if ctx == nil || validateOptions(options) != nil || compiled.Version != manifest.APIVersion || statePlan.Version != "1" || !localProjectPattern.MatchString(statePlan.Project) {
 		return nil, errors.New("producer renderer configuration is invalid")
 	}
 	if _, err := Configurations(compiled); err != nil {
@@ -204,6 +206,15 @@ func RenderCompose(compiled manifest.Compiled, statePlan plancontract.Plan, opti
 		if intent.Kind == "github-comments" {
 			image = options.GitHubCommentsImage
 			environment = map[string]string{"NVT_GITHUB_COMMENTS_CONFIG": ConfigPath}
+		} else {
+			if options.ImageInspector == nil {
+				return nil, errors.New("external producer image inspection is unavailable")
+			}
+			resolved, inspectErr := options.ImageInspector.InspectImage(ctx, intent.Image)
+			if inspectErr != nil || !validExternalImageConfiguration(resolved) {
+				return nil, errors.New("external producer image configuration is invalid")
+			}
+			image = resolved.ID
 		}
 		composeMounts := make([]composeMount, 0, len(mounts))
 		for _, mount := range mounts {

@@ -53,6 +53,15 @@ producers:
 	if !validRunID(admission.Producer) {
 		t.Fatalf("compiled producer %q is not a valid schedule name", admission.Producer)
 	}
+	selectedProfile := ""
+	for _, workflow := range compiled.Controller.Workflows {
+		if workflow.Name == admission.Workflow {
+			selectedProfile = workflow.Workflow.Profile
+		}
+	}
+	if !validRunID(selectedProfile) {
+		t.Fatalf("compiled profile %q is not valid schedule authorization", selectedProfile)
+	}
 
 	clock := &fakeClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)
@@ -64,7 +73,7 @@ producers:
 	document := testNativeConfiguration()
 	document.Schedules = []scheduleConfig{{Name: admission.Producer, Producers: []scheduleProducerConfig{{
 		Identity: admission.Identity, TokenFile: tokenPath, AllowedPrincipalIssuers: admission.AllowedPrincipalIssuers,
-		Selections: []scheduleSelection{{Profile: "engineering", Workflow: admission.Workflow}}, DefaultWorkflow: admission.Workflow,
+		Selections: []scheduleSelection{{Profile: selectedProfile, Workflow: admission.Workflow}}, DefaultWorkflow: admission.Workflow,
 		Retention: "disposable", Backend: "container",
 	}}}}
 	configPath := filepath.Join(directory, "local-controller.yaml")
@@ -78,6 +87,11 @@ producers:
 	dotted := strings.Replace(raw, "name: github-comments", "name: github.comments", 1)
 	if _, err := localmanifest.Decode(strings.NewReader(dotted)); err == nil {
 		t.Fatal("dotted producer name passed local-manifest decode")
+	}
+	dottedProfile := strings.Replace(raw, "engineering:", "engineering.team:", 1)
+	dottedProfile = strings.Replace(dottedProfile, "profile: engineering", "profile: engineering.team", 1)
+	if _, err := localmanifest.Decode(strings.NewReader(dottedProfile)); err == nil {
+		t.Fatal("dotted selected profile passed local-manifest decode")
 	}
 }
 

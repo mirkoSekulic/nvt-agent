@@ -18,6 +18,10 @@ workstations, disposable or retained workflows, the built-in
 explicitly named `publicConfig` boundary described below is
 administrator-asserted public data.
 
+Profile, workflow, and producer names use the controller's 63-byte lower-case
+run-ID grammar. A manifest declares at most 64 producers because each producer
+owns one distinct local-controller schedule.
+
 Every Codex or Claude profile explicitly selects one compatible runtime account
 from its account list. Shell profiles select none. The controller projection
 keeps that selection separate as the runtime/egress provider and emits its
@@ -193,6 +197,11 @@ the built-in preset has declared state semantics in v1.
 Every producer runs as its compiled non-root identity with a read-only root
 filesystem, all capabilities dropped, `no-new-privileges`, a bounded
 non-executable tmpfs, PID/CPU/memory limits, and a bounded stop grace period.
+Before rendering an external service, the digest-selected image must be
+resolved in the local daemon and its image configuration must declare no OCI
+volumes; the service is pinned to that inspected image ID. This prevents image
+metadata from adding writable anonymous volumes behind the reviewed mount
+plan.
 The fragment includes no host bind, Docker socket, broker/agent credential,
 service dependency, or another producer's volume. One producer therefore
 cannot read another producer's inputs, and its crash/restart lifecycle does not

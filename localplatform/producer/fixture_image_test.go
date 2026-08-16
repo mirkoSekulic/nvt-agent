@@ -2,6 +2,7 @@ package producer
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -82,26 +83,65 @@ func TestExternalProducerFixtureImageHasExactAdmissionAuthority(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build fixture image: %v\n%s", err, output)
 	}
-	inspect := exec.Command("docker", "image", "inspect", "--format", "{{.Id}}", image)
-	imageID, err := inspect.Output()
-	if err != nil || !strings.HasPrefix(strings.TrimSpace(string(imageID)), "sha256:") {
-		t.Fatalf("inspect fixture image: %v %q", err, imageID)
+	inspector := DockerImageInspector{Runner: fixtureDockerRunner{}}
+	resolved, err := inspector.InspectImage(context.Background(), image)
+	if err != nil || !validExternalImageConfiguration(resolved) {
+		t.Fatalf("inspect fixture image: resolved=%#v err=%v", resolved, err)
 	}
+	volumeImage := "nvt-local-external-producer-volume-fixture:test"
+	volumeBuild := exec.Command("docker", "build", "-t", volumeImage, "-")
+	volumeBuild.Stdin = strings.NewReader("FROM " + image + "\nVOLUME /producer-state\n")
+	if output, err := volumeBuild.CombinedOutput(); err != nil {
+		t.Fatalf("build volume fixture image: %v\n%s", err, output)
+	}
+	volumeResolved, err := inspector.InspectImage(context.Background(), volumeImage)
+	if err != nil || validExternalImageConfiguration(volumeResolved) || strings.Join(volumeResolved.DeclaredVolumes, ",") != "/producer-state" {
+		t.Fatalf("image-declared volume was not rejected: resolved=%#v err=%v", volumeResolved, err)
+	}
+
 	port := listener.Addr().(*net.TCPAddr).Port
-	run := exec.Command("docker", "run", "--rm", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+	create := exec.Command("docker", "create", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
 		"--user", fmt.Sprintf("%d:%d", fixtureUID, fixtureGID),
 		"--pids-limit=128", "--memory=256m", "--cpus=1", "--add-host=host.docker.internal:host-gateway",
 		"-e", "NVT_PRODUCER_CONFIG_FILE=/contract/config.json",
 		"-e", fmt.Sprintf("NVT_SCHEDULE_ADMISSION_URL=http://host.docker.internal:%d/admit", port),
 		"-e", "NVT_SCHEDULE_ADMISSION_TOKEN_FILE=/contract/token",
-		"-v", directory+":/contract:ro", strings.TrimSpace(string(imageID)))
-	output, err := run.CombinedOutput()
+		"-v", directory+":/contract:ro", resolved.ID)
+	created, err := create.CombinedOutput()
+	containerID := strings.TrimSpace(string(created))
+	if err != nil || containerID == "" {
+		t.Fatalf("create fixture container: %v output=%q", err, created)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+	inspectMounts := exec.Command("docker", "inspect", "--format", "{{json .Mounts}}", containerID)
+	mountOutput, err := inspectMounts.Output()
+	if err != nil {
+		t.Fatalf("inspect fixture mounts: %v", err)
+	}
+	var mounts []struct {
+		Type        string
+		Destination string
+		RW          bool
+	}
+	if err := json.Unmarshal(mountOutput, &mounts); err != nil || len(mounts) != 1 || mounts[0].Type != "bind" || mounts[0].Destination != "/contract" || mounts[0].RW {
+		t.Fatalf("fixture container mount set = %#v err=%v", mounts, err)
+	}
+	start := exec.Command("docker", "start", "--attach", containerID)
+	output, err := start.CombinedOutput()
 	if err != nil || string(bytes.TrimSpace(output)) != "authorized=1 denied=6" {
 		t.Fatalf("fixture run: %v output=%q", err, output)
 	}
 	if bytes.Contains(output, []byte(token)) || bytes.Contains(output, []byte("fixture-private-value")) {
 		t.Fatal("fixture disclosed private input")
 	}
+}
+
+type fixtureDockerRunner struct{}
+
+func (fixtureDockerRunner) Run(ctx context.Context, stdin io.Reader, arguments ...string) ([]byte, error) {
+	command := exec.CommandContext(ctx, "docker", arguments...)
+	command.Stdin = stdin
+	return command.CombinedOutput()
 }
 
 func fixtureAdmissionHandler(t *testing.T, token string) http.Handler {
