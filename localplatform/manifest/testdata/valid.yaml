@@ -2,41 +2,63 @@ apiVersion: nvt.dev/local/v1
 secrets:
   github-key:
     file: ./.nvt-local/secrets/github/main-app.pem
+  azure-token:
+    file: ./.nvt-local/secrets/azure/infra-pat
 accounts:
   github:
     preset: github-app
     appId: "3912708"
     privateKeySecret: github-key
     installations:
-      example: "123"
+      mirkoSekulic: "123"
   codex:
     preset: codex-oauth
+  azure:
+    preset: azure-devops-pat
+    tokenSecret: azure-token
 profiles:
   development:
     runtime:
       preset: codex
       autonomy: trusted-local
-    accounts: [github, codex]
+    accounts: [github, codex, azure]
     tools:
       packages: [jq, git]
       mise: [go@latest]
     capabilities: [SYS_PTRACE]
     instructions:
       file: ./.nvt-local/instructions/development.md
+repositories:
+  nvt-agent:
+    github: mirkoSekulic/nvt-agent
+    account: github
+  infrastructure:
+    url: https://dev.azure.com/example/platform/_git/infrastructure
+    checkoutTarget: dev.azure.com/example/platform/_git/infrastructure
+    brokerRepository: example/platform/infrastructure
+    path: infrastructure
+    account: azure
 workstations:
   - name: nvt
     profile: development
-    repositories: [mirkoSekulic/nvt-agent]
+    repositories: [nvt-agent]
+  - name: infra
+    profile: development
+    repositories: [infrastructure]
 workflows:
   nvt-development:
     profile: development
-    repository: mirkoSekulic/nvt-agent
+    repository: nvt-agent
     retention: disposable
+  infrastructure:
+    profile: development
+    repository: infrastructure
+    retention: retained
 producers:
   - name: nvt-comments
     preset: github-comments
     account: github
-    repository: mirkoSekulic/nvt-agent
+    repository: nvt-agent
     prefix: /nvtagent
     allowedAuthors: [mirkoSekulic]
     workflow: nvt-development
