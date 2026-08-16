@@ -17,13 +17,14 @@ type memoryStore struct {
 	volumes     map[string]Volume
 	files       map[string]map[string][]byte
 	directories map[string]directoryPlan
+	publishing  map[string]bool
 	conflict    bool
 	writes      int
 	failVolume  string
 }
 
 func newMemoryStore() *memoryStore {
-	return &memoryStore{volumes: map[string]Volume{}, files: map[string]map[string][]byte{}, directories: map[string]directoryPlan{}}
+	return &memoryStore{volumes: map[string]Volume{}, files: map[string]map[string][]byte{}, directories: map[string]directoryPlan{}, publishing: map[string]bool{}}
 }
 func (store *memoryStore) EnsureVolumes(_ context.Context, volumes []Volume) (map[string]bool, error) {
 	if store.conflict {
@@ -77,9 +78,20 @@ func (store *memoryStore) InspectPrivateSource(_ context.Context, volume Volume)
 		return PrivateSourceEmpty, nil
 	}
 	if bytes.Equal(files[".initialized"], privateSourceMarker(files["value"])) && len(files["value"]) > 0 {
+		if store.publishing[volume.Name] {
+			return PrivateSourcePublishing, nil
+		}
 		return PrivateSourceReady, nil
 	}
 	return PrivateSourceCorrupt, nil
+}
+
+func (store *memoryStore) FinalizePrivateSource(_ context.Context, volume Volume) error {
+	if state, _ := store.InspectPrivateSource(context.Background(), volume); state != PrivateSourcePublishing {
+		return errors.New("source is not publishing")
+	}
+	store.publishing[volume.Name] = false
+	return nil
 }
 
 func (store *memoryStore) InitializePrivateSource(ctx context.Context, volume Volume, files []StateFile) error {
@@ -253,6 +265,36 @@ func TestManagerRecoversEmptySourceAfterPartialWriteFailure(t *testing.T) {
 				t.Fatalf("source %s state=%v", name, state)
 			}
 		}
+	}
+}
+
+func TestManagerFinalizesInterruptedGeneratedSourcePublication(t *testing.T) {
+	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	store := newMemoryStore()
+	plan, err := preparePlan("local-test", compiled, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureVolumes(context.Background(), plan.Volumes); err != nil {
+		t.Fatal(err)
+	}
+	source := plan.generated[0].sourceVolume
+	value := []byte("interrupted-but-complete-generated-value")
+	store.files[source] = map[string][]byte{
+		".initialized": privateSourceMarker(value),
+		"value":        append([]byte(nil), value...),
+	}
+	store.publishing[source] = true
+	manager := Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x59}, 4096))}
+	if _, err := manager.Ensure(context.Background(), "local-test", compiled, inputs); err != nil {
+		t.Fatalf("interrupted publication was not recovered: %v", err)
+	}
+	if store.publishing[source] {
+		t.Fatal("source publication remained unfinished")
+	}
+	if !bytes.Equal(store.files[source]["value"], value) {
+		t.Fatal("publication recovery rotated the generated value")
 	}
 }
 

@@ -160,13 +160,16 @@ rm -rf /state/current.old`
 		script = `set -eu
 umask 077
 test ! -e /state/.initialized
+test ! -L /state/.initialized
 test ! -e /state/current
+test ! -L /state/current
 rm -rf /state/.next /state/current.old
 mkdir /state/.next
 tar -xpf - -C /state/.next
 test_private_source /state/.next/.initialized /state/.next/value
 mv /state/.next /state/current
-mv /state/current/.initialized /state/.initialized`
+ln /state/current/.initialized /state/.initialized
+rm /state/current/.initialized`
 	}
 	_, err := store.runHelper(ctx, bytes.NewReader(payload), []helperMount{{volume: volume, target: "/state"}}, script)
 	if err != nil {
@@ -195,10 +198,12 @@ func (store DockerStore) InspectPrivateSource(ctx context.Context, volume Volume
 		return PrivateSourceInvalid, errors.New("invalid private source")
 	}
 	script := `set -eu
-if [ ! -e /source/.initialized ] && [ ! -e /source/current ]; then
+if [ ! -e /source/.initialized ] && [ ! -L /source/.initialized ] && [ ! -e /source/current ] && [ ! -L /source/current ]; then
   printf 'empty'
-elif [ ! -L /source/.initialized ] && [ -f /source/.initialized ] && [ ! -L /source/current ] && [ -d /source/current ] && [ ! -L /source/current/value ] && [ -s /source/current/value ] && [ "$(stat -c '%u:%g:%a' /source/.initialized)" = '0:0:400' ] && [ "$(stat -c '%u:%g:%a' /source/current)" = '0:0:700' ] && [ "$(stat -c '%u:%g:%a' /source/current/value)" = '0:0:400' ] && test_private_source /source/.initialized /source/current/value; then
+elif test_ready_private_source /source; then
   printf 'ready'
+elif test_publishing_private_source /source; then
+  printf 'publishing'
 else
   printf 'corrupt'
 fi`
@@ -211,11 +216,32 @@ fi`
 		return PrivateSourceEmpty, nil
 	case "ready":
 		return PrivateSourceReady, nil
+	case "publishing":
+		return PrivateSourcePublishing, nil
 	case "corrupt":
 		return PrivateSourceCorrupt, nil
 	default:
 		return PrivateSourceInvalid, errors.New("private source inspection returned invalid state")
 	}
+}
+
+func (store DockerStore) FinalizePrivateSource(ctx context.Context, volume Volume) error {
+	if !validVolume(volume) {
+		return errors.New("invalid private source")
+	}
+	script := `set -eu
+test_publishing_private_source /source
+if [ ! -e /source/.initialized ] && [ ! -L /source/.initialized ]; then
+  ln /source/current/.initialized /source/.initialized
+fi
+test_publishing_private_source /source
+rm /source/current/.initialized
+test_ready_private_source /source`
+	_, err := store.runHelper(ctx, nil, []helperMount{{volume: volume, target: "/source"}}, script)
+	if err != nil {
+		return errors.New("private source publication recovery failed")
+	}
+	return nil
 }
 
 func (store DockerStore) CopyPrivateFile(ctx context.Context, source, destination Volume, uid, gid int) error {
@@ -224,16 +250,7 @@ func (store DockerStore) CopyPrivateFile(ctx context.Context, source, destinatio
 	}
 	script := `set -eu
 umask 077
-test -d /source/current
-test ! -L /source/.initialized
-test ! -L /source/current
-test ! -L /source/current/value
-test -f /source/.initialized
-test -s /source/current/value
-test "$(stat -c '%u:%g:%a' /source/.initialized)" = '0:0:400'
-test "$(stat -c '%u:%g:%a' /source/current)" = '0:0:700'
-test "$(stat -c '%u:%g:%a' /source/current/value)" = '0:0:400'
-test_private_source /source/.initialized /source/current/value
+test_ready_private_source /source
 rm -rf /state/.next /state/current.old
 mkdir /state/.next
 cp /source/current/value /state/.next/value
@@ -264,14 +281,51 @@ const privateSourceValidation = `test_private_source() {
   marker_digest=
   marker_size=
   marker_extra=
-  IFS=' ' read -r marker_version marker_digest marker_size marker_extra < "$marker"
-  [ -z "$marker_extra" ]
-  [ "$(wc -l < "$marker")" -eq 1 ]
-  [ "$marker_version" = '` + privateSourceMarkerVersion + `' ]
-  actual_digest=$(sha256sum "$value")
+  IFS=' ' read -r marker_version marker_digest marker_size marker_extra < "$marker" || return 1
+  [ -z "$marker_extra" ] || return 1
+  [ "$(wc -l < "$marker")" -eq 1 ] || return 1
+  [ "$marker_version" = '` + privateSourceMarkerVersion + `' ] || return 1
+  actual_digest=$(sha256sum "$value") || return 1
   actual_digest=${actual_digest%% *}
-  [ "$marker_digest" = "sha256:$actual_digest" ]
-  [ "$marker_size" = "$(stat -c '%s' "$value")" ]
+  [ "$marker_digest" = "sha256:$actual_digest" ] || return 1
+  [ "$marker_size" = "$(stat -c '%s' "$value")" ] || return 1
+}
+test_ready_private_source() {
+  root=$1
+  [ ! -L "$root/.initialized" ] || return 1
+  [ -f "$root/.initialized" ] || return 1
+  [ ! -L "$root/current" ] || return 1
+  [ -d "$root/current" ] || return 1
+  [ ! -e "$root/current/.initialized" ] || return 1
+  [ ! -L "$root/current/.initialized" ] || return 1
+  [ ! -L "$root/current/value" ] || return 1
+  [ -f "$root/current/value" ] || return 1
+  [ -s "$root/current/value" ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$root/.initialized")" = '0:0:400' ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$root/current")" = '0:0:700' ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$root/current/value")" = '0:0:400' ] || return 1
+  test_private_source "$root/.initialized" "$root/current/value" || return 1
+}
+test_publishing_private_source() {
+  root=$1
+  [ ! -L "$root/current" ] || return 1
+  [ -d "$root/current" ] || return 1
+  [ ! -L "$root/current/.initialized" ] || return 1
+  [ -f "$root/current/.initialized" ] || return 1
+  [ ! -L "$root/current/value" ] || return 1
+  [ -f "$root/current/value" ] || return 1
+  [ -s "$root/current/value" ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$root/current")" = '0:0:700' ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$root/current/.initialized")" = '0:0:400' ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$root/current/value")" = '0:0:400' ] || return 1
+  test_private_source "$root/current/.initialized" "$root/current/value" || return 1
+  if [ ! -e "$root/.initialized" ] && [ ! -L "$root/.initialized" ]; then
+    return 0
+  fi
+  [ ! -L "$root/.initialized" ] || return 1
+  [ -f "$root/.initialized" ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$root/.initialized")" = '0:0:400' ] || return 1
+  test_private_source "$root/.initialized" "$root/current/value" || return 1
 }
 `
 

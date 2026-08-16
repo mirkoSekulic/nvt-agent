@@ -108,7 +108,7 @@ func TestDockerStoreInitializesDirectoryAndClassifiesSources(t *testing.T) {
 	}
 	source := dockerTestVolume("local-test-source", "generated-private-source")
 	docker.volumes[source.Name] = maps.Clone(source.Labels)
-	for output, expected := range map[string]PrivateSourceState{"empty": PrivateSourceEmpty, "ready": PrivateSourceReady, "corrupt": PrivateSourceCorrupt} {
+	for output, expected := range map[string]PrivateSourceState{"empty": PrivateSourceEmpty, "publishing": PrivateSourcePublishing, "ready": PrivateSourceReady, "corrupt": PrivateSourceCorrupt} {
 		docker.runOutput = []byte(output)
 		state, err := store.InspectPrivateSource(context.Background(), source)
 		if err != nil || state != expected {
@@ -125,8 +125,17 @@ func TestDockerStoreInitializesDirectoryAndClassifiesSources(t *testing.T) {
 	if bytes.Contains([]byte(strings.Join(createCommand.arguments, "\x00")), secret) || !bytes.Contains(startCommand.stdin, secret) {
 		t.Fatal("source initialization did not keep private bytes on stdin")
 	}
-	if script := strings.Join(createCommand.arguments, "\n"); !strings.Contains(script, "test ! -e /state/current") || !strings.Contains(script, "test ! -e /state/.initialized") {
+	if script := strings.Join(createCommand.arguments, "\n"); !strings.Contains(script, "test ! -e /state/current") || !strings.Contains(script, "test ! -e /state/.initialized") || !strings.Contains(script, "test ! -L /state/current") || !strings.Contains(script, "test ! -L /state/.initialized") {
 		t.Fatal("source initialization is not create-only")
+	}
+	if err := store.FinalizePrivateSource(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	finalizeScript := strings.Join(lastDockerCommand(t, docker.commands, "create").arguments, "\n")
+	for _, expected := range []string{"test_publishing_private_source /source", "ln /source/current/.initialized /source/.initialized", "rm /source/current/.initialized", "test_ready_private_source /source"} {
+		if !strings.Contains(finalizeScript, expected) {
+			t.Fatalf("publication recovery omitted %q", expected)
+		}
 	}
 }
 

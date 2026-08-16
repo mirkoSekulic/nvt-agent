@@ -27,6 +27,7 @@ type Store interface {
 	EnsureVolumes(context.Context, []Volume) (map[string]bool, error)
 	EnsureDirectory(context.Context, Volume, int, int, int64) error
 	InspectPrivateSource(context.Context, Volume) (PrivateSourceState, error)
+	FinalizePrivateSource(context.Context, Volume) error
 	InitializePrivateSource(context.Context, Volume, []StateFile) error
 	ReplaceFiles(context.Context, Volume, []StateFile) error
 	CopyPrivateFile(context.Context, Volume, Volume, int, int) error
@@ -37,6 +38,7 @@ type PrivateSourceState uint8
 const (
 	PrivateSourceInvalid PrivateSourceState = iota
 	PrivateSourceEmpty
+	PrivateSourcePublishing
 	PrivateSourceReady
 	PrivateSourceCorrupt
 )
@@ -76,11 +78,6 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 	for _, volume := range prepared.Volumes {
 		volumes[volume.Name] = volume
 	}
-	for _, directory := range prepared.directories {
-		if err := manager.Store.EnsureDirectory(ctx, volumes[directory.volume], directory.uid, directory.gid, directory.mode); err != nil {
-			return Plan{}, errors.New("trusted state directory initialization failed")
-		}
-	}
 	sourceStates := map[string]PrivateSourceState{}
 	for _, input := range prepared.generated {
 		state, err := manager.Store.InspectPrivateSource(ctx, volumes[input.sourceVolume])
@@ -88,6 +85,19 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 			return Plan{}, errors.New("generated private state is missing or corrupt")
 		}
 		sourceStates[input.sourceVolume] = state
+	}
+	for _, input := range prepared.generated {
+		if sourceStates[input.sourceVolume] == PrivateSourcePublishing {
+			if err := manager.Store.FinalizePrivateSource(ctx, volumes[input.sourceVolume]); err != nil {
+				return Plan{}, errors.New("generated private state publication recovery failed")
+			}
+			sourceStates[input.sourceVolume] = PrivateSourceReady
+		}
+	}
+	for _, directory := range prepared.directories {
+		if err := manager.Store.EnsureDirectory(ctx, volumes[directory.volume], directory.uid, directory.gid, directory.mode); err != nil {
+			return Plan{}, errors.New("trusted state directory initialization failed")
+		}
 	}
 	if err := manager.Store.ReplaceFiles(ctx, volumes[prepared.configVolume], configuration); err != nil {
 		return Plan{}, errors.New("generated configuration storage failed")
