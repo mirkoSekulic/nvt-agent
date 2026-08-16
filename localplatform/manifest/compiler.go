@@ -6,7 +6,8 @@ import (
 	"sort"
 )
 
-// Compiled is deterministic, secret-free intent for the later renderer slices.
+// Compiled is deterministic intent for the later renderer slices. It contains
+// no resolved private-input contents; declared publicConfig is copied verbatim.
 // Each section names its sole output owner; it is not a runtime protocol.
 type Compiled struct {
 	Version       string               `json:"version"`
@@ -31,18 +32,23 @@ type ControllerIntent struct {
 	Workflows    []NamedWorkflow              `json:"workflows"`
 }
 type GatewayIntent struct {
-	Owner        string   `json:"owner"`
-	Workstations []string `json:"workstations,omitempty"`
+	Owner                    string                `json:"owner"`
+	Workstations             []string              `json:"workstations,omitempty"`
+	CredentialPortalAccounts []PortalAccountIntent `json:"credentialPortalAccounts,omitempty"`
+}
+type PortalAccountIntent struct {
+	Name   string `json:"name"`
+	Preset string `json:"preset"`
 }
 type ProducerIntent struct {
-	Owner    string                `json:"owner"`
-	Name     string                `json:"name"`
-	Kind     string                `json:"kind"`
-	Image    string                `json:"image,omitempty"`
-	Workflow string                `json:"workflow"`
-	Config   map[string]any        `json:"config,omitempty"`
-	Secrets  map[string]string     `json:"secrets,omitempty"`
-	GitHub   *GitHubProducerIntent `json:"github,omitempty"`
+	Owner        string                `json:"owner"`
+	Name         string                `json:"name"`
+	Kind         string                `json:"kind"`
+	Image        string                `json:"image,omitempty"`
+	Workflow     string                `json:"workflow"`
+	PublicConfig map[string]any        `json:"publicConfig,omitempty"`
+	Secrets      map[string]string     `json:"secrets,omitempty"`
+	GitHub       *GitHubProducerIntent `json:"github,omitempty"`
 }
 type GitHubProducerIntent struct {
 	AppID            int64    `json:"appID"`
@@ -69,8 +75,13 @@ type NamedAccount struct {
 	Account Account `json:"account"`
 }
 type BrokerProfileIntent struct {
-	Name     string   `json:"name"`
-	Accounts []string `json:"accounts,omitempty"`
+	Name     string              `json:"name"`
+	Accounts []string            `json:"accounts,omitempty"`
+	Grants   []BrokerGrantIntent `json:"grants,omitempty"`
+}
+type BrokerGrantIntent struct {
+	Account      string   `json:"account"`
+	Repositories []string `json:"repositories"`
 }
 type ControllerProfileIntent struct {
 	Name    string  `json:"name"`
@@ -119,7 +130,7 @@ func Compile(m Manifest) (Compiled, error) {
 		sort.Strings(profile.Tools.Mise)
 		sort.Strings(profile.Capabilities)
 		sort.Strings(profile.Plugins)
-		result.Broker.Profiles = append(result.Broker.Profiles, BrokerProfileIntent{name, append([]string(nil), profile.Accounts...)})
+		result.Broker.Profiles = append(result.Broker.Profiles, BrokerProfileIntent{Name: name, Accounts: append([]string(nil), profile.Accounts...), Grants: compileBrokerGrants(m, name)})
 		result.Controller.Profiles = append(result.Controller.Profiles, ControllerProfileIntent{name, profile})
 	}
 	for _, name := range SortedNames(m.Repositories) {
@@ -141,10 +152,16 @@ func Compile(m Manifest) (Compiled, error) {
 	for _, workstation := range result.Controller.Workstations {
 		result.Gateway.Workstations = append(result.Gateway.Workstations, workstation.Name)
 	}
+	for _, name := range SortedNames(m.Accounts) {
+		account := m.Accounts[name]
+		if oneOf(account.Preset, "codex-oauth", "claude-oauth") {
+			result.Gateway.CredentialPortalAccounts = append(result.Gateway.CredentialPortalAccounts, PortalAccountIntent{name, account.Preset})
+		}
+	}
 	producers := append([]Producer(nil), m.Producers...)
 	sort.Slice(producers, func(i, j int) bool { return producers[i].Name < producers[j].Name })
 	for _, producer := range producers {
-		intent := ProducerIntent{Owner: "producer:" + producer.Name, Name: producer.Name, Kind: producer.Preset, Image: producer.Image, Workflow: producer.Workflow, Config: producer.Config, Secrets: sortedMap(producer.Secrets)}
+		intent := ProducerIntent{Owner: "producer:" + producer.Name, Name: producer.Name, Kind: producer.Preset, Image: producer.Image, Workflow: producer.Workflow, PublicConfig: producer.PublicConfig, Secrets: sortedMap(producer.Secrets)}
 		if producer.Preset == "github-comments" {
 			account := m.Accounts[producer.Account]
 			owner, repository, _ := githubCoordinates(m.Repositories[producer.Repository])
@@ -193,6 +210,37 @@ func Compile(m Manifest) (Compiled, error) {
 		return a.Name < b.Name
 	})
 	return result, nil
+}
+
+func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
+	byAccount := map[string]map[string]struct{}{}
+	add := func(repositoryName string) {
+		repository := compileRepository(repositoryName, m.Repositories[repositoryName])
+		if repository.Account == "" || repository.BrokerRepository == "" {
+			return
+		}
+		if byAccount[repository.Account] == nil {
+			byAccount[repository.Account] = map[string]struct{}{}
+		}
+		byAccount[repository.Account][repository.BrokerRepository] = struct{}{}
+	}
+	for _, workflow := range m.Workflows {
+		if workflow.Profile == profileName {
+			add(workflow.Repository)
+		}
+	}
+	for _, workstation := range m.Workstations {
+		if workstation.Profile == profileName {
+			for _, repository := range workstation.Repositories {
+				add(repository)
+			}
+		}
+	}
+	result := make([]BrokerGrantIntent, 0, len(byAccount))
+	for _, account := range SortedNames(byAccount) {
+		result = append(result, BrokerGrantIntent{account, SortedNames(byAccount[account])})
+	}
+	return result
 }
 
 func compileRepository(name string, repository Repository) ControllerRepositoryIntent {

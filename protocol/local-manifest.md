@@ -7,15 +7,16 @@ series is complete.
 manifest. The implementation lives in `localplatform/manifest`. It accepts one
 bounded YAML document, rejects aliases, duplicate or unknown fields, unsupported
 scalar tags, excessive depth/node/byte counts, invalid names and enums, unsafe
-paths, unresolved references, mutable OCI image tags, and fields that could
-embed credentials.
+paths, unresolved references, mutable OCI image tags, and undeclared
+secret-bearing fields.
 
 The document defines logical secrets by file reference, provider accounts,
 reusable profiles, named provider-neutral repositories, persistent
 workstations, disposable or retained workflows, the built-in
 `github-comments` producer, and external digest-pinned OCI producers. File
 references are syntax-checked only in this slice. No file is opened and no
-secret value is accepted or emitted.
+referenced private value is accepted or emitted. The explicitly named
+`publicConfig` boundary described below is administrator-asserted public data.
 
 Each repository supplies an HTTPS URL, exact checkout target, optional checkout
 path and upstream, broker repository identity, and optional credential account.
@@ -34,9 +35,9 @@ network protocol. Its sections establish these exclusive rendering boundaries:
 
 | Section | Output owner | Existing contract eventually rendered |
 | --- | --- | --- |
-| `broker` | broker generator | account, grant, and broker-repository projections |
+| `broker` | broker generator | account and exact per-profile repository-grant projections |
 | `localController` | local-controller generator | execution profiles, repositories, workstations, and workflows |
-| `gateway` | gateway generator | existing local route and credential-portal configuration |
+| `gateway` | gateway generator | routes and typed Codex/Claude credential-portal slots |
 | `producers[]` | the named producer generator | existing bounded schedule-admission client configuration |
 | `privateInputs[]` | named trusted service | later file resolution/mount intent; never file contents |
 
@@ -55,7 +56,10 @@ are unchanged by this contract.
 
 ## Example
 
-See `localplatform/manifest/testdata/valid.yaml`. External producer `config`
-is non-secret JSON-shaped data. Keys suggesting tokens, passwords, private
-keys, credentials, or secrets are rejected; secret access is declared only as
-logical names in the producer `secrets` map.
+See `localplatform/manifest/testdata/valid.yaml`. External producer
+`publicConfig` is an explicit trust boundary: its bounded JSON-shaped content
+is intentionally copied to generated configuration and must be public. The
+compiler cannot infer whether an arbitrary string is sensitive. Secret access
+is therefore declared only through the producer `secrets` map; ordinary
+`config` and secret-shaped public keys are rejected. Built-in producers reject
+both external-only fields and expose only their typed preset contract.

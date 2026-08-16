@@ -119,7 +119,7 @@ type Producer struct {
 	Prefix         string            `json:"prefix,omitempty"`
 	AllowedAuthors []string          `json:"allowedAuthors,omitempty"`
 	Workflow       string            `json:"workflow"`
-	Config         map[string]any    `json:"config,omitempty"`
+	PublicConfig   map[string]any    `json:"publicConfig,omitempty"`
 	Secrets        map[string]string `json:"secrets,omitempty"`
 }
 
@@ -360,6 +360,9 @@ func (m Manifest) Validate() error {
 		if producer.Preset == "github-comments" && !validGitHubProducer(producer, m.Accounts, m.Repositories) {
 			return fmt.Errorf("built-in producer %q is incomplete", producer.Name)
 		}
+		if producer.Preset == "github-comments" && (len(producer.PublicConfig) != 0 || len(producer.Secrets) != 0) {
+			return fmt.Errorf("built-in producer %q uses external-only fields", producer.Name)
+		}
 		if producer.Image != "" && (producer.Account != "" || producer.Repository != "" || producer.Prefix != "" || len(producer.AllowedAuthors) != 0) {
 			return fmt.Errorf("external producer %q uses built-in fields", producer.Name)
 		}
@@ -376,8 +379,8 @@ func (m Manifest) Validate() error {
 				return fmt.Errorf("producer %q has an invalid secret mount name", producer.Name)
 			}
 		}
-		if err := validateConfig(producer.Config, 0); err != nil {
-			return fmt.Errorf("producer %q config: %w", producer.Name, err)
+		if err := validateConfig(producer.PublicConfig, 0); err != nil {
+			return fmt.Errorf("producer %q publicConfig: %w", producer.Name, err)
 		}
 	}
 	return nil
@@ -406,6 +409,9 @@ func validateRepository(value Repository, accounts map[string]Account) error {
 		if value.Upstream != "" && !validHTTPSRepositoryURL(value.Upstream) {
 			return errors.New("invalid upstream")
 		}
+		if value.Account != "" && !oneOf(accounts[value.Account].Preset, "github-app", "github-pat") {
+			return errors.New("GitHub repository requires a GitHub account")
+		}
 		return nil
 	}
 	if !validHTTPSRepositoryURL(value.URL) || repositoryTarget(value.URL) != value.CheckoutTarget || value.CheckoutTarget == "" {
@@ -416,6 +422,21 @@ func validateRepository(value Repository, accounts map[string]Account) error {
 	}
 	if value.BrokerRepository != "" && !validRepositoryID(value.BrokerRepository) || value.Upstream != "" && !validHTTPSRepositoryURL(value.Upstream) {
 		return errors.New("invalid broker repository or upstream")
+	}
+	if value.Account != "" {
+		parsed, _ := url.Parse(value.URL)
+		switch parsed.Host {
+		case "github.com":
+			if !oneOf(accounts[value.Account].Preset, "github-app", "github-pat") {
+				return errors.New("github.com repository requires a GitHub account")
+			}
+		case "dev.azure.com":
+			if accounts[value.Account].Preset != "azure-devops-pat" {
+				return errors.New("dev.azure.com repository requires an Azure DevOps account")
+			}
+		default:
+			return errors.New("credentialed custom repositories require a supported host preset")
+		}
 	}
 	return nil
 }
@@ -534,17 +555,6 @@ func uniqueRefs[T any](refs []string, values map[string]T, kind string) error {
 	for _, ref := range refs {
 		if !has(values, ref) {
 			return fmt.Errorf("unknown %s %q", kind, ref)
-		}
-	}
-	return nil
-}
-func repositories(values []string) error {
-	if err := uniqueStrings(values); err != nil {
-		return err
-	}
-	for _, v := range values {
-		if !repositoryPattern.MatchString(v) {
-			return fmt.Errorf("invalid repository %q", v)
 		}
 	}
 	return nil

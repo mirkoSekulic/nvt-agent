@@ -53,18 +53,23 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]string{
-		"unknown field":                 strings.Replace(string(valid), "apiVersion:", "unexpected: true\napiVersion:", 1),
-		"duplicate key":                 strings.Replace(string(valid), "apiVersion: nvt.dev/local/v1", "apiVersion: nvt.dev/local/v1\napiVersion: nvt.dev/local/v1", 1),
-		"second document":               string(valid) + "\n---\n{}\n",
-		"unsafe secret":                 strings.Replace(string(valid), "./.nvt-local/secrets/github/main-app.pem", "../private-key", 1),
-		"unresolved reference":          strings.Replace(string(valid), "privateKeySecret: github-key", "privateKeySecret: absent", 1),
-		"mutable image":                 strings.Replace(string(valid), "ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ghcr.io/example/chat-producer:latest", 1),
-		"invalid OCI image":             strings.Replace(string(valid), "ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "https://host/repo?x@sha256:"+strings.Repeat("a", 64), 1),
-		"secret config":                 strings.Replace(string(valid), "commandPrefix: /agent", "apiToken: embedded", 1),
-		"unsupported scalar":            strings.Replace(string(valid), "appId: \"3912708\"", "appId: 2026-01-01", 1),
-		"incompatible producer account": strings.Replace(string(valid), "preset: github-comments\n    account: github", "preset: github-comments\n    account: codex", 1),
-		"missing installation":          strings.Replace(string(valid), "mirkoSekulic: \"123\"", "another-owner: \"123\"", 1),
-		"unknown repository":            strings.Replace(string(valid), "repository: nvt-agent", "repository: absent", 1),
+		"unknown field":                   strings.Replace(string(valid), "apiVersion:", "unexpected: true\napiVersion:", 1),
+		"duplicate key":                   strings.Replace(string(valid), "apiVersion: nvt.dev/local/v1", "apiVersion: nvt.dev/local/v1\napiVersion: nvt.dev/local/v1", 1),
+		"second document":                 string(valid) + "\n---\n{}\n",
+		"unsafe secret":                   strings.Replace(string(valid), "./.nvt-local/secrets/github/main-app.pem", "../private-key", 1),
+		"unresolved reference":            strings.Replace(string(valid), "privateKeySecret: github-key", "privateKeySecret: absent", 1),
+		"mutable image":                   strings.Replace(string(valid), "ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ghcr.io/example/chat-producer:latest", 1),
+		"invalid OCI image":               strings.Replace(string(valid), "ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "https://host/repo?x@sha256:"+strings.Repeat("a", 64), 1),
+		"secret config":                   strings.Replace(string(valid), "commandPrefix: /agent", "apiToken: embedded", 1),
+		"unsupported scalar":              strings.Replace(string(valid), "appId: \"3912708\"", "appId: 2026-01-01", 1),
+		"incompatible producer account":   strings.Replace(string(valid), "preset: github-comments\n    account: github", "preset: github-comments\n    account: codex", 1),
+		"missing installation":            strings.Replace(string(valid), "mirkoSekulic: \"123\"", "another-owner: \"123\"", 1),
+		"unknown repository":              strings.Replace(string(valid), "repository: nvt-agent", "repository: absent", 1),
+		"undeclared external config":      strings.Replace(string(valid), "publicConfig:", "config:", 1),
+		"GitHub repository Azure account": strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent\n    account: github", "github: mirkoSekulic/nvt-agent\n    account: azure", 1),
+		"Azure repository GitHub account": strings.Replace(string(valid), "path: infrastructure\n    account: azure", "path: infrastructure\n    account: github", 1),
+		"built-in public config":          strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    publicConfig: {mode: public}", 1),
+		"built-in manual secret":          strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    secrets: {key: github-key}", 1),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -115,9 +120,44 @@ func TestCompiledSectionsAreOwnerSufficient(t *testing.T) {
 	if !ownedKey {
 		t.Fatal("GitHub producer does not own its private-key input")
 	}
+	if len(compiled.Gateway.CredentialPortalAccounts) != 1 || compiled.Gateway.CredentialPortalAccounts[0] != (PortalAccountIntent{"codex", "codex-oauth"}) {
+		t.Fatalf("gateway credential portal projection is incomplete: %#v", compiled.Gateway)
+	}
 }
 
-func TestProducerConfigPreservesLargeIntegers(t *testing.T) {
+func TestBrokerGrantsDoNotCrossProfilesSharingAnAccount(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Profiles["other"] = Profile{Runtime: Runtime{Preset: "shell", Autonomy: "read-only"}, Accounts: []string{"github"}}
+	decoded.Repositories["other"] = Repository{GitHub: "mirkoSekulic/other", Account: "github"}
+	decoded.Workflows["other"] = Workflow{Profile: "other", Repository: "other", Retention: "disposable"}
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants := map[string][]BrokerGrantIntent{}
+	for _, profile := range compiled.Broker.Profiles {
+		grants[profile.Name] = profile.Grants
+	}
+	if len(grants["other"]) != 1 || strings.Join(grants["other"][0].Repositories, ",") != "mirkoSekulic/other" {
+		t.Fatalf("other profile grants = %#v", grants["other"])
+	}
+	for _, grant := range grants["development"] {
+		for _, repository := range grant.Repositories {
+			if repository == "mirkoSekulic/other" {
+				t.Fatal("repository grant crossed profile boundary")
+			}
+		}
+	}
+}
+
+func TestProducerPublicConfigPreservesLargeIntegers(t *testing.T) {
 	raw, err := os.ReadFile("testdata/valid.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -146,6 +186,29 @@ func TestProducerConfigPreservesLargeIntegers(t *testing.T) {
 	}
 	if !bytes.Contains(second, []byte(`"value":9007199254740993`)) {
 		t.Fatalf("large integer was not preserved: %s", second)
+	}
+}
+
+func TestExternalProducerPublicConfigIsAnExplicitTrustBoundary(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.Replace(string(raw), "commandPrefix: /agent", "auth: deliberately-public", 1)
+	decoded, err := Decode(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := compiled.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(canonical, []byte(`"publicConfig":{"auth":"deliberately-public"}`)) {
+		t.Fatalf("declared public config was not emitted: %s", canonical)
 	}
 }
 
