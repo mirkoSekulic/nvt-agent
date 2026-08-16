@@ -73,6 +73,7 @@ type Profile struct {
 type Runtime struct {
 	Preset   string `json:"preset"`
 	Autonomy string `json:"autonomy"`
+	Account  string `json:"account,omitempty"`
 }
 type Tools struct {
 	Packages []string `json:"packages,omitempty"`
@@ -281,6 +282,9 @@ func (m Manifest) Validate() error {
 		if err := uniqueRefs(profile.Accounts, m.Accounts, "account"); err != nil {
 			return fmt.Errorf("profile %q: %w", name, err)
 		}
+		if !validRuntimeAccount(profile, m.Accounts) {
+			return fmt.Errorf("profile %q has an invalid runtime account", name)
+		}
 		if err := uniqueStrings(profile.Tools.Packages); err != nil {
 			return fmt.Errorf("profile %q packages: %w", name, err)
 		}
@@ -387,6 +391,22 @@ func (m Manifest) Validate() error {
 }
 
 func validName(v string) bool { return len(v) <= MaxNameBytes && namePattern.MatchString(v) }
+func validRuntimeAccount(profile Profile, accounts map[string]Account) bool {
+	if profile.Runtime.Preset == "shell" {
+		return profile.Runtime.Account == ""
+	}
+	want := profile.Runtime.Preset + "-oauth"
+	account, ok := accounts[profile.Runtime.Account]
+	if !ok || account.Preset != want {
+		return false
+	}
+	for _, selected := range profile.Accounts {
+		if selected == profile.Runtime.Account {
+			return true
+		}
+	}
+	return false
+}
 func profileAllowsRepository(profile Profile, repository Repository) bool {
 	if repository.Account == "" {
 		return true
@@ -412,6 +432,12 @@ func validateRepository(value Repository, accounts map[string]Account) error {
 		if value.Account != "" && !oneOf(accounts[value.Account].Preset, "github-app", "github-pat") {
 			return errors.New("GitHub repository requires a GitHub account")
 		}
+		if value.Account != "" && accounts[value.Account].Preset == "github-app" {
+			owner, _, _ := githubCoordinates(value)
+			if _, err := githubInstallationID(accounts[value.Account], owner); err != nil {
+				return errors.New("GitHub App repository owner has no installation")
+			}
+		}
 		return nil
 	}
 	if !validHTTPSRepositoryURL(value.URL) || repositoryTarget(value.URL) != value.CheckoutTarget || value.CheckoutTarget == "" {
@@ -429,6 +455,12 @@ func validateRepository(value Repository, accounts map[string]Account) error {
 		case "github.com":
 			if !oneOf(accounts[value.Account].Preset, "github-app", "github-pat") {
 				return errors.New("github.com repository requires a GitHub account")
+			}
+			if accounts[value.Account].Preset == "github-app" {
+				owner, _, _ := githubCoordinates(value)
+				if _, err := githubInstallationID(accounts[value.Account], owner); err != nil {
+					return errors.New("GitHub App repository owner has no installation")
+				}
 			}
 		case "dev.azure.com":
 			if accounts[value.Account].Preset != "azure-devops-pat" {
