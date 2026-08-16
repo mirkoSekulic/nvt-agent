@@ -4652,6 +4652,58 @@ func TestRenderAgentConfigYAMLAppliesRuntimeAutonomy(t *testing.T) {
 	}
 }
 
+func TestRenderAgentConfigYAMLAppliesRuntimeModelAndEffortToFreshAndResume(t *testing.T) {
+	tests := []struct {
+		name    string
+		runtime nvtv1alpha1.AgentRunRuntime
+		want    []any
+	}{
+		{
+			name: "codex", runtime: nvtv1alpha1.AgentRunRuntime{Type: "codex", Autonomy: "trusted-local", Model: "gpt-5.6-sol", Effort: "high"},
+			want: []any{"--sandbox", "danger-full-access", "--ask-for-approval", "never", "--model", "gpt-5.6-sol", "--config", "model_reasoning_effort=high"},
+		},
+		{
+			name: "claude", runtime: nvtv1alpha1.AgentRunRuntime{Type: "claude", Autonomy: "trusted-local", Model: "opus", Effort: "high"},
+			want: []any{"--dangerously-skip-permissions", "--model", "opus", "--effort", "high"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			run := testAgentRun()
+			run.Spec.Runtime = test.runtime
+			run.Spec.Agent.Config = rawJSON(fmt.Sprintf(`{"runtime":{"resume":{"command":%q,"args":["--resume","session-id"]}}}`, test.runtime.Type))
+			rendered, err := RenderAgentConfigYAML(run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtimeConfig := parseAgentConfigYAML(t, rendered)["runtime"].(map[string]any)
+			if !reflect.DeepEqual(runtimeConfig["args"], test.want) {
+				t.Fatalf("fresh args = %#v, want %#v", runtimeConfig["args"], test.want)
+			}
+			wantResume := append([]any{"--resume", "session-id"}, test.want[len(test.want)-4:]...)
+			resume := runtimeConfig["resume"].(map[string]any)
+			if !reflect.DeepEqual(resume["args"], wantResume) {
+				t.Fatalf("resume args = %#v, want %#v", resume["args"], wantResume)
+			}
+		})
+	}
+}
+
+func TestRenderAgentConfigYAMLRejectsTypedRuntimeSelectorConflicts(t *testing.T) {
+	for _, config := range []string{
+		`{"runtime":{"args":["--model","raw"]}}`,
+		`{"runtime":{"args":[],"resume":{"command":"codex","args":["--config","model_reasoning_effort=low"]}}}`,
+	} {
+		run := testAgentRun()
+		run.Spec.Runtime.Model = "gpt-5.6-sol"
+		run.Spec.Runtime.Effort = "high"
+		run.Spec.Agent.Config = rawJSON(config)
+		if _, err := RenderAgentConfigYAML(run); err == nil || !strings.Contains(err.Error(), "conflict") {
+			t.Fatalf("config %s error = %v, want selector conflict", config, err)
+		}
+	}
+}
+
 func TestDesiredAgentPodUsesRuntimeHealthReadinessProbe(t *testing.T) {
 	pod, err := DesiredAgentPod(testAgentRun(), testScheme(t))
 	if err != nil {

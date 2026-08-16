@@ -35,6 +35,8 @@ type Principal struct {
 type Runtime struct {
 	Type      string            `json:"type"`
 	Autonomy  string            `json:"autonomy"`
+	Model     string            `json:"model,omitempty"`
+	Effort    string            `json:"effort,omitempty"`
 	User      string            `json:"user"`
 	Container *RuntimeContainer `json:"container,omitempty"`
 	Docker    *RuntimeDocker    `json:"docker,omitempty"`

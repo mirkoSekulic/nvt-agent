@@ -109,6 +109,8 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
 	profileInstructions := "Prefer repository-local checks.\n\n- Keep commits focused.\n"
 	schedule.Spec.Profiles[0].WorkspaceInstructions = profileInstructions
+	schedule.Spec.Profiles[0].Runtime.Model = "gpt-5.6-sol"
+	schedule.Spec.Profiles[0].Runtime.Effort = "high"
 	schedule.Spec.Profiles[0].Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{KernelLogDevice: true, RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{
 		{Name: "kind", Subnet: "172.31.250.0/24"},
 	}}
@@ -141,6 +143,9 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	assertResolvedProfile(t, &defaultRun, "codex-default", "codex-default", "codex-default")
 	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
 		t.Fatalf("workspace instructions were not snapshotted exactly: %q", defaultRun.Spec.Agent.WorkspaceInstructions)
+	}
+	if defaultRun.Spec.Runtime.Model != "gpt-5.6-sol" || defaultRun.Spec.Runtime.Effort != "high" {
+		t.Fatalf("runtime model/effort were not snapshotted: %#v", defaultRun.Spec.Runtime)
 	}
 	if got := defaultRun.Spec.Runtime.Docker; got == nil || len(got.RequiredNetworks) != 1 ||
 		got.RequiredNetworks[0].Name != "kind" || got.RequiredNetworks[0].Subnet != "172.31.250.0/24" || !got.KernelLogDevice {

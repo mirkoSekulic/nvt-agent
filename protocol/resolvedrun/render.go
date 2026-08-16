@@ -3,6 +3,7 @@ package resolvedrun
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 )
@@ -32,6 +33,9 @@ func RenderAgentConfig(run ResolvedAgentRun, bindings AgentConfigBindings) (json
 		return nil, ErrInvalidRenderBinding
 	}
 	runtime := cloneStringAnyMap(root["runtime"].(map[string]any))
+	if err := applyRuntimeSelection(runtime, run.Runtime); err != nil {
+		return nil, ErrInvalidRenderBinding
+	}
 	if run.Prompt != "" {
 		runtime["initial-prompt"] = map[string]any{"delivery": "argument", "text": run.Prompt}
 	}
@@ -51,6 +55,100 @@ func RenderAgentConfig(run ResolvedAgentRun, bindings AgentConfigBindings) (json
 		return nil, ErrInvalidRenderBinding
 	}
 	return rendered, nil
+}
+
+func applyRuntimeSelection(config map[string]any, selection Runtime) error {
+	if selection.Model == "" && selection.Effort == "" {
+		return nil
+	}
+	args, ok := stringArguments(config["args"])
+	if !ok {
+		return errors.New("runtime args are invalid")
+	}
+	updated, err := selectedRuntimeArguments(args, selection)
+	if err != nil {
+		return err
+	}
+	config["args"] = updated
+	if rawResume, exists := config["resume"]; exists {
+		resume, ok := rawResume.(map[string]any)
+		if !ok {
+			return errors.New("runtime resume is invalid")
+		}
+		resume = cloneStringAnyMap(resume)
+		resumeArgs, ok := stringArguments(resume["args"])
+		if !ok {
+			return errors.New("runtime resume args are invalid")
+		}
+		resumeArgs, err = selectedRuntimeArguments(resumeArgs, selection)
+		if err != nil {
+			return err
+		}
+		resume["args"] = resumeArgs
+		config["resume"] = resume
+	}
+	return nil
+}
+
+func stringArguments(raw any) ([]any, bool) {
+	if raw == nil {
+		return []any{}, true
+	}
+	args, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	for _, arg := range args {
+		if _, ok := arg.(string); !ok {
+			return nil, false
+		}
+	}
+	return append([]any{}, args...), true
+}
+
+func selectedRuntimeArguments(args []any, selection Runtime) ([]any, error) {
+	for index, raw := range args {
+		arg := raw.(string)
+		if selection.Model != "" && runtimeArgumentSelects(arg, index, args, selection.Type, true) {
+			return nil, errors.New("runtime args conflict with typed model")
+		}
+		if selection.Effort != "" && runtimeArgumentSelects(arg, index, args, selection.Type, false) {
+			return nil, errors.New("runtime args conflict with typed effort")
+		}
+	}
+	result := append([]any{}, args...)
+	switch selection.Type {
+	case "codex":
+		if selection.Model != "" {
+			result = append(result, "--model", selection.Model)
+		}
+		if selection.Effort != "" {
+			result = append(result, "--config", "model_reasoning_effort="+selection.Effort)
+		}
+	case "claude":
+		if selection.Model != "" {
+			result = append(result, "--model", selection.Model)
+		}
+		if selection.Effort != "" {
+			result = append(result, "--effort", selection.Effort)
+		}
+	default:
+		return nil, errors.New("runtime selection is unsupported")
+	}
+	return result, nil
+}
+
+func runtimeArgumentSelects(arg string, index int, args []any, runtimeType string, model bool) bool {
+	if model {
+		return arg == "--model" || arg == "-m" || strings.HasPrefix(arg, "--model=")
+	}
+	if runtimeType == "claude" {
+		return arg == "--effort" || strings.HasPrefix(arg, "--effort=")
+	}
+	if arg == "--config" || arg == "-c" {
+		return index+1 < len(args) && strings.HasPrefix(args[index+1].(string), "model_reasoning_effort=")
+	}
+	return strings.HasPrefix(arg, "--config=model_reasoning_effort=") || strings.HasPrefix(arg, "-cmodel_reasoning_effort=")
 }
 
 func decodeAgentConfigObject(raw json.RawMessage) (map[string]any, error) {

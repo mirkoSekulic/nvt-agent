@@ -48,7 +48,7 @@ func TestLocalResolvedRunContractMatchesExistingKubernetesProfileResolution(t *t
 }`)
 	profileSpec := &schedule.Spec.Profiles[0]
 	profileSpec.Runtime = nvtv1alpha1.AgentRunRuntime{
-		Type: "codex", Autonomy: "trusted-local", User: nvtv1alpha1.AgentRunUserRoot,
+		Type: "codex", Autonomy: "trusted-local", Model: "gpt-5.6-sol", Effort: "high", User: nvtv1alpha1.AgentRunUserRoot,
 		Container: &nvtv1alpha1.AgentRunRuntimeContainer{Capabilities: &nvtv1alpha1.AgentRunRuntimeCapabilities{Add: []corev1.Capability{"SYS_PTRACE"}}},
 		Docker: &nvtv1alpha1.AgentRunRuntimeDocker{
 			KernelLogDevice:  true,
@@ -261,7 +261,7 @@ func removeKubernetesLifecycleAdapter(t *testing.T, root map[string]any) {
 }
 
 func portableRuntime(value nvtv1alpha1.AgentRunRuntime) resolvedrun.Runtime {
-	result := resolvedrun.Runtime{Type: value.Type, Autonomy: value.Autonomy, User: string(value.User)}
+	result := resolvedrun.Runtime{Type: value.Type, Autonomy: value.Autonomy, Model: value.Model, Effort: value.Effort, User: string(value.User)}
 	if value.Container != nil && value.Container.Capabilities != nil {
 		result.Container = &resolvedrun.RuntimeContainer{Capabilities: make([]string, len(value.Container.Capabilities.Add))}
 		for index, capability := range value.Container.Capabilities.Add {

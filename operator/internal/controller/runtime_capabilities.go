@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -29,7 +30,31 @@ var linuxCapabilityNames = map[corev1.Capability]struct{}{
 // ValidateAgentRunRuntimeCapabilities validates the narrow container process
 // contract before an agent Pod is created.
 func ValidateAgentRunRuntimeCapabilities(agentRun *nvtv1alpha1.AgentRun) error {
+	if err := validateRuntimeSelection(agentRun.Spec.Runtime); err != nil {
+		return err
+	}
 	return validateRuntimeCapabilities(agentRun.Spec.Runtime)
+}
+
+func validateRuntimeSelection(runtime nvtv1alpha1.AgentRunRuntime) error {
+	if runtime.Model != "" && (runtime.Model != strings.TrimSpace(runtime.Model) || strings.ContainsRune(runtime.Model, 0)) {
+		return fmt.Errorf("spec.runtime.model must be a non-empty trimmed string")
+	}
+	if runtime.Model == "" && runtime.Effort == "" {
+		return nil
+	}
+	allowed := map[string]map[string]bool{
+		"codex":  {"minimal": true, "low": true, "medium": true, "high": true, "xhigh": true},
+		"claude": {"low": true, "medium": true, "high": true, "xhigh": true, "max": true},
+	}
+	efforts, supported := allowed[runtime.Type]
+	if !supported {
+		return fmt.Errorf("spec.runtime.type %q does not support model or effort selection", runtime.Type)
+	}
+	if runtime.Effort != "" && !efforts[runtime.Effort] {
+		return fmt.Errorf("spec.runtime.effort %q is not supported by runtime type %q", runtime.Effort, runtime.Type)
+	}
+	return nil
 }
 
 func validateRuntimeCapabilities(runtime nvtv1alpha1.AgentRunRuntime) error {

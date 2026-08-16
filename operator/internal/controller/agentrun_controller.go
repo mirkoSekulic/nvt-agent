@@ -4820,7 +4820,8 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 }
 
 func AgentRunNeedsRuntimeRendering(agentRun *nvtv1alpha1.AgentRun) bool {
-	return agentRun.Spec.Runtime.Type != "" || agentRun.Spec.Runtime.Autonomy != ""
+	return agentRun.Spec.Runtime.Type != "" || agentRun.Spec.Runtime.Autonomy != "" ||
+		agentRun.Spec.Runtime.Model != "" || agentRun.Spec.Runtime.Effort != ""
 }
 
 // InjectAgentRunRuntimeConfig translates the typed runtime selection into the
@@ -4871,9 +4872,72 @@ func InjectAgentRunRuntimeConfig(config map[string]any, agentRun *nvtv1alpha1.Ag
 			return nil, fmt.Errorf("render AgentRun agent config: unsupported spec.runtime.autonomy %q", agentRun.Spec.Runtime.Autonomy)
 		}
 	}
+	args := runtimeConfig["args"].([]any)
+	args, err := injectRuntimeSelectionArgs(args, runtimeType, agentRun.Spec.Runtime.Model, agentRun.Spec.Runtime.Effort)
+	if err != nil {
+		return nil, fmt.Errorf("render AgentRun agent config: %w", err)
+	}
+	runtimeConfig["args"] = args
+	if rawResume, present := runtimeConfig["resume"]; present {
+		resume, ok := rawResume.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("render AgentRun agent config: runtime.resume must be an object")
+		}
+		resume = cloneStringAnyMap(resume)
+		rawResumeArgs, present := resume["args"]
+		if !present {
+			rawResumeArgs = []any{}
+		}
+		resumeArgs, ok := rawResumeArgs.([]any)
+		if !ok {
+			return nil, fmt.Errorf("render AgentRun agent config: runtime.resume.args must be a list of strings")
+		}
+		for _, rawArg := range resumeArgs {
+			if _, ok := rawArg.(string); !ok {
+				return nil, fmt.Errorf("render AgentRun agent config: runtime.resume.args must be a list of strings")
+			}
+		}
+		resumeArgs, err = injectRuntimeSelectionArgs(resumeArgs, runtimeType, agentRun.Spec.Runtime.Model, agentRun.Spec.Runtime.Effort)
+		if err != nil {
+			return nil, fmt.Errorf("render AgentRun agent config: runtime.resume: %w", err)
+		}
+		resume["args"] = resumeArgs
+		runtimeConfig["resume"] = resume
+	}
 	updated := cloneStringAnyMap(config)
 	updated["runtime"] = runtimeConfig
 	return updated, nil
+}
+
+func injectRuntimeSelectionArgs(args []any, runtimeType, model, effort string) ([]any, error) {
+	for index, raw := range args {
+		arg := raw.(string)
+		if model != "" && (arg == "--model" || arg == "-m" || strings.HasPrefix(arg, "--model=")) {
+			return nil, fmt.Errorf("typed model conflicts with runtime args model selector")
+		}
+		if effort != "" {
+			conflict := arg == "--effort" || strings.HasPrefix(arg, "--effort=")
+			if runtimeType == "codex" {
+				conflict = strings.HasPrefix(arg, "--config=model_reasoning_effort=") || strings.HasPrefix(arg, "-cmodel_reasoning_effort=") ||
+					((arg == "--config" || arg == "-c") && index+1 < len(args) && strings.HasPrefix(args[index+1].(string), "model_reasoning_effort="))
+			}
+			if conflict {
+				return nil, fmt.Errorf("typed effort conflicts with runtime args effort selector")
+			}
+		}
+	}
+	result := append([]any{}, args...)
+	if model != "" {
+		result = append(result, "--model", model)
+	}
+	if effort != "" {
+		if runtimeType == "codex" {
+			result = append(result, "--config", "model_reasoning_effort="+effort)
+		} else {
+			result = append(result, "--effort", effort)
+		}
+	}
+	return result, nil
 }
 
 func AgentRunNeedsRuntimePreseed(agentRun *nvtv1alpha1.AgentRun) bool {

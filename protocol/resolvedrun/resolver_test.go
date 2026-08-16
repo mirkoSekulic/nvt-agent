@@ -19,6 +19,68 @@ func TestDefaultCredentialProviderMustReferenceApprovedMapping(t *testing.T) {
 	}
 }
 
+func TestRuntimeModelAndEffortRenderFreshAndResume(t *testing.T) {
+	configuration := validConfiguration()
+	configuration.Defaults.Runtime = Runtime{Type: "codex", Autonomy: "trusted-local", User: "root", Model: "gpt-5.6-sol", Effort: "high"}
+	configuration.Profiles[0].Runtime = nil
+	resolver, err := NewResolver(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := resolver.Resolve(validAuthorization(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Runtime.Model != "gpt-5.6-sol" || run.Runtime.Effort != "high" {
+		t.Fatalf("typed runtime selection was not propagated: %#v", run.Runtime)
+	}
+	rendered, err := RenderAgentConfig(run, AgentConfigBindings{ForwardProxyURL: "http://127.0.0.1:15002"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(rendered, &root); err != nil {
+		t.Fatal(err)
+	}
+	runtime := root["runtime"].(map[string]any)
+	wantSelectors := []any{"--model", "gpt-5.6-sol", "--config", "model_reasoning_effort=high"}
+	args := runtime["args"].([]any)
+	if !reflect.DeepEqual(args[len(args)-4:], wantSelectors) {
+		t.Fatalf("fresh selectors = %#v", args)
+	}
+	resume := runtime["resume"].(map[string]any)
+	resumeArgs := resume["args"].([]any)
+	if !reflect.DeepEqual(resumeArgs[len(resumeArgs)-4:], wantSelectors) {
+		t.Fatalf("resume selectors = %#v", resumeArgs)
+	}
+}
+
+func TestRuntimeSelectionRejectsUnsupportedEffortAndRawConflicts(t *testing.T) {
+	configuration := validConfiguration()
+	configuration.Defaults.Runtime = Runtime{Type: "codex", Autonomy: "trusted-local", User: "root", Effort: "max"}
+	configuration.Profiles[0].Runtime = nil
+	if _, err := NewResolver(configuration); !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("unsupported effort error = %v", err)
+	}
+
+	configuration = validConfiguration()
+	configuration.Defaults.Runtime = Runtime{Type: "codex", Autonomy: "trusted-local", User: "root", Model: "typed"}
+	configuration.Defaults.AgentConfig = json.RawMessage(`{"runtime":{"command":"codex","args":["--model","raw"]},"plugins":[]}`)
+	configuration.Profiles[0].Runtime = nil
+	configuration.Profiles[0].AgentConfig = nil
+	resolver, err := NewResolver(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := resolver.Resolve(validAuthorization(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RenderAgentConfig(run, AgentConfigBindings{ForwardProxyURL: "http://127.0.0.1:15002"}); !errors.Is(err, ErrInvalidRenderBinding) {
+		t.Fatalf("raw selector conflict error = %v", err)
+	}
+}
+
 func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 	t.Parallel()
 	resolver, err := NewResolver(validConfiguration())
