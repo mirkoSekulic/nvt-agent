@@ -123,6 +123,9 @@ type AgentScheduleWorkflowProfile struct {
 	// contain credentials or sensitive values.
 	// +kubebuilder:validation:MaxLength=65536
 	WorkspaceInstructions string `json:"workspaceInstructions,omitempty"`
+	// Lifecycle, when present, completely replaces the schedule template
+	// lifecycle for runs selecting this workflow.
+	Lifecycle *AgentRunLifecycle `json:"lifecycle,omitempty"`
 }
 
 // AgentScheduleProducerPolicy authorizes one authenticated Kubernetes caller
@@ -288,7 +291,10 @@ func (in *AgentScheduleSpec) DeepCopy() *AgentScheduleSpec {
 	}
 	if in.WorkflowProfiles != nil {
 		out.WorkflowProfiles = make([]AgentScheduleWorkflowProfile, len(in.WorkflowProfiles))
-		copy(out.WorkflowProfiles, in.WorkflowProfiles)
+		for i := range in.WorkflowProfiles {
+			out.WorkflowProfiles[i] = in.WorkflowProfiles[i]
+			out.WorkflowProfiles[i].Lifecycle = in.WorkflowProfiles[i].Lifecycle.DeepCopy()
+		}
 	}
 	if in.ProducerPolicies != nil {
 		out.ProducerPolicies = make([]AgentScheduleProducerPolicy, len(in.ProducerPolicies))

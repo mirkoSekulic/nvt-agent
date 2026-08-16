@@ -244,6 +244,8 @@ type Workflow struct {
 	Name                  string       `json:"name"`
 	Repositories          []Repository `json:"repositories,omitempty"`
 	WorkspaceInstructions string       `json:"workspace_instructions,omitempty"`
+	// Lifecycle, when present, completely replaces the selected profile/default lifecycle.
+	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 }
 
 type TrustedConfiguration struct {

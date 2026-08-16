@@ -19,6 +19,52 @@ func TestDefaultCredentialProviderMustReferenceApprovedMapping(t *testing.T) {
 	}
 }
 
+func TestWorkflowLifecycleCompletelyReplacesProfileLifecycle(t *testing.T) {
+	configuration := validConfiguration()
+	configuration.Workflows[0].Lifecycle = &Lifecycle{
+		CompleteOn: []string{"plugin.github.pr.merged", "plugin.github.pr.closed"},
+		FailOn:     []string{"plugin.work.failed"},
+	}
+	resolver, err := NewResolver(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolver.Resolve(validAuthorization(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(resolved.Lifecycle, *configuration.Workflows[0].Lifecycle) {
+		t.Fatalf("workflow lifecycle was not snapshotted as a replacement: %#v", resolved.Lifecycle)
+	}
+	configuration.Workflows[0].Lifecycle.CompleteOn[0] = "plugin.mutated"
+	if resolved.Lifecycle.CompleteOn[0] != "plugin.github.pr.merged" {
+		t.Fatal("resolved workflow lifecycle was not immutable")
+	}
+}
+
+func TestWorkflowLifecycleValidationAndOmittedCompatibility(t *testing.T) {
+	configuration := validConfiguration()
+	resolver, err := NewResolver(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolver.Resolve(validAuthorization(), validRequest())
+	if err != nil || !reflect.DeepEqual(resolved.Lifecycle, *configuration.Profiles[0].Lifecycle) {
+		t.Fatalf("omitted workflow lifecycle changed profile lifecycle: %#v, %v", resolved.Lifecycle, err)
+	}
+	for _, lifecycle := range []Lifecycle{
+		{CompleteOn: []string{"Invalid Event"}},
+		{CompleteOn: []string{"plugin.work.completed", "plugin.work.completed"}},
+		{CompleteOn: []string{"plugin.work.completed"}, FailOn: []string{"plugin.work.completed"}},
+	} {
+		invalid := validConfiguration()
+		invalid.Workflows[0].Lifecycle = &lifecycle
+		if _, err := NewResolver(invalid); !errors.Is(err, ErrInvalidConfiguration) {
+			t.Fatalf("invalid workflow lifecycle accepted: %#v, %v", lifecycle, err)
+		}
+	}
+}
+
 func TestRuntimeModelAndEffortRenderFreshAndResume(t *testing.T) {
 	configuration := validConfiguration()
 	configuration.Defaults.Runtime = Runtime{Type: "codex", Autonomy: "trusted-local", User: "root", Model: "gpt-5.6-sol", Effort: "high"}

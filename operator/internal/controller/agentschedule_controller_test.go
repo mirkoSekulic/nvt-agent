@@ -180,6 +180,12 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 		crdPath(t, properties, "workflowProfiles", "items", "properties", "name", "maxLength") == nil {
 		t.Fatalf("expected bounded workflow profile schema, got %#v", properties["workflowProfiles"])
 	}
+	workflowLifecycle := crdPath(t, properties, "workflowProfiles", "items", "properties", "lifecycle", "properties").(map[string]any)
+	if fmt.Sprint(crdPath(t, workflowLifecycle, "completeOn", "maxItems")) != "128" ||
+		crdPath(t, workflowLifecycle, "completeOn", "x-kubernetes-list-type") != "set" ||
+		crdPath(t, workflowLifecycle, "failOn", "x-kubernetes-list-type") != "set" {
+		t.Fatalf("expected bounded workflow lifecycle schema, got %#v", workflowLifecycle)
+	}
 	if crdPath(t, properties, "producerPolicies", "items", "properties", "identity", "type") != "string" ||
 		crdPath(t, properties, "producerPolicies", "items", "properties", "workflows", "x-kubernetes-list-type") != "set" ||
 		crdPath(t, properties, "producerPolicies", "items", "properties", "allowedPrincipalIssuers", "x-kubernetes-list-type") != "set" ||

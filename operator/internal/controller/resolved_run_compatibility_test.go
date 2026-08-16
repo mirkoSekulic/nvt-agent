@@ -122,6 +122,7 @@ func TestLocalResolvedRunContractMatchesExistingKubernetesProfileResolution(t *t
 		}},
 		Workflows: []resolvedrun.Workflow{{
 			Name: workflow.Name, WorkspaceInstructions: kubernetesRun.Spec.Agent.WorkflowInstructions,
+			Lifecycle: &lifecycle,
 			Repositories: []resolvedrun.Repository{{
 				CheckoutTarget: checkoutTarget, BrokerRepository: brokerRepository,
 				URL: "https://github.com/Altinn/altinn-studio.git", Path: "altinn-studio",

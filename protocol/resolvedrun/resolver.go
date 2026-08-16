@@ -62,7 +62,8 @@ func NewResolver(configuration TrustedConfiguration) (*Resolver, error) {
 	}
 	for _, workflow := range configuration.Workflows {
 		if !validName(workflow.Name) || len(workflow.Repositories) > MaxRepositories ||
-			validateInstructions(workflow.WorkspaceInstructions) != nil || validateWorkflowRepositories(workflow.Repositories) != nil {
+			validateInstructions(workflow.WorkspaceInstructions) != nil || validateWorkflowRepositories(workflow.Repositories) != nil ||
+			(workflow.Lifecycle != nil && validateLifecycle(*workflow.Lifecycle) != nil) {
 			return nil, ErrInvalidConfiguration
 		}
 		if _, duplicate := resolver.workflows[workflow.Name]; duplicate {
@@ -180,6 +181,9 @@ func (resolver *Resolver) Resolve(authorization AuthorizationContext, request Lo
 		return ResolvedAgentRun{}, ErrInvalidConfiguration
 	}
 	image, runtime, agentConfig, resources, lifecycle := resolver.effective(profile)
+	if workflow.Lifecycle != nil {
+		lifecycle = clone(*workflow.Lifecycle)
+	}
 	resolved := ResolvedAgentRun{
 		ContractVersion: ContractVersion, RunID: request.RunID, Principal: authorization.Principal,
 		Profile: profile.Name, Workflow: workflow.Name, Image: image, Runtime: runtime,
