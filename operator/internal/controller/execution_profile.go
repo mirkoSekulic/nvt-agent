@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -29,8 +30,11 @@ var (
 
 const (
 	maxWorkspaceInstructionsBytes       = 64 * 1024
+	maxLifecycleEvents                  = 128
 	principalAccountProviderPlaceholder = "$principal-account"
 )
+
+var lifecycleEventPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 
 // ResolvedExecutionProfile is the single immutable profile selected for a request.
 type ResolvedExecutionProfile struct {
@@ -43,6 +47,7 @@ type ResolvedExecutionProfile struct {
 type ResolvedWorkflowProfile struct {
 	Name                  string
 	WorkspaceInstructions string
+	Lifecycle             *nvtv1alpha1.AgentRunLifecycle
 }
 
 type validatedWorkflowConfiguration struct {
@@ -387,6 +392,9 @@ func validateWorkflowConfiguration(schedule *nvtv1alpha1.AgentSchedule) (*valida
 		if len(utilvalidation.IsDNS1123Label(profile.Name)) != 0 || len(profile.WorkspaceInstructions) > maxWorkspaceInstructionsBytes {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
+		if !validLifecycle(profile.Lifecycle) {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
 		if _, duplicate := configuration.profiles[profile.Name]; duplicate {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
@@ -517,7 +525,31 @@ func resolveWorkflowForProducer(
 	if !exists {
 		return nil, errInvalidExecutionProfileConfiguration
 	}
-	return &ResolvedWorkflowProfile{Name: profile.Name, WorkspaceInstructions: profile.WorkspaceInstructions}, nil
+	return &ResolvedWorkflowProfile{
+		Name: profile.Name, WorkspaceInstructions: profile.WorkspaceInstructions, Lifecycle: profile.Lifecycle.DeepCopy(),
+	}, nil
+}
+
+func validLifecycle(lifecycle *nvtv1alpha1.AgentRunLifecycle) bool {
+	if lifecycle == nil {
+		return true
+	}
+	if len(lifecycle.CompleteOn) > maxLifecycleEvents || len(lifecycle.FailOn) > maxLifecycleEvents {
+		return false
+	}
+	seen := make(map[string]struct{}, len(lifecycle.CompleteOn)+len(lifecycle.FailOn))
+	for _, events := range [][]string{lifecycle.CompleteOn, lifecycle.FailOn} {
+		for _, event := range events {
+			if len(event) > 256 || !lifecycleEventPattern.MatchString(event) {
+				return false
+			}
+			if _, duplicate := seen[event]; duplicate {
+				return false
+			}
+			seen[event] = struct{}{}
+		}
+	}
+	return true
 }
 
 func jsonObject(value apiextensionsv1.JSON) (map[string]any, error) {
@@ -558,9 +590,13 @@ func buildProfiledAgentRun(
 
 	selectedWorkflow := ""
 	workflowInstructions := ""
+	lifecycle := template.Lifecycle.DeepCopy()
 	if workflow != nil {
 		selectedWorkflow = workflow.Name
 		workflowInstructions = workflow.WorkspaceInstructions
+		if workflow.Lifecycle != nil {
+			lifecycle = workflow.Lifecycle.DeepCopy()
+		}
 	}
 	run := &nvtv1alpha1.AgentRun{
 		Spec: nvtv1alpha1.AgentRunSpec{
@@ -583,7 +619,7 @@ func buildProfiledAgentRun(
 				WorkspaceInstructions: profile.WorkspaceInstructions,
 				WorkflowInstructions:  workflowInstructions,
 			},
-			Lifecycle: template.Lifecycle.DeepCopy(),
+			Lifecycle: lifecycle,
 			TTL:       template.TTL.DeepCopy(),
 			ProfileProvenance: &nvtv1alpha1.AgentRunProfileProvenance{
 				AuthenticatedProducer: producer,

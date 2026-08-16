@@ -492,6 +492,8 @@ agentSchedule:
   # empty and every mapped profile uses the reserved $principal-account
   # placeholder for broker/runtime provider references.
   principalCredentialSelection: {}
+  # Administrator-owned task guidance and optional lifecycle replacement.
+  # A workflow lifecycle replaces (does not merge with) template.lifecycle.
   workflowProfiles: []
   producerPolicies: []
   allowedProducers: []

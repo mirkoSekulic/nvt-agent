@@ -165,9 +165,15 @@ workflowProfiles:
   - name: implement-pr
     workspaceInstructions: |
       Implement the change and create a pull request.
+    lifecycle:
+      completeOn: [plugin.github.pr.merged, plugin.github.pr.closed]
+      failOn: [plugin.work.failed]
   - name: review-pr
     workspaceInstructions: |
       Review the pull request and report findings first.
+    lifecycle:
+      completeOn: [plugin.work.completed]
+      failOn: [plugin.work.failed]
 producerPolicies:
   - identity: system:serviceaccount:nvt:nvt-github-comments-producer
     workflows: [implement-pr, review-pr]
@@ -179,6 +185,14 @@ requested workflow is exact-matched against that policy. When omitted, the
 policy's optional default is used. Workflow selection is independent of
 principal-based execution-profile selection and cannot change runtime, auth,
 provider, broker, or egress configuration.
+
+When a workflow profile defines `lifecycle`, that block completely replaces
+the lifecycle from the schedule template for the immutable AgentRun snapshot;
+event lists are not merged. When it is omitted, the template lifecycle is
+preserved exactly. Lifecycle is administrator-authored workflow policy and is
+never accepted from producer admission input. This makes it safe for workflows
+sharing one execution profile to use different terminal events while active TTL
+continues to provide the final bound.
 
 `profileSelection.rules` match exact `issuer` plus immutable `subject` values.
 `displayName` is stored for audit/display only and never participates in

@@ -102,6 +102,27 @@ spec:
                       workspaceInstructions:
                         type: string
                         maxLength: 65536
+                      lifecycle:
+                        type: object
+                        properties:
+                          completeOn:
+                            type: array
+                            maxItems: 128
+                            x-kubernetes-list-type: set
+                            items:
+                              type: string
+                              minLength: 1
+                              maxLength: 256
+                              pattern: '^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$'
+                          failOn:
+                            type: array
+                            maxItems: 128
+                            x-kubernetes-list-type: set
+                            items:
+                              type: string
+                              minLength: 1
+                              maxLength: 256
+                              pattern: '^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$'
                 producerPolicies:
                   type: array
                   minItems: 1

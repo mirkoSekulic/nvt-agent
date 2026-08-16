@@ -407,8 +407,10 @@ func TestWorkflowProfilesAreAuthorizedIndependentlyFromExecutionProfiles(t *test
 	schedule.Spec.Profiles[0].WorkspaceInstructions = "Execution profile guidance.\n"
 	copy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
 	copy.Spec.WorkflowProfiles[0].WorkspaceInstructions = "copy changed"
+	copy.Spec.WorkflowProfiles[0].Lifecycle.CompleteOn[0] = "plugin.copy.changed"
 	copy.Spec.ProducerPolicies[0].Workflows[0] = "copy-changed"
 	if schedule.Spec.WorkflowProfiles[0].WorkspaceInstructions != "Implement and create a pull request.\n" ||
+		schedule.Spec.WorkflowProfiles[0].Lifecycle.CompleteOn[0] != "plugin.github.pr.merged" ||
 		schedule.Spec.ProducerPolicies[0].Workflows[0] != "implement-pr" {
 		t.Fatal("workflow profiles or producer policies were not deep-copied")
 	}
@@ -426,10 +428,11 @@ func TestWorkflowProfilesAreAuthorizedIndependentlyFromExecutionProfiles(t *test
 		workflow     string
 		wantWorkflow string
 		wantText     string
+		wantComplete []string
 	}{
-		{workID: "workflow-default", wantWorkflow: "implement-pr", wantText: "Implement and create a pull request.\n"},
-		{workID: "workflow-review", workflow: "review-pr", wantWorkflow: "review-pr", wantText: "Review and report findings first.\n"},
-		{workID: "workflow-implement", workflow: "implement-pr", wantWorkflow: "implement-pr", wantText: "Implement and create a pull request.\n"},
+		{workID: "workflow-default", wantWorkflow: "implement-pr", wantText: "Implement and create a pull request.\n", wantComplete: []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}},
+		{workID: "workflow-review", workflow: "review-pr", wantWorkflow: "review-pr", wantText: "Review and report findings first.\n", wantComplete: []string{"plugin.work.completed"}},
+		{workID: "workflow-implement", workflow: "implement-pr", wantWorkflow: "implement-pr", wantText: "Implement and create a pull request.\n", wantComplete: []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}},
 	}
 	var runs []nvtv1alpha1.AgentRun
 	for _, request := range requests {
@@ -444,16 +447,34 @@ func TestWorkflowProfilesAreAuthorizedIndependentlyFromExecutionProfiles(t *test
 		if run.Spec.ProfileProvenance.SelectedProfile != "codex-default" ||
 			run.Spec.ProfileProvenance.SelectedWorkflow != request.wantWorkflow ||
 			run.Spec.Agent.WorkspaceInstructions != "Execution profile guidance.\n" ||
-			run.Spec.Agent.WorkflowInstructions != request.wantText {
+			run.Spec.Agent.WorkflowInstructions != request.wantText ||
+			!reflect.DeepEqual(run.Spec.Lifecycle.CompleteOn, request.wantComplete) ||
+			!reflect.DeepEqual(run.Spec.Lifecycle.FailOn, []string{"plugin.work.failed"}) {
 			t.Fatalf("independent workflow resolution failed: %#v", run.Spec)
 		}
 		runs = append(runs, run)
 	}
+	if phase, _, matched := AgentRunLifecycleTransition(runs[0].Spec.Lifecycle, "plugin.work.completed"); matched || phase != "" {
+		t.Fatalf("non-selected completion event terminated implement workflow: phase=%q matched=%t", phase, matched)
+	}
+	for _, event := range []string{"plugin.github.pr.merged", "plugin.github.pr.closed"} {
+		if phase, _, matched := AgentRunLifecycleTransition(runs[0].Spec.Lifecycle, event); !matched || phase != nvtv1alpha1.AgentRunPhaseCompleted {
+			t.Fatalf("selected PR lifecycle event %q did not complete: phase=%q matched=%t", event, phase, matched)
+		}
+	}
+	if phase, _, matched := AgentRunLifecycleTransition(runs[1].Spec.Lifecycle, "plugin.work.completed"); !matched || phase != nvtv1alpha1.AgentRunPhaseCompleted {
+		t.Fatalf("review workflow completion did not match: phase=%q matched=%t", phase, matched)
+	}
+	if phase, _, matched := AgentRunLifecycleTransition(runs[0].Spec.Lifecycle, "plugin.work.failed"); !matched || phase != nvtv1alpha1.AgentRunPhaseFailed {
+		t.Fatalf("workflow failure policy did not match: phase=%q matched=%t", phase, matched)
+	}
 
 	schedule.Spec.WorkflowProfiles[0].WorkspaceInstructions = "mutated"
+	schedule.Spec.WorkflowProfiles[0].Lifecycle.CompleteOn[0] = "plugin.mutated"
 	schedule.Spec.ProducerPolicies[0].DefaultWorkflow = "review-pr"
 	if runs[0].Spec.Agent.WorkflowInstructions != "Implement and create a pull request.\n" ||
-		runs[0].Spec.ProfileProvenance.SelectedWorkflow != "implement-pr" {
+		runs[0].Spec.ProfileProvenance.SelectedWorkflow != "implement-pr" ||
+		runs[0].Spec.Lifecycle.CompleteOn[0] != "plugin.github.pr.merged" {
 		t.Fatal("resolved workflow snapshot changed after schedule mutation")
 	}
 
@@ -514,6 +535,15 @@ func TestWorkflowSelectionAndConfigurationFailClosed(t *testing.T) {
 		}},
 		{name: "oversized instructions", mutate: func(s *nvtv1alpha1.AgentSchedule) {
 			s.Spec.WorkflowProfiles[0].WorkspaceInstructions = strings.Repeat("x", maxWorkspaceInstructionsBytes+1)
+		}},
+		{name: "invalid lifecycle event", mutate: func(s *nvtv1alpha1.AgentSchedule) {
+			s.Spec.WorkflowProfiles[0].Lifecycle.CompleteOn = []string{"Invalid Event"}
+		}},
+		{name: "duplicate lifecycle event", mutate: func(s *nvtv1alpha1.AgentSchedule) {
+			s.Spec.WorkflowProfiles[0].Lifecycle.CompleteOn = []string{"plugin.work.completed", "plugin.work.completed"}
+		}},
+		{name: "overlapping lifecycle event", mutate: func(s *nvtv1alpha1.AgentSchedule) {
+			s.Spec.WorkflowProfiles[0].Lifecycle.FailOn = []string{"plugin.github.pr.merged"}
 		}},
 		{name: "mixed legacy allowlist", mutate: func(s *nvtv1alpha1.AgentSchedule) {
 			s.Spec.AllowedProducers = []string{"system:serviceaccount:nvt:legacy"}
@@ -1207,8 +1237,12 @@ func testWorkflowProfiledAgentSchedule() *nvtv1alpha1.AgentSchedule {
 	schedule := testProfiledAgentSchedule()
 	schedule.Spec.AllowedProducers = nil
 	schedule.Spec.WorkflowProfiles = []nvtv1alpha1.AgentScheduleWorkflowProfile{
-		{Name: "implement-pr", WorkspaceInstructions: "Implement and create a pull request.\n"},
-		{Name: "review-pr", WorkspaceInstructions: "Review and report findings first.\n"},
+		{Name: "implement-pr", WorkspaceInstructions: "Implement and create a pull request.\n", Lifecycle: &nvtv1alpha1.AgentRunLifecycle{
+			CompleteOn: []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}, FailOn: []string{"plugin.work.failed"},
+		}},
+		{Name: "review-pr", WorkspaceInstructions: "Review and report findings first.\n", Lifecycle: &nvtv1alpha1.AgentRunLifecycle{
+			CompleteOn: []string{"plugin.work.completed"}, FailOn: []string{"plugin.work.failed"},
+		}},
 	}
 	schedule.Spec.ProducerPolicies = []nvtv1alpha1.AgentScheduleProducerPolicy{
 		{

@@ -36,6 +36,13 @@ use private bearer files by reference. Producers cannot submit profiles,
 providers, grants, repositories, runtime controls, retention, or backend
 settings.
 
+Workflows may optionally define `lifecycle` using `complete_on` and `fail_on`.
+When present, it replaces the complete lifecycle selected from the profile or
+platform defaults; lists are never merged. Omitting it preserves the previous
+effective lifecycle. The selected result is validated and snapshotted into the
+immutable resolved run, so a producer can select only an authorized workflow
+and cannot supply terminal events.
+
 Provider implementations and credential values stay in `.broker/broker.yaml`
 and broker-owned credential state. The local platform file contains only
 provider references, broker grants/capabilities, repository identifiers, and
