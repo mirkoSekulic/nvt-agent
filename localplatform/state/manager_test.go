@@ -506,7 +506,7 @@ func TestPortalConfigurationUsesUniqueCanonicalLocalDestinations(t *testing.T) {
 	}
 	seenNames, seenKeys := map[string]bool{}, map[string]bool{}
 	for _, slot := range document.Slots {
-		if slot.Name == "" || stringsContains(slot.Name, ".") || seenNames[slot.Name] || seenKeys[slot.DataKey] || slot.BrokerProvider == "" {
+		if slot.Name == "" || stringsContains(slot.Name, ".") || slot.DataKey != slot.Name+".json" || seenNames[slot.Name] || seenKeys[slot.DataKey] || slot.BrokerProvider == "" {
 			t.Fatalf("invalid portal slot: %#v", slot)
 		}
 		seenNames[slot.Name], seenKeys[slot.DataKey] = true, true

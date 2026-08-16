@@ -11,8 +11,8 @@ Build the trusted control-plane image from the repository root:
 make local-controller-build
 ```
 
-`compose.infra.yaml` runs the image with a durable named state volume on the
-internal `local-control-plane` network. The trusted controller alone receives
+The local-manifest lifecycle runs the image with a durable managed state volume
+on the internal control-plane network. The trusted controller alone receives
 the host Docker socket and broker registry/key mount; it has no host port and is
 not reachable from agent containers. The network is defense in depth, not the
 API authorization boundary: schedule producers, the gateway route reader, and

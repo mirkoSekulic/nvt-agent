@@ -235,7 +235,7 @@ func RenderCompose(ctx context.Context, compiled manifest.Compiled, statePlan pl
 			ReadOnly: true, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges:true"},
 			Tmpfs: []string{"/tmp:rw,noexec,nosuid,nodev,size=16m"}, Restart: "unless-stopped", Init: true,
 			PidsLimit: 128, CPUs: "1.0", MemLimit: "256m", StopGracePeriod: "30s",
-			Labels:  map[string]string{"nvt.dev/local-platform-owner": statePlan.Project, "nvt.dev/local-producer": intent.Name},
+			Labels:  map[string]string{"nvt.dev/local-platform-owner": statePlan.Project, "nvt.dev/local-platform-version": "1", "nvt.dev/local-producer": intent.Name},
 			Logging: composeLogging{Driver: "json-file", Options: map[string]string{"max-file": "3", "max-size": "10m"}},
 		}
 	}

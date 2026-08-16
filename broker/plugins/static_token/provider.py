@@ -1,6 +1,7 @@
 import base64
 import fnmatch
 import re
+from pathlib import Path
 
 from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
 from broker.core.errors import ProviderError
@@ -114,10 +115,23 @@ class StaticTokenProvider:
         return output
 
     def _token(self):
-        token_env = string_value(self.config.get("token-env"), f"provider {self.name} config.token-env", required=True)
-        value = env_value(token_env)
+        token_env = string_value(self.config.get("token-env"), f"provider {self.name} config.token-env")
+        token_file = string_value(self.config.get("token-file"), f"provider {self.name} config.token-file")
+        if bool(token_env) == bool(token_file):
+            fail(f"provider {self.name} requires exactly one of token-env or token-file")
+        if token_env:
+            value = env_value(token_env)
+        else:
+            path = Path(token_file)
+            try:
+                status = path.stat()
+                if not path.is_file() or status.st_mode & 0o077:
+                    fail(f"provider {self.name} token-file is not private")
+                value = path.read_text(encoding="utf-8").strip()
+            except OSError as error:
+                fail(f"provider {self.name} token-file is unavailable: {error}")
         if not value:
-            fail(f"environment variable {token_env} must not be empty")
+            fail(f"provider {self.name} token must not be empty")
         return value
 
     def _ensure_repo_allowed(self, repo, effective_repositories):

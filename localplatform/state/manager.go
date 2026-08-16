@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"sort"
 
+	serviceconfig "github.com/mirkoSekulic/nvt-agent/localplatform/config"
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
 	producerrender "github.com/mirkoSekulic/nvt-agent/localplatform/producer"
 )
@@ -144,15 +144,19 @@ func configurationFiles(compiled manifest.Compiled, inputs *Inputs, plan Plan) (
 	if err != nil {
 		return nil, err
 	}
-	broker, err := json.Marshal(compiled.Broker)
+	broker, err := serviceconfig.Broker(compiled)
 	if err != nil {
 		return nil, err
 	}
-	controller, err := json.Marshal(compiled.Controller)
+	instructions := serviceconfig.Instructions{}
+	for _, instruction := range inputs.Instructions {
+		instructions[instruction.Name] = string(instruction.Content)
+	}
+	controller, err := serviceconfig.Controller(compiled, instructions)
 	if err != nil {
 		return nil, err
 	}
-	gateway, err := json.Marshal(compiled.Gateway)
+	gateway, err := serviceconfig.Gateway(compiled)
 	if err != nil {
 		return nil, err
 	}

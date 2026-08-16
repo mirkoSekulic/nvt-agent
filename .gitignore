@@ -1,5 +1,6 @@
 .agents/
 .broker/
+.nvt-local/
 values.github-comments.yaml
 values.nvt-local.yaml
 values.*.local.yaml

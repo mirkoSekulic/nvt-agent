@@ -1,106 +1,79 @@
 # Native local workstations
 
-`nvt-local-controller` creates persistent local workstations and disposable
-producer runs from one administrator-owned YAML file.
+The local backend is reproduced from one non-secret `nvt.local.yaml`, optional
+files beneath `.nvt-local/`, and broker-managed OAuth enrollment. Generated
+configuration, identities, admission credentials, databases, workspaces,
+runtime homes, Docker data, and sessions live in exactly labeled Docker
+volumes. There is no generated host Compose file or local `.env` file.
 
-## Configure
-
-Build the trusted images, copy the example, and edit only non-secret policy:
-
-```sh
-make runtime-build dind-build broker-build local-controller-build gateway-build egressd-build captured-build
-mkdir -p .broker
-cp templates/local-controller.yaml .broker/local-controller.yaml
-```
-
-The top-level profiles, workflows, execution backends, and retention policies
-are reusable. A persistent workstation selects them by name:
-
-```yaml
-workstations:
-  - name: nvt
-    principal:
-      issuer: https://local.nvt.invalid
-      subject: workstation-nvt
-      display_name: NVT development
-    profile: engineering
-    workflow: nvt-development
-    retention: persistent
-    backend: local-docker
-```
-
-The `name` is the durable run and route identity. Principal authorization uses
-exact issuer plus immutable subject; display name is presentation only.
-Producer schedules in the same document select the same profiles/workflows and
-use private bearer files by reference. Producers cannot submit profiles,
-providers, grants, repositories, runtime controls, retention, or backend
-settings.
-
-Workflows may optionally define `lifecycle` using `complete_on` and `fail_on`.
-When present, it replaces the complete lifecycle selected from the profile or
-platform defaults; lists are never merged. Omitting it preserves the previous
-effective lifecycle. The selected result is validated and snapshotted into the
-immutable resolved run, so a producer can select only an authorized workflow
-and cannot supply terminal events.
-
-Provider implementations and credential values stay in `.broker/broker.yaml`
-and broker-owned credential state. The local platform file contains only
-provider references, broker grants/capabilities, repository identifiers, and
-non-secret runtime/egress policy. Never place tokens, passwords, private keys,
-credential documents, or credential-bearing command arguments in it.
-
-The checked-in template is an intentionally credential-free direct example.
-Replace its illustrative shell profile with reviewed broker-backed mediated
-profiles for real Codex, Claude, GitHub App, or PAT use. The shared resolved-run
-contract is provider-neutral; the local controller has no provider branches.
-
-## Start and operate
+## Configure and start
 
 ```sh
-make infra-up
+cp nvt.local.example.yaml nvt.local.yaml
+make local-images
+make local-init
+make local-up
+make local-status
 ```
 
-`infra-up` detects `.broker/local-controller.yaml` and supplies its read-only
-in-container path. Open stable routes such as:
+Open `http://localhost:4090/agents`. A workstation keeps its `/workspace`,
+runtime home, nested Docker data, and agent session across controller, Docker,
+Docker Desktop, and laptop restarts. The runtime resumes through its existing
+generic resume command.
 
-```text
-http://localhost:4090/agents/nvt/
-http://nvt.agent.localhost:4090/
+The complete schema and example are in
+[`protocol/local-manifest.md`](../protocol/local-manifest.md) and
+[`localplatform/manifest/testdata/valid.yaml`](../localplatform/manifest/testdata/valid.yaml).
+Instruction files may be organized anywhere below the manifest directory.
+Secret inputs must be regular, current-user-owned files below
+`.nvt-local/secrets/`, with mode `0600` or stricter:
+
+```sh
+install -d -m 0700 .nvt-local/secrets/github
+install -m 0600 /safe/source/main-app.pem .nvt-local/secrets/github/main-app.pem
 ```
 
-Optional local credential management is described in
-[`local-credential-portal.md`](local-credential-portal.md). It adds the existing
-credential portal to the gateway without giving credentials to the gateway,
-controller, producer, or agent containers.
+Declaring a Codex or Claude OAuth account enables **Manage credentials** in the
+gateway. Enroll it there; the broker imports it into canonical private storage.
 
-Every workstation uses `/workspace` inside the agent, matching the Kubernetes
-runtime contract.
+## Lifecycle
 
-Adding a workstation and restarting the controller creates it atomically.
-Unchanged entries replay idempotently. Workspace, runtime/session state, Docker
-data, and route identity survive controller, agent-container, and ordinary
-Docker daemon/Desktop restarts; the runtime uses its generic `resume` command.
+- `make local-init` validates and compiles the manifest, resolves inputs, and
+  creates or adopts only exact-labeled state without starting the platform.
+- `make local-up` reconciles state and starts the control plane, portal,
+  persistent workstations, and configured producers.
+- `make local-status` reports control-plane, producer, and workstation state.
+- `make local-down` stops exact-owned containers while preserving volumes,
+  credentials, databases, workspaces, and sessions.
+- `make local-reset` explicitly removes only resources carrying the complete
+  expected local-platform or local-controller ownership labels. It destroys
+  credentials and workstation state.
 
-Removing an entry from YAML never stops or deletes the existing run. Destructive
-cleanup requires the separately authenticated controller delete API. This
-prevents an accidental configuration edit from deleting retained volumes.
-Changing the resolved profile/workflow/policy for an existing name is immutable
-drift and fails startup; explicitly delete and recreate when that is intended.
+Removing a workstation from the manifest is non-destructive. Immutable drift
+for an existing workstation fails closed.
 
-The raw management, exact-schedule producer, and gateway route-reader APIs use
-separate credentials and cannot be substituted for one another. Agent
-containers receive neither the Docker socket nor controller credentials.
+## Clean-break upgrade
+
+There is no compatibility fallback or automatic migration from the former
+local layout.
+
+1. Preserve externally supplied PEM or PAT files you still need.
+2. Create `nvt.local.yaml` and copy those files into private paths below
+   `.nvt-local/secrets/`.
+3. Run `make local-images local-init local-up`, then enroll Codex or Claude
+   OAuth credentials through **Manage credentials**.
+4. Verify workstations and producers, then explicitly remove the old local
+   containers and volumes with the old checkout's Compose teardown. After
+   preserving any externally supplied files you still need, remove the legacy
+   `.broker/` directory. The new lifecycle never reads, adopts, or deletes
+   those resources for you.
 
 ## Troubleshooting
 
-- `workstation-configuration-unavailable`: validate the YAML API version,
-  references, duplicate names, persistent retention, and immutable drift.
-- `backend-unavailable`: verify Docker, broker, gateway, images, and configured
-  network ranges.
-- A run in `preparing` is retried after dependency recovery. A confirmed
-  ownership conflict remains fail closed and is never adopted or deleted.
-- Do not delete or prune the controller state and named Docker volumes when
-  testing restart recovery.
-
-The normative configuration, API, recovery, and cleanup rules are in
-[`protocol/local-controller.md`](../protocol/local-controller.md).
+- Missing, permissive, oversized, symlinked, or escaping inputs fail before
+  trusted services start. Fix the named input and rerun `local-init`.
+- `managed volume ownership conflict` means a same-name Docker volume lacks
+  the complete expected label map. It is never adopted or deleted.
+- An OAuth-backed broker may remain unready until its portal slot is enrolled;
+  the gateway and portal remain available for enrollment.
+- Do not prune labeled volumes when testing restart/resume behavior.

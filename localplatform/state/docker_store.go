@@ -410,6 +410,17 @@ func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts 
 	if len(mounts) == 0 {
 		return nil, errors.New("state helper has no managed volumes")
 	}
+	project := mounts[0].volume.Labels[ownerLabel]
+	seenTargets := map[string]struct{}{}
+	for _, mount := range mounts {
+		if !validVolume(mount.volume) || mount.volume.Labels[ownerLabel] != project || !safeContainerPath(mount.target) {
+			return nil, errors.New("invalid state helper mount")
+		}
+		if _, duplicate := seenTargets[mount.target]; duplicate {
+			return nil, errors.New("duplicate state helper mount")
+		}
+		seenTargets[mount.target] = struct{}{}
+	}
 	if err := store.ensureHelperImage(ctx); err != nil {
 		return nil, err
 	}
@@ -418,15 +429,8 @@ func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts 
 		return nil, err
 	}
 	arguments := []string{"create", "--name", container, "--pull", "never", "-i", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=65536,mode=0700", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--security-opt", "no-new-privileges"}
-	seenTargets := map[string]struct{}{}
+	arguments = append(arguments, "--label", ownerLabel+"="+project, "--label", versionLabel+"="+stateVersion, "--label", "nvt.dev/local-platform-state-helper=1")
 	for _, mount := range mounts {
-		if !validVolume(mount.volume) || !safeContainerPath(mount.target) {
-			return nil, errors.New("invalid state helper mount")
-		}
-		if _, duplicate := seenTargets[mount.target]; duplicate {
-			return nil, errors.New("duplicate state helper mount")
-		}
-		seenTargets[mount.target] = struct{}{}
 		option := "type=volume,src=" + mount.volume.Name + ",dst=" + mount.target
 		if mount.readOnly {
 			option += ",readonly"
@@ -495,6 +499,10 @@ func safeContainerPath(value string) bool {
 func validGeneratedValueSize(value int) bool { return value == 32 || value == 43 }
 
 func validHelperImage(value string) bool {
+	if strings.HasPrefix(value, "sha256:") && len(value) == len("sha256:")+64 {
+		_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+		return err == nil
+	}
 	parsed, err := reference.ParseNamed(value)
 	if err != nil || parsed.String() != value {
 		return false

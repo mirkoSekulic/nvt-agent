@@ -5,8 +5,10 @@ package plan
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 )
 
 type Plan struct {
@@ -51,6 +53,11 @@ func ShortID(value string) string {
 }
 
 func PrivateTarget(name string) string { return "/run/nvt-private/" + ShortID(name) }
+
+func CredentialSlotName(account string) string {
+	digest := sha256.Sum256([]byte("nvt.local-credential-slot/v1\x00" + account))
+	return "slot-" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:]))
+}
 
 const GeneratedConfigSuffix = "generated-config"
 

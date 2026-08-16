@@ -1,7 +1,6 @@
 # Local manifest v1
 
-Status: design contract; behavior-inactive until the local-platform integration
-series is complete.
+Status: active for the local Docker backend.
 
 `nvt.dev/local/v1` is the single human-authored, non-secret local-platform
 manifest. The implementation lives in `localplatform/manifest`, with private
@@ -107,8 +106,9 @@ the trusted state helper's standard input.
 
 The redacted state plan creates a distinct labeled Docker volume for generated
 configuration, broker database/audit data, broker private and canonical
-credential state, local-controller database/audit data, and—when an OAuth
-account enables the portal—the portal seed handoff. Portal seed storage is
+credential state, the shared broker agent registry, local-controller
+database/audit data, and—when an OAuth account enables the portal—the portal
+seed handoff. Portal seed storage is
 writable only by the credential portal and read-only to the broker seed
 supervisor; broker canonical credentials remain in the broker-private volume.
 Before startup, the seed volume root is fixed to the packaged portal identity
@@ -157,10 +157,9 @@ slots before volume creation. Slot and local destination names use a
 domain-separated full SHA-256 mapping of the logical account name; any duplicate
 mapping is rejected before state is written.
 
-Trusted-state preparation does not start a producer, workstation, workflow, or
-replacement Compose project. The producer renderer below consumes its redacted
-plan, while final lifecycle wiring remains behavior-inactive until the later
-integration slice.
+Trusted-state preparation does not itself start a producer, workstation, or
+workflow. The lifecycle renderer consumes its redacted plan and passes the
+complete generated Compose document to Docker Compose on standard input.
 
 ## Local producer rendering
 
