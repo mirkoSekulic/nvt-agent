@@ -154,7 +154,7 @@ func githubConfiguration(intent manifest.ProducerIntent) map[string]any {
 		"submission": map[string]any{
 			"mode": "scheduleAdmission", "backend": "local", "admissionMode": "profiled",
 			"admissionBaseURL": defaultAdmissionBaseURL, "admissionTokenFile": plancontract.PrivateTarget(intent.AdmissionCredential),
-			"scheduleName": intent.Name, "workflow": intent.Workflow, "commandWorkflows": commandWorkflows,
+			"scheduleNamespace": "unused", "scheduleName": intent.Name, "workflow": intent.Workflow, "commandWorkflows": commandWorkflows,
 		},
 		"agentRun": map[string]any{},
 	}

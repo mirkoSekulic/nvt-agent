@@ -49,6 +49,7 @@ func TestConfigurationsRenderBuiltInAndBoundedExternalContracts(t *testing.T) {
 	}
 	if submission["backend"] != "local" || submission["admissionMode"] != "profiled" ||
 		submission["admissionTokenFile"] != plancontract.PrivateTarget("producer-admission:github") ||
+		submission["scheduleNamespace"] != "unused" ||
 		builtIn["state"].(map[string]any)["sqlitePath"] != StatePath+"/state.db" || builtIn["pollInterval"] != "30s" ||
 		builtIn["idempotency"].(map[string]any)["scope"] != "issue" || builtIn["schedulingReactions"].(map[string]any)["enabled"] != true {
 		t.Fatalf("built-in configuration = %#v", builtIn)

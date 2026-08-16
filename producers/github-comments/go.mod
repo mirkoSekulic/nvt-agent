@@ -3,6 +3,7 @@ module github.com/mirkoSekulic/nvt-agent/producers/github-comments
 go 1.25.0
 
 require (
+	github.com/mirkoSekulic/nvt-agent/localplatform v0.0.0
 	github.com/mirkoSekulic/nvt-agent/operator v0.0.0
 	k8s.io/apiextensions-apiserver v0.34.1
 	k8s.io/apimachinery v0.34.2
@@ -14,6 +15,7 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/distribution/reference v0.6.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
@@ -33,6 +35,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
@@ -62,3 +65,7 @@ require (
 )
 
 replace github.com/mirkoSekulic/nvt-agent/operator => ../../operator
+
+replace github.com/mirkoSekulic/nvt-agent/localplatform => ../../localplatform
+
+replace github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun => ../../protocol/resolvedrun
