@@ -116,6 +116,7 @@ type Producer struct {
 	Name                    string            `json:"name"`
 	Preset                  string            `json:"preset,omitempty"`
 	Image                   string            `json:"image,omitempty"`
+	RuntimeIdentity         *RuntimeIdentity  `json:"runtimeIdentity,omitempty"`
 	Account                 string            `json:"account,omitempty"`
 	Repository              string            `json:"repository,omitempty"`
 	Prefix                  string            `json:"prefix,omitempty"`
@@ -124,6 +125,11 @@ type Producer struct {
 	AllowedPrincipalIssuers []string          `json:"allowedPrincipalIssuers,omitempty"`
 	PublicConfig            map[string]any    `json:"publicConfig,omitempty"`
 	Secrets                 map[string]string `json:"secrets,omitempty"`
+}
+
+type RuntimeIdentity struct {
+	UID int `json:"uid"`
+	GID int `json:"gid"`
 }
 
 // Decode parses exactly one bounded YAML document and validates all references.
@@ -369,6 +375,12 @@ func (m Manifest) Validate() error {
 		if producer.Image != "" && !validDigestImage(producer.Image) {
 			return fmt.Errorf("producer %q image must use an immutable sha256 digest", producer.Name)
 		}
+		if producer.Image != "" && !validExternalRuntimeIdentity(producer.RuntimeIdentity) {
+			return fmt.Errorf("external producer %q must declare a non-root runtime identity", producer.Name)
+		}
+		if producer.Preset != "" && producer.RuntimeIdentity != nil {
+			return fmt.Errorf("built-in producer %q cannot override its runtime identity", producer.Name)
+		}
 		if producer.Preset == "github-comments" && !validGitHubProducer(producer, m.Accounts, m.Repositories) {
 			return fmt.Errorf("built-in producer %q is incomplete", producer.Name)
 		}
@@ -412,6 +424,9 @@ func (m Manifest) Validate() error {
 }
 
 func validName(v string) bool { return len(v) <= MaxNameBytes && namePattern.MatchString(v) }
+func validExternalRuntimeIdentity(identity *RuntimeIdentity) bool {
+	return identity != nil && identity.UID > 0 && identity.UID <= 1<<31-1 && identity.GID > 0 && identity.GID <= 1<<31-1
+}
 func validIssuer(value string) bool {
 	parsed, err := url.Parse(value)
 	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.String() == value && value == strings.TrimSpace(value) && !strings.ContainsAny(value, "\x00\r\n")

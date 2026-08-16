@@ -108,6 +108,18 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 		return preparedPlan{}, errors.New("trusted state plan configuration is invalid")
 	}
 	result := preparedPlan{Plan: Plan{Version: stateVersion, Project: project}}
+	producerIdentities := map[string][2]int{}
+	for _, producer := range compiled.Producers {
+		service := "producer:" + producer.Name
+		identity := producer.RuntimeIdentity
+		if producer.Owner != service || !producerServicePattern.MatchString(service) || identity.UID <= 0 || identity.UID > 1<<31-1 || identity.GID <= 0 || identity.GID > 1<<31-1 {
+			return preparedPlan{}, errors.New("compiled producer runtime identity is invalid")
+		}
+		if _, duplicate := producerIdentities[service]; duplicate {
+			return preparedPlan{}, errors.New("duplicate compiled producer runtime identity")
+		}
+		producerIdentities[service] = [2]int{identity.UID, identity.GID}
+	}
 	addVolume := func(suffix, role, owner string, consumers ...string) Volume {
 		consumers = uniqueSorted(consumers)
 		volume := Volume{
@@ -170,7 +182,10 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 			return preparedPlan{}, errors.New("resolved private inputs do not match compiled intent")
 		}
 		seenStatic[key] = struct{}{}
-		uid, gid := serviceIdentity(input.Owner)
+		uid, gid, identityOK := serviceIdentity(input.Owner, producerIdentities)
+		if !identityOK {
+			return preparedPlan{}, errors.New("private input runtime identity is unavailable")
+		}
 		suffix := "input-" + shortID(input.Owner+"\x00"+input.Name)
 		volume := addVolume(suffix, "static-private-input", input.Owner, input.Owner)
 		result.static = append(result.static, staticInput{input.Owner, input.Name, volume.Name, uid, gid})
@@ -230,7 +245,10 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 		source := addVolume("generated-"+shortID(input.name), "generated-private-source", "local-platform-state")
 		entry := generatedInputPlan{generatedInput: input, sourceVolume: source.Name}
 		for _, consumer := range input.consumers {
-			uid, gid := serviceIdentity(consumer)
+			uid, gid, identityOK := serviceIdentity(consumer, producerIdentities)
+			if !identityOK {
+				return preparedPlan{}, errors.New("generated private input runtime identity is unavailable")
+			}
 			copyVolume := addVolume("generated-"+shortID(input.name+"\x00"+consumer), "generated-private-input", "local-platform-state", consumer)
 			entry.consumer = append(entry.consumer, consumerCopy{consumer, copyVolume.Name, uid, gid})
 			result.Mounts = append(result.Mounts, Mount{Service: consumer, Volume: copyVolume.Name, Subpath: "current/value", Target: privateTarget(input.name), ReadOnly: true})
@@ -255,17 +273,21 @@ func trustedGeneratedConsumer(value string) bool {
 	return value == "broker" || value == "credential-portal" || value == "credential-runner" || value == "gateway" || value == "local-controller" || producerServicePattern.MatchString(value)
 }
 
-func serviceIdentity(service string) (int, int) {
+func serviceIdentity(service string, producers map[string][2]int) (int, int, bool) {
 	switch service {
 	case "gateway":
-		return 65532, 65532
+		return 65532, 65532, true
 	case "credential-portal", "credential-runner":
-		return 1000, 1000
+		return 1000, 1000, true
 	default:
-		if strings.HasPrefix(service, "producer:") {
-			return 65532, 65532
+		if producerServicePattern.MatchString(service) {
+			identity, ok := producers[service]
+			return identity[0], identity[1], ok
 		}
-		return 0, 0
+		if service == "broker" || service == "local-controller" {
+			return 0, 0, true
+		}
+		return 0, 0, false
 	}
 }
 

@@ -112,12 +112,20 @@ Before startup, the seed volume root is fixed to the packaged portal identity
 staging directory without broadening access.
 
 Static inputs are snapshotted into exact per-consumer volumes. Generated inputs
-use a persistent private source plus an exact copy for each consumer. Every
-consumer volume contains only `current/value`, owned by the packaged service
-UID with mode `0400`; the service receives only that subpath read-only. Shared
+use a persistent private source plus an exact journal-validated copy for each
+consumer. Each service receives only `current/value` as a read-only subpath,
+owned by its declared runtime UID with mode `0400`; generated-copy journals are
+not mounted into the service. Shared
 credentials, such as the controller route token or a producer admission token,
 are copied into separate service volumes so granting one consumer never exposes
 another consumer's directory. No agent service is a valid consumer.
+
+Packaged producers have the packaged runtime identity `65532:65532`. An
+external digest-pinned producer must declare `runtimeIdentity.uid` and
+`runtimeIdentity.gid` as positive non-root IDs. That identity is carried into
+the compiled producer contract and owns both its static secret snapshots and
+generated admission-token copy; state planning fails if a producer consumer has
+no exact compiled identity.
 
 All volumes carry exactly these labels:
 

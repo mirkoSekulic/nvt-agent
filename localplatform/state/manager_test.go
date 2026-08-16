@@ -119,6 +119,7 @@ func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
 	defer inputs.Close()
 	compiled := manifest.Compiled{
 		Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway", CredentialPortalAccounts: []manifest.PortalAccountIntent{{Name: "codex", Preset: "codex-oauth"}}},
+		Producers: []manifest.ProducerIntent{{Owner: "producer:test", Name: "test", Kind: "oci", RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1000, GID: 1000}}},
 		PrivateInputs: []manifest.PrivateInputIntent{
 			{Owner: "local-controller", Name: "development", File: "instructions.md", Purpose: "instructions"},
 			{Owner: "broker", Name: "github-key", File: ".nvt-local/secrets/key", Purpose: "secret"},
@@ -380,6 +381,43 @@ func TestPlanOmitsCredentialPortalStateWithoutOAuthAccounts(t *testing.T) {
 		if file.Name == "credential-portal.json" {
 			t.Fatal("disabled portal received configuration")
 		}
+	}
+}
+
+func TestPlanUsesDeclaredExternalProducerRuntimeIdentity(t *testing.T) {
+	compiled := manifest.Compiled{
+		Version: manifest.APIVersion,
+		Broker:  manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"},
+		Producers:              []manifest.ProducerIntent{{Owner: "producer:external", Name: "external", Kind: "oci", RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1001, GID: 1002}}},
+		PrivateInputs:          []manifest.PrivateInputIntent{{Owner: "producer:external", Name: "api-key", File: ".nvt-local/secrets/api-key", Purpose: "secret"}},
+		GeneratedPrivateInputs: []manifest.GeneratedPrivateInputIntent{{Owner: "local-platform-state", Name: "producer-admission:external", Purpose: "schedule-admission-token", Consumers: []string{"local-controller", "producer:external"}}},
+	}
+	inputs := &Inputs{private: map[inputKey][]byte{{owner: "producer:external", name: "api-key"}: []byte("private")}}
+	defer inputs.Close()
+	plan, err := preparePlan("local-test", compiled, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.static) != 1 || plan.static[0].uid != 1001 || plan.static[0].gid != 1002 {
+		t.Fatalf("static producer identity = %#v", plan.static)
+	}
+	foundGenerated := false
+	for _, generated := range plan.generated {
+		for _, consumer := range generated.consumer {
+			if consumer.service == "producer:external" {
+				foundGenerated = true
+				if consumer.uid != 1001 || consumer.gid != 1002 {
+					t.Fatalf("generated producer identity = %#v", consumer)
+				}
+			}
+		}
+	}
+	if !foundGenerated {
+		t.Fatal("generated producer consumer was not planned")
+	}
+	compiled.Producers = nil
+	if _, err := preparePlan("local-test", compiled, inputs); err == nil {
+		t.Fatal("producer inputs without a compiled runtime identity were accepted")
 	}
 }
 

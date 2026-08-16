@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -310,7 +312,18 @@ type helperMount struct {
 	readOnly bool
 }
 
-const privateSourceValidation = `test_private_source() {
+const privateSourceValidation = `snapshot_counter=0
+snapshot_bounded() {
+  source_path=$1
+  maximum_bytes=$2
+  snapshot_counter=$((snapshot_counter + 1))
+  bounded_snapshot="/tmp/nvt-bounded-$snapshot_counter"
+  read_bytes=$((maximum_bytes + 1))
+  timeout 2 head -c "$read_bytes" "$source_path" > "$bounded_snapshot" || return 1
+  snapshot_bytes=$(stat -c '%s' "$bounded_snapshot") || return 1
+  [ "$snapshot_bytes" -le "$maximum_bytes" ] || return 1
+}
+test_private_source() {
   marker=$1
   value=$2
   expected_bytes=$3
@@ -323,6 +336,11 @@ const privateSourceValidation = `test_private_source() {
   [ "$journal_bytes" -le 192 ] || return 1
   value_bytes=$(stat -c '%s' "$value") || return 1
   [ "$value_bytes" = "$expected_bytes" ] || return 1
+  snapshot_bounded "$marker" 192 || return 1
+  marker=$bounded_snapshot
+  snapshot_bounded "$value" "$expected_bytes" || return 1
+  value=$bounded_snapshot
+  [ "$(stat -c '%s' "$value")" = "$expected_bytes" ] || return 1
   marker_version=
   marker_digest=
   marker_size=
@@ -386,7 +404,14 @@ func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts 
 	if len(mounts) == 0 {
 		return nil, errors.New("state helper has no managed volumes")
 	}
-	arguments := []string{"create", "-i", "--network", "none", "--read-only", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--security-opt", "no-new-privileges"}
+	if err := store.ensureHelperImage(ctx); err != nil {
+		return nil, err
+	}
+	container, err := newHelperContainerName()
+	if err != nil {
+		return nil, err
+	}
+	arguments := []string{"create", "--name", container, "--pull", "never", "-i", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=65536,mode=0700", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--security-opt", "no-new-privileges"}
 	seenTargets := map[string]struct{}{}
 	for _, mount := range mounts {
 		if !validVolume(mount.volume) || !safeContainerPath(mount.target) {
@@ -404,13 +429,9 @@ func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts 
 	}
 	arguments = append(arguments, "--entrypoint", "/bin/sh", store.HelperImage, "-euc", privateSourceValidation+script, "state-helper")
 	arguments = append(arguments, values...)
-	created, err := store.Docker.Run(ctx, nil, arguments...)
+	_, err = store.Docker.Run(ctx, nil, arguments...)
 	if err != nil {
 		return nil, err
-	}
-	container := string(bytes.TrimSpace(created))
-	if !safeContainerID(container) {
-		return nil, errors.New("state helper returned invalid container ID")
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
@@ -421,6 +442,28 @@ func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts 
 		}
 	}
 	return store.Docker.Run(ctx, stdin, "start", "--attach", "--interactive", container)
+}
+
+func (store DockerStore) ensureHelperImage(ctx context.Context) error {
+	inspect := []string{"image", "inspect", "--format", "{{.Id}}", store.HelperImage}
+	if _, err := store.Docker.Run(ctx, nil, inspect...); err == nil {
+		return nil
+	}
+	if _, err := store.Docker.Run(ctx, nil, "pull", "--quiet", store.HelperImage); err != nil {
+		return errors.New("state helper image unavailable")
+	}
+	if _, err := store.Docker.Run(ctx, nil, inspect...); err != nil {
+		return errors.New("state helper image unavailable")
+	}
+	return nil
+}
+
+func newHelperContainerName() (string, error) {
+	random := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, random); err != nil {
+		return "", errors.New("state helper identity unavailable")
+	}
+	return "nvt-state-helper-" + hex.EncodeToString(random), nil
 }
 
 func validVolume(volume Volume) bool {
@@ -441,18 +484,6 @@ func safeVolumeName(value string) bool {
 
 func safeContainerPath(value string) bool {
 	return strings.HasPrefix(value, "/") && value == path.Clean(value) && !strings.ContainsAny(value, "\x00\r\n,=")
-}
-
-func safeContainerID(value string) bool {
-	if len(value) < 12 || len(value) > 64 {
-		return false
-	}
-	for _, character := range value {
-		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 func validGeneratedValueSize(value int) bool { return value == 32 || value == 43 }

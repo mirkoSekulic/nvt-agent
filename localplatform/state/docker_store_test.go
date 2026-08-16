@@ -24,6 +24,9 @@ type fakeDocker struct {
 	runOutput              []byte
 	runErr                 error
 	deleteBeforeAttachment bool
+	imagePresent           bool
+	pullOutput             []byte
+	createOutput           []byte
 }
 
 func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...string) ([]byte, error) {
@@ -59,6 +62,16 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 			return []byte(name), nil
 		}
 	}
+	if len(arguments) >= 2 && arguments[0] == "image" && arguments[1] == "inspect" {
+		if docker.imagePresent {
+			return []byte("[]"), nil
+		}
+		return nil, errors.New("missing image")
+	}
+	if len(arguments) > 0 && arguments[0] == "pull" {
+		docker.imagePresent = true
+		return docker.pullOutput, nil
+	}
 	if len(arguments) > 0 && arguments[0] == "create" {
 		for index, argument := range arguments {
 			if argument != "--mount" || index+1 >= len(arguments) {
@@ -78,6 +91,9 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 			}
 		}
 		docker.deleteBeforeAttachment = false
+		if docker.createOutput != nil {
+			return docker.createOutput, nil
+		}
 		return []byte(strings.Repeat("d", 64) + "\n"), nil
 	}
 	if len(arguments) > 0 && arguments[0] == "start" {
@@ -96,18 +112,26 @@ func dockerTestVolume(name, role string) Volume {
 }
 
 func TestDockerStoreInitializesDirectoryAndClassifiesSources(t *testing.T) {
-	docker := &fakeDocker{volumes: map[string]map[string]string{}}
+	docker := &fakeDocker{volumes: map[string]map[string]string{}, pullOutput: []byte("pull progress\nmore diagnostics\n"), createOutput: []byte("diagnostic\n" + strings.Repeat("d", 64) + "\n")}
 	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("c", 64)}
 	seeds := dockerTestVolume("local-test-seeds", "credential-seeds")
 	docker.volumes[seeds.Name] = maps.Clone(seeds.Labels)
 	if err := store.EnsureDirectory(context.Background(), seeds, 1000, 1000, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	directoryCommand := docker.commands[0]
+	directoryCommand := lastDockerCommand(t, docker.commands, "create")
 	for _, expected := range []string{"1000", "700"} {
 		if !containsArgument(directoryCommand.arguments, expected) {
 			t.Fatalf("directory init omitted %q: %v", expected, directoryCommand.arguments)
 		}
+	}
+	for _, expected := range []string{"--pull", "never", "--name", "--tmpfs"} {
+		if !containsArgument(directoryCommand.arguments, expected) {
+			t.Fatalf("helper create omitted %q: %v", expected, directoryCommand.arguments)
+		}
+	}
+	if lastDockerCommand(t, docker.commands, "pull").arguments[1] != "--quiet" {
+		t.Fatal("missing helper image was not pulled quietly before create")
 	}
 	source := dockerTestVolume("local-test-source", "generated-private-source")
 	docker.volumes[source.Name] = maps.Clone(source.Labels)
@@ -266,7 +290,9 @@ func TestPrivateSourceValidationRejectsTrailingJournalBytes(t *testing.T) {
 	valueHash := strings.Index(privateSourceValidation, `actual_digest=$(sha256sum "$value")`)
 	journalBound := strings.Index(privateSourceValidation, `[ "$journal_bytes" -le 192 ]`)
 	journalHash := strings.Index(privateSourceValidation, `stored_digest=$(sha256sum "$marker")`)
-	if valueBound < 0 || valueHash < 0 || valueBound > valueHash || journalBound < 0 || journalHash < 0 || journalBound > journalHash {
+	valueSnapshot := strings.Index(privateSourceValidation, `snapshot_bounded "$value" "$expected_bytes"`)
+	journalSnapshot := strings.Index(privateSourceValidation, `snapshot_bounded "$marker" 192`)
+	if valueBound < 0 || valueSnapshot < valueBound || valueHash < valueSnapshot || journalBound < 0 || journalSnapshot < journalBound || journalHash < journalSnapshot {
 		t.Fatal("managed source bounds are not checked before hashing")
 	}
 }
