@@ -193,6 +193,22 @@ func TestDockerStoreCreatesAndAdoptsOnlyExactlyLabeledVolumes(t *testing.T) {
 	}
 }
 
+func TestDockerStoreReadsBoundedInventoryThroughReadOnlyHelper(t *testing.T) {
+	docker := &fakeDocker{volumes: map[string]map[string]string{}, imagePresent: true, runOutput: []byte(`{"version":"1"}`)}
+	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("a", 64)}
+	volume := dockerTestVolume("local-test-generated-config", "generated-config")
+	docker.volumes[volume.Name] = maps.Clone(volume.Labels)
+	output, err := store.ReadVolumeInventory(context.Background(), volume)
+	if err != nil || !bytes.Equal(output, docker.runOutput) {
+		t.Fatalf("inventory read = %q, %v", output, err)
+	}
+	command := lastDockerCommand(t, docker.commands, "create")
+	joined := strings.Join(command.arguments, "\n")
+	if !strings.Contains(joined, "readonly") || !strings.Contains(joined, "test ! -L") || !strings.Contains(joined, "stat -c '%s'") {
+		t.Fatalf("inventory reader is not bounded and read-only: %v", command.arguments)
+	}
+}
+
 func TestDockerStoreKeepsPrivateBytesOnlyOnStdin(t *testing.T) {
 	docker := &fakeDocker{volumes: map[string]map[string]string{}}
 	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("b", 64)}

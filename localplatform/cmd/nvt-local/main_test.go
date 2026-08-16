@@ -67,19 +67,22 @@ func TestOwnedVolumesRequireCompletePersistedLabelMap(t *testing.T) {
 	project := "nvt-local"
 	configName := plancontract.VolumeName(project, plancontract.GeneratedConfigSuffix)
 	brokerName := plancontract.VolumeName(project, "broker-data")
+	retiredName := plancontract.VolumeName(project, "credential-seeds")
 	configLabels := platformVolumeLabels(project, configName, "local-platform-state", "generated-config")
 	brokerLabels := platformVolumeLabels(project, brokerName, "broker", "broker-database-audit")
-	plan := plancontract.Plan{Version: "1", Project: project, Volumes: []plancontract.Volume{
+	retiredLabels := platformVolumeLabels(project, retiredName, "credential-portal", "credential-portal-seed")
+	plan := plancontract.VolumeInventory{Version: "1", Project: project, Volumes: []plancontract.Volume{
 		{Name: configName, Owner: "local-platform-state", Role: "generated-config", Labels: configLabels},
 		{Name: brokerName, Owner: "broker", Role: "broker-database-audit", Labels: brokerLabels},
+		{Name: retiredName, Owner: "credential-portal", Role: "credential-portal-seed", Labels: retiredLabels},
 	}}
 	encoded, err := json.Marshal(plan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	docker := &resetDocker{project: project, plan: encoded, labels: map[string]map[string]string{configName: configLabels, brokerName: brokerLabels}}
+	docker := &resetDocker{project: project, plan: encoded, platformVolumes: []string{configName, brokerName, retiredName}, labels: map[string]map[string]string{configName: configLabels, brokerName: brokerLabels, retiredName: retiredLabels}}
 	application := app{project: project, docker: docker}
-	if names, err := application.ownedObjects(context.Background(), "volume"); err != nil || len(names) != 2 {
+	if names, err := application.ownedObjects(context.Background(), "volume"); err != nil || len(names) != 3 {
 		t.Fatalf("exact volume inventory = %#v, %v", names, err)
 	}
 	docker.labels[brokerName] = cloneTestLabels(brokerLabels)
@@ -95,15 +98,16 @@ func TestOwnedVolumesRequireCompletePersistedLabelMap(t *testing.T) {
 }
 
 type resetDocker struct {
-	project string
-	plan    []byte
-	labels  map[string]map[string]string
+	project         string
+	plan            []byte
+	platformVolumes []string
+	labels          map[string]map[string]string
 }
 
 func (docker *resetDocker) Run(_ context.Context, _ io.Reader, arguments ...string) ([]byte, error) {
 	if len(arguments) >= 2 && arguments[0] == "volume" && arguments[1] == "ls" {
 		if strings.Contains(strings.Join(arguments, " "), "local-platform-owner") {
-			return []byte(strings.Join([]string{plancontract.VolumeName(docker.project, plancontract.GeneratedConfigSuffix), plancontract.VolumeName(docker.project, "broker-data")}, "\n") + "\n"), nil
+			return []byte(strings.Join(docker.platformVolumes, "\n") + "\n"), nil
 		}
 		return nil, nil
 	}

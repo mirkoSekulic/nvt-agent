@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 
 	serviceconfig "github.com/mirkoSekulic/nvt-agent/localplatform/config"
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
+	plancontract "github.com/mirkoSekulic/nvt-agent/localplatform/plan"
 	producerrender "github.com/mirkoSekulic/nvt-agent/localplatform/producer"
 )
 
@@ -26,6 +28,7 @@ type StateFile struct {
 // never copy Data into commands, environment values, labels, output, or logs.
 type Store interface {
 	EnsureVolumes(context.Context, []Volume) (map[string]bool, error)
+	ReadVolumeInventory(context.Context, Volume) ([]byte, error)
 	EnsureDirectory(context.Context, Volume, int, int, int64) error
 	InspectPrivateSource(context.Context, Volume, int) (PrivateSourceState, error)
 	FinalizePrivateSource(context.Context, Volume, int) error
@@ -67,7 +70,7 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 	if err != nil {
 		return Plan{}, err
 	}
-	configuration, err := configurationFiles(compiled, inputs, prepared.Plan)
+	configuration, err := configurationFiles(compiled, inputs, prepared.Plan, prepared.Volumes)
 	if err != nil {
 		return Plan{}, errors.New("generated configuration is invalid")
 	}
@@ -78,6 +81,18 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 	volumes := make(map[string]Volume, len(prepared.Volumes))
 	for _, volume := range prepared.Volumes {
 		volumes[volume.Name] = volume
+	}
+	historical, err := manager.Store.ReadVolumeInventory(ctx, volumes[prepared.configVolume])
+	if err != nil {
+		return Plan{}, errors.New("managed volume inventory is unavailable")
+	}
+	inventory, err := mergeVolumeInventory(project, historical, prepared.Volumes)
+	if err != nil {
+		return Plan{}, errors.New("managed volume inventory is invalid")
+	}
+	configuration, err = configurationFiles(compiled, inputs, prepared.Plan, inventory)
+	if err != nil {
+		return Plan{}, errors.New("generated configuration is invalid")
 	}
 	sourceStates := map[string]PrivateSourceState{}
 	for _, input := range prepared.generated {
@@ -139,7 +154,7 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 	return prepared.Plan, nil
 }
 
-func configurationFiles(compiled manifest.Compiled, inputs *Inputs, plan Plan) ([]StateFile, error) {
+func configurationFiles(compiled manifest.Compiled, inputs *Inputs, plan Plan, inventory []Volume) ([]StateFile, error) {
 	compiledJSON, err := compiled.CanonicalJSON()
 	if err != nil {
 		return nil, err
@@ -164,9 +179,13 @@ func configurationFiles(compiled manifest.Compiled, inputs *Inputs, plan Plan) (
 	if err != nil {
 		return nil, err
 	}
+	volumeInventory, err := (plancontract.VolumeInventory{Version: stateVersion, Project: plan.Project, Volumes: inventory}).CanonicalJSON()
+	if err != nil {
+		return nil, err
+	}
 	values := map[string][]byte{
 		"compiled.json": compiledJSON, "broker.json": broker, "local-controller.json": controller,
-		"gateway.json": gateway, "state-plan.json": redacted,
+		"gateway.json": gateway, "state-plan.json": redacted, "volume-inventory.json": volumeInventory,
 	}
 	if len(compiled.Gateway.CredentialPortalAccounts) > 0 {
 		portal, err := portalConfiguration(compiled.Gateway.CredentialPortalAccounts)
@@ -196,6 +215,52 @@ func configurationFiles(compiled manifest.Compiled, inputs *Inputs, plan Plan) (
 			return nil, errors.New("generated state file is oversized")
 		}
 		result = append(result, StateFile{Name: name, Mode: 0o444, UID: 0, GID: 0, Data: bytes.NewReader(values[name])})
+	}
+	return result, nil
+}
+
+func mergeVolumeInventory(project string, historical []byte, current []Volume) ([]Volume, error) {
+	const maxInventoryVolumes = 1024
+	merged := map[string]Volume{}
+	if len(historical) != 0 {
+		if len(historical) > maxStateFileBytes {
+			return nil, errors.New("managed volume inventory is oversized")
+		}
+		var inventory plancontract.VolumeInventory
+		if json.Unmarshal(historical, &inventory) != nil || inventory.Version != stateVersion || inventory.Project != project || len(inventory.Volumes) == 0 || len(inventory.Volumes) > maxInventoryVolumes {
+			return nil, errors.New("managed volume inventory is malformed")
+		}
+		for _, volume := range inventory.Volumes {
+			if !validVolume(volume) || volume.Labels[ownerLabel] != project || len(volume.Consumers) != 0 {
+				return nil, errors.New("managed volume inventory has invalid ownership")
+			}
+			if _, duplicate := merged[volume.Name]; duplicate {
+				return nil, errors.New("managed volume inventory has duplicates")
+			}
+			merged[volume.Name] = volume
+		}
+	}
+	for _, volume := range current {
+		if !validVolume(volume) || volume.Labels[ownerLabel] != project {
+			return nil, errors.New("current managed volume inventory is invalid")
+		}
+		if previous, exists := merged[volume.Name]; exists && !equalLabels(previous.Labels, volume.Labels) {
+			return nil, errors.New("managed volume ownership changed")
+		}
+		volume.Consumers = nil
+		merged[volume.Name] = volume
+	}
+	if len(merged) == 0 || len(merged) > maxInventoryVolumes {
+		return nil, errors.New("managed volume inventory exceeded its bound")
+	}
+	names := make([]string, 0, len(merged))
+	for name := range merged {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]Volume, 0, len(names))
+	for _, name := range names {
+		result = append(result, merged[name])
 	}
 	return result, nil
 }

@@ -345,17 +345,17 @@ func (application app) expectedPlatformVolumes(ctx context.Context) (map[string]
 		"run", "--rm", "--pull=never", "--network=none", "--read-only",
 		"--mount", "type=volume,source="+configVolume+",target=/state,readonly",
 		"--entrypoint", "/bin/cat", environment("NVT_LOCAL_CONTROLLER_IMAGE", "nvt-local-controller:latest"),
-		"/state/current/state-plan.json",
+		"/state/current/volume-inventory.json",
 	)
 	if err != nil || len(output) == 0 || len(output) > manifest.MaxDocumentBytes {
 		return nil, errors.New("refusing local volume reset without an exact-owned state inventory")
 	}
-	var plan plancontract.Plan
-	if json.Unmarshal(output, &plan) != nil || plan.Project != application.project || plan.Version != "1" || len(plan.Volumes) == 0 || len(plan.Volumes) > 1024 {
+	var inventory plancontract.VolumeInventory
+	if json.Unmarshal(output, &inventory) != nil || inventory.Project != application.project || inventory.Version != "1" || len(inventory.Volumes) == 0 || len(inventory.Volumes) > 1024 {
 		return nil, errors.New("refusing invalid local volume state inventory")
 	}
-	expected := make(map[string]map[string]string, len(plan.Volumes))
-	for _, volume := range plan.Volumes {
+	expected := make(map[string]map[string]string, len(inventory.Volumes))
+	for _, volume := range inventory.Volumes {
 		if !application.validPlannedVolume(volume) {
 			return nil, errors.New("refusing invalid local volume state inventory")
 		}

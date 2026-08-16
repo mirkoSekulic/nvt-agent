@@ -100,6 +100,26 @@ func (store DockerStore) ReplaceFiles(ctx context.Context, volume Volume, files 
 	return store.writeFiles(ctx, volume, files, 0)
 }
 
+func (store DockerStore) ReadVolumeInventory(ctx context.Context, volume Volume) ([]byte, error) {
+	if !validVolume(volume) {
+		return nil, errors.New("invalid state read")
+	}
+	script := `set -eu
+if [ ! -e /state/current ]; then
+  test ! -L /state/current
+  exit 0
+fi
+test ! -L /state/current
+test -d /state/current
+target="/state/current/volume-inventory.json"
+test ! -L "$target"
+if [ ! -e "$target" ]; then exit 0; fi
+test -f "$target"
+test "$(stat -c '%s' "$target")" -le "$1"
+cat "$target"`
+	return store.runHelper(ctx, nil, []helperMount{{volume: volume, target: "/state", readOnly: true}}, script, strconv.Itoa(maxStateFileBytes))
+}
+
 func (store DockerStore) InitializePrivateSource(ctx context.Context, volume Volume, expectedSize int, files []StateFile) error {
 	if !validGeneratedValueSize(expectedSize) {
 		return errors.New("invalid private source size")

@@ -18,6 +18,15 @@ type Plan struct {
 	Mounts  []Mount  `json:"mounts"`
 }
 
+// VolumeInventory is the bounded historical ownership record used by
+// destructive reset. It contains ownership metadata only; secret bytes and
+// host paths cannot be represented.
+type VolumeInventory struct {
+	Version string   `json:"version"`
+	Project string   `json:"project"`
+	Volumes []Volume `json:"volumes"`
+}
+
 type Volume struct {
 	Name      string            `json:"name"`
 	Role      string            `json:"role"`
@@ -37,6 +46,14 @@ type Mount struct {
 // CanonicalJSON returns a stable redacted plan. Plan cannot represent secret
 // bytes or host paths, so the result is safe for generated configuration.
 func (value Plan) CanonicalJSON() ([]byte, error) {
+	return canonicalJSON(value)
+}
+
+func (value VolumeInventory) CanonicalJSON() ([]byte, error) {
+	return canonicalJSON(value)
+}
+
+func canonicalJSON(value any) ([]byte, error) {
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)
 	encoder.SetEscapeHTML(false)

@@ -152,6 +152,12 @@ service startup. The helper image itself must be pinned by SHA-256, runs
 without networking or a writable root filesystem, and receives no private
 value through Docker inspection surfaces.
 
+The generated-config volume also stores a bounded, sorted historical inventory
+of complete managed-volume label maps. Each successful reconciliation merges
+the current plan into that inventory instead of dropping retired entries, so
+`local-reset` can verify and remove exact-owned volumes left by manifest
+shrinkage. Missing, incomplete, conflicting, or extra labels still fail closed.
+
 Credential-portal account projection is bounded to the portal contract's 128
 slots before volume creation. Slot and local destination names use a
 domain-separated full SHA-256 mapping of the logical account name; any duplicate

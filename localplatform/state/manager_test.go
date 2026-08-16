@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
+	plancontract "github.com/mirkoSekulic/nvt-agent/localplatform/plan"
 	producerrender "github.com/mirkoSekulic/nvt-agent/localplatform/producer"
 )
 
@@ -66,6 +67,13 @@ func (store *memoryStore) ReplaceFiles(_ context.Context, volume Volume, files [
 	store.files[volume.Name] = next
 	store.writes++
 	return nil
+}
+
+func (store *memoryStore) ReadVolumeInventory(_ context.Context, volume Volume) ([]byte, error) {
+	if _, ok := store.volumes[volume.Name]; !ok {
+		return nil, errors.New("missing volume")
+	}
+	return append([]byte(nil), store.files[volume.Name]["volume-inventory.json"]...), nil
 }
 
 func (store *memoryStore) EnsureDirectory(_ context.Context, volume Volume, uid, gid int, mode int64) error {
@@ -154,6 +162,9 @@ func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
 		}
 		if value := files["state-plan.json"]; bytes.Contains(value, secret) {
 			t.Fatalf("secret entered plan config volume %s", volume)
+		}
+		if value := files["volume-inventory.json"]; bytes.Contains(value, secret) {
+			t.Fatalf("secret entered volume inventory %s", volume)
 		}
 	}
 	for _, mount := range plan.Mounts {
@@ -244,6 +255,65 @@ func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
 	}
 	if len(store.files[replacedCopy]["value"]) == 0 {
 		t.Fatal("replacement consumer volume was not restored")
+	}
+}
+
+func TestManagerPreservesRetiredVolumeLabelInventory(t *testing.T) {
+	withPortal := manifest.Compiled{
+		Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"},
+		Gateway: manifest.GatewayIntent{Owner: "gateway", CredentialPortalAccounts: []manifest.PortalAccountIntent{{Name: "codex", Preset: "codex-oauth"}}},
+	}
+	store := newMemoryStore()
+	manager := Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x31}, 4096))}
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	if _, err := manager.Ensure(context.Background(), "local-test", withPortal, inputs); err != nil {
+		t.Fatal(err)
+	}
+	retiredName := "local-test-credential-seeds"
+	retired := store.volumes[retiredName]
+	if retired.Name == "" {
+		t.Fatal("portal volume was not created")
+	}
+	withoutPortal := withPortal
+	withoutPortal.Gateway.CredentialPortalAccounts = nil
+	if _, err := manager.Ensure(context.Background(), "local-test", withoutPortal, inputs); err != nil {
+		t.Fatal(err)
+	}
+	configFiles := store.files["local-test-generated-config"]
+	var current Plan
+	if json.Unmarshal(configFiles["state-plan.json"], &current) != nil {
+		t.Fatal("current state plan is invalid")
+	}
+	for _, volume := range current.Volumes {
+		if volume.Name == retiredName {
+			t.Fatal("retired volume remained in the current state plan")
+		}
+	}
+	var inventory plancontract.VolumeInventory
+	if json.Unmarshal(configFiles["volume-inventory.json"], &inventory) != nil {
+		t.Fatal("historical volume inventory is invalid")
+	}
+	found := false
+	for _, volume := range inventory.Volumes {
+		if volume.Name == retiredName {
+			found = maps.Equal(volume.Labels, retired.Labels)
+		}
+	}
+	if !found {
+		t.Fatal("retired exact-owned volume labels were not preserved")
+	}
+	inventory.Volumes[0].Labels["unexpected"] = "label"
+	tampered, err := json.Marshal(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configFiles["volume-inventory.json"] = tampered
+	writes := store.writes
+	if _, err := manager.Ensure(context.Background(), "local-test", withoutPortal, inputs); err == nil {
+		t.Fatal("tampered historical ownership inventory was accepted")
+	}
+	if store.writes != writes {
+		t.Fatal("tampered historical ownership inventory changed state")
 	}
 }
 
@@ -441,7 +511,7 @@ func TestPlanOmitsCredentialPortalStateWithoutOAuthAccounts(t *testing.T) {
 			t.Fatalf("disabled portal received mount: %#v", mount)
 		}
 	}
-	files, err := configurationFiles(compiled, inputs, plan)
+	files, err := configurationFiles(compiled, inputs, plan, plan.Volumes)
 	if err != nil {
 		t.Fatal(err)
 	}
