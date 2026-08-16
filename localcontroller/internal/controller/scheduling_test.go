@@ -14,10 +14,72 @@ import (
 	"testing"
 	"time"
 
+	localmanifest "github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 const schedulingTestToken = "LOCAL-SCHEDULING-TOKEN-0123456789abcdef"
+
+func TestLocalManifestProducerNameMatchesScheduleValidator(t *testing.T) {
+	const raw = `apiVersion: nvt.dev/local/v1
+profiles:
+  engineering:
+    runtime: {preset: shell, autonomy: read-only}
+repositories:
+  widget:
+    url: https://example.test/acme/widget.git
+    checkoutTarget: example.test/acme/widget
+workflows:
+  development: {profile: engineering, repository: widget, retention: disposable}
+producers:
+  - name: github-comments
+    image: ghcr.io/example/producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    runtimeIdentity: {uid: 1000, gid: 1000}
+    workflow: development
+    allowedPrincipalIssuers: [https://identity.example.test]
+`
+	decoded, err := localmanifest.Decode(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode local manifest: %v", err)
+	}
+	compiled, err := localmanifest.Compile(decoded)
+	if err != nil {
+		t.Fatalf("compile local manifest: %v", err)
+	}
+	if len(compiled.Controller.ProducerAdmissions) != 1 {
+		t.Fatalf("producer admissions = %#v", compiled.Controller.ProducerAdmissions)
+	}
+	admission := compiled.Controller.ProducerAdmissions[0]
+	if !validRunID(admission.Producer) {
+		t.Fatalf("compiled producer %q is not a valid schedule name", admission.Producer)
+	}
+
+	clock := &fakeClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	directory := t.TempDir()
+	tokenPath := filepath.Join(directory, "producer-token")
+	if err := os.WriteFile(tokenPath, []byte(schedulingTestToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document := testNativeConfiguration()
+	document.Schedules = []scheduleConfig{{Name: admission.Producer, Producers: []scheduleProducerConfig{{
+		Identity: admission.Identity, TokenFile: tokenPath, AllowedPrincipalIssuers: admission.AllowedPrincipalIssuers,
+		Selections: []scheduleSelection{{Profile: "engineering", Workflow: admission.Workflow}}, DefaultWorkflow: admission.Workflow,
+		Retention: "disposable", Backend: "container",
+	}}}}
+	configPath := filepath.Join(directory, "local-controller.yaml")
+	if err := os.WriteFile(configPath, mustJSON(t, document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if scheduler, err := LoadScheduler(configPath, store); err != nil || scheduler == nil {
+		t.Fatalf("controller rejected compiled producer schedule: scheduler=%#v err=%v", scheduler, err)
+	}
+
+	dotted := strings.Replace(raw, "name: github-comments", "name: github.comments", 1)
+	if _, err := localmanifest.Decode(strings.NewReader(dotted)); err == nil {
+		t.Fatal("dotted producer name passed local-manifest decode")
+	}
+}
 
 func TestLocalSchedulingIsOptionalAndRejectsNonPrivateToken(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}

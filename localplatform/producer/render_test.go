@@ -68,6 +68,20 @@ func TestConfigurationsRejectsNonDNSWorkflow(t *testing.T) {
 	}
 }
 
+func TestConfigurationsRejectsNonDNSProducerName(t *testing.T) {
+	compiled, _ := producerFixture()
+	for index := range compiled.Producers {
+		if compiled.Producers[index].Kind == "github-comments" {
+			compiled.Producers[index].Name = "github.comments"
+			compiled.Producers[index].Owner = "producer:github.comments"
+			compiled.Producers[index].AdmissionCredential = "producer-admission:github.comments"
+		}
+	}
+	if _, err := Configurations(compiled); err == nil {
+		t.Fatal("non-DNS built-in producer name was accepted")
+	}
+}
+
 func TestRenderComposeConfinesEveryProducer(t *testing.T) {
 	compiled, statePlan := producerFixture()
 	raw, err := RenderCompose(compiled, statePlan, Options{})

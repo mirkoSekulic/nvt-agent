@@ -68,6 +68,7 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 		"missing installation":                       strings.Replace(string(valid), "mirkoSekulic: \"123\"", "another-owner: \"123\"", 1),
 		"unknown repository":                         strings.Replace(string(valid), "repository: nvt-agent", "repository: absent", 1),
 		"non-DNS workflow name":                      strings.ReplaceAll(string(valid), "nvt-development", "nvt.development"),
+		"non-DNS producer name":                      strings.Replace(string(valid), "name: nvt-comments", "name: nvt.comments", 1),
 		"undeclared external config":                 strings.Replace(string(valid), "publicConfig:", "config:", 1),
 		"GitHub repository Azure account":            strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent\n    account: github", "github: mirkoSekulic/nvt-agent\n    account: azure", 1),
 		"Azure repository GitHub account":            strings.Replace(string(valid), "path: infrastructure\n    account: azure", "path: infrastructure\n    account: github", 1),

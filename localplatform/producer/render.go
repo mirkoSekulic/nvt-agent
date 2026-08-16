@@ -245,7 +245,7 @@ func RenderCompose(compiled manifest.Compiled, statePlan plancontract.Plan, opti
 func validateIntent(intent manifest.ProducerIntent) error {
 	if intent.Name == "" || intent.Owner != "producer:"+intent.Name || intent.Workflow == "" || intent.AdmissionCredential != "producer-admission:"+intent.Name ||
 		intent.RuntimeIdentity.UID <= 0 || intent.RuntimeIdentity.UID > 1<<31-1 || intent.RuntimeIdentity.GID <= 0 || intent.RuntimeIdentity.GID > 1<<31-1 ||
-		!localNamePattern.MatchString(intent.Name) || !workflowNamePattern.MatchString(intent.Workflow) {
+		!localRunIDPattern.MatchString(intent.Name) || !localRunIDPattern.MatchString(intent.Workflow) {
 		return errors.New("compiled producer intent is invalid")
 	}
 	switch intent.Kind {
@@ -376,10 +376,7 @@ func sortedNames[V any](values map[string]V) []string {
 	return result
 }
 
-var (
-	localNamePattern    = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$`)
-	workflowNamePattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$`)
-)
+var localRunIDPattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$`)
 var localProjectPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,47}$`)
 var networkNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
