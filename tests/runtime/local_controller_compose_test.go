@@ -197,14 +197,17 @@ func TestLocalCredentialPortalComposeIsOptionalAndPrivate(t *testing.T) {
 		"local-credential-seeds:/seed", "local-credential-seeds:/portal-seed:ro",
 		"local-broker-private:/private", "NVT_BROKER_SEED_TARGET_DIR: portal",
 		"PathPrefix(`/agents/credentials`)", "NVT_GATEWAY_CREDENTIAL_PORTAL_URL:",
+		"traefik.http.routers.nvt-local-credentials.priority=200",
+		"traefik.http.routers.nvt-local-credentials.service=nvt-local-credentials",
 		"NVT_BROKER_SEED_DIR: ${NVT_BROKER_CREDENTIAL_SEED_DIR:-}",
+		"network_mode: service:credential-runner", "NVT_CREDENTIAL_RUNNER_URL: http://127.0.0.1:8081",
 		`if [ -n "$${NVT_BROKER_SEED_DIR:-}" ]; then`,
 	} {
 		if !strings.Contains(compose, required) {
 			t.Fatalf("local credential compose missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"CODEX_TOKEN=", "CLAUDE_TOKEN=", "credentials.json:"} {
+	for _, forbidden := range []string{"CODEX_TOKEN=", "CLAUDE_TOKEN=", "credentials.json:", "NVT_CREDENTIAL_RUNNER_URL: http://credential-runner"} {
 		if strings.Contains(compose, forbidden) {
 			t.Fatalf("compose exposes credential material via %q", forbidden)
 		}
