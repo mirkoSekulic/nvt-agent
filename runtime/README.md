@@ -18,7 +18,10 @@ bundled workspace-side extension activates after code-server startup, reads
 only that exact marker, creates one focused integrated terminal whose
 executable is exactly `nvt-session-attach`, and reuses a surviving terminal
 with the same stable NVT identity across extension activation or browser
-reload. It does not configure a default terminal profile, so manually created
+reload. Before creating it, the extension obtains an atomic, short-lived claim
+from that helper. The terminal adopts the claim for its process lifetime, so
+independent extension hosts cannot create duplicate managed attachments. Stale
+claims and exited processes are recovered automatically. It does not configure a default terminal profile, so manually created
 terminals remain ordinary shells.
 
 This mechanism does not create, parse, authorize, or execute user/workspace
