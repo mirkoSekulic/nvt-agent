@@ -501,9 +501,13 @@ func TestLocalSchedulingDeniesUntrustedSelectionBeforeBackendAndBoundsCapacity(t
 	}
 
 	for name, body := range map[string][]byte{
-		"issuer":   testAdmissionBody(t, "https://other.example.test", "subject-1", "development", "prompt"),
-		"workflow": testAdmissionBody(t, "https://identity.example.test", "subject-1", "administrator", "prompt"),
-		"override": append(testAdmissionBody(t, "https://identity.example.test", "subject-1", "development", "prompt")[:len(testAdmissionBody(t, "https://identity.example.test", "subject-1", "development", "prompt"))-1], []byte(`,"profile":"forbidden"}`)...),
+		"issuer":              testAdmissionBody(t, "https://other.example.test", "subject-1", "development", "prompt"),
+		"workflow":            testAdmissionBody(t, "https://identity.example.test", "subject-1", "administrator", "prompt"),
+		"profile override":    admissionOverride(t, "profile"),
+		"backend override":    admissionOverride(t, "backend"),
+		"image override":      admissionOverride(t, "image"),
+		"credential override": admissionOverride(t, "credential"),
+		"repository override": admissionOverride(t, "repository"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := scheduleRequest(t, handler, http.MethodPost, "/v1/schedules/github/admissions", body, schedulingTestToken)
@@ -540,6 +544,12 @@ func TestLocalSchedulingDeniesUntrustedSelectionBeforeBackendAndBoundsCapacity(t
 	if secondResponse.Code != http.StatusTooManyRequests || secondResponse.Body.String() != `{"scheduled":false,"reason":"max-parallelism-reached"}`+"\n" {
 		t.Fatalf("capacity = %d %s", secondResponse.Code, secondResponse.Body.String())
 	}
+}
+
+func admissionOverride(t *testing.T, field string) []byte {
+	t.Helper()
+	valid := testAdmissionBody(t, "https://identity.example.test", "subject-1", "development", "prompt")
+	return append(valid[:len(valid)-1], []byte(`,"`+field+`":"forbidden"}`)...)
 }
 
 func TestLocalSchedulingAcceptsValidatedSourceURLFragment(t *testing.T) {
