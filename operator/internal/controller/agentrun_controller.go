@@ -53,6 +53,7 @@ import (
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
+	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 const (
@@ -4910,32 +4911,19 @@ func InjectAgentRunRuntimeConfig(config map[string]any, agentRun *nvtv1alpha1.Ag
 }
 
 func injectRuntimeSelectionArgs(args []any, runtimeType, model, effort string) ([]any, error) {
+	stringArgs := make([]string, len(args))
 	for index, raw := range args {
-		arg := raw.(string)
-		if model != "" && (arg == "--model" || arg == "-m" || strings.HasPrefix(arg, "--model=")) {
-			return nil, fmt.Errorf("typed model conflicts with runtime args model selector")
-		}
-		if effort != "" {
-			conflict := arg == "--effort" || strings.HasPrefix(arg, "--effort=")
-			if runtimeType == "codex" {
-				conflict = strings.HasPrefix(arg, "--config=model_reasoning_effort=") || strings.HasPrefix(arg, "-cmodel_reasoning_effort=") ||
-					((arg == "--config" || arg == "-c") && index+1 < len(args) && strings.HasPrefix(args[index+1].(string), "model_reasoning_effort="))
-			}
-			if conflict {
-				return nil, fmt.Errorf("typed effort conflicts with runtime args effort selector")
-			}
-		}
+		stringArgs[index] = raw.(string)
 	}
-	result := append([]any{}, args...)
-	if model != "" {
-		result = append(result, "--model", model)
+	updated, err := resolvedrun.ApplyRuntimeSelectionArguments(stringArgs, resolvedrun.Runtime{
+		Type: runtimeType, Model: model, Effort: effort,
+	})
+	if err != nil {
+		return nil, err
 	}
-	if effort != "" {
-		if runtimeType == "codex" {
-			result = append(result, "--config", "model_reasoning_effort="+effort)
-		} else {
-			result = append(result, "--effort", effort)
-		}
+	result := make([]any, len(updated))
+	for index, arg := range updated {
+		result[index] = arg
 	}
 	return result, nil
 }

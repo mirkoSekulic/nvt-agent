@@ -4692,6 +4692,9 @@ func TestRenderAgentConfigYAMLAppliesRuntimeModelAndEffortToFreshAndResume(t *te
 func TestRenderAgentConfigYAMLRejectsTypedRuntimeSelectorConflicts(t *testing.T) {
 	for _, config := range []string{
 		`{"runtime":{"args":["--model","raw"]}}`,
+		`{"runtime":{"args":["-mraw"]}}`,
+		`{"runtime":{"args":["-c=model=raw"]}}`,
+		`{"runtime":{"args":["--"]}}`,
 		`{"runtime":{"args":[],"resume":{"command":"codex","args":["--config","model_reasoning_effort=low"]}}}`,
 	} {
 		run := testAgentRun()

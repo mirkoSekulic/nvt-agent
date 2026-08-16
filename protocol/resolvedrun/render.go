@@ -90,65 +90,27 @@ func applyRuntimeSelection(config map[string]any, selection Runtime) error {
 	return nil
 }
 
-func stringArguments(raw any) ([]any, bool) {
+func stringArguments(raw any) ([]string, bool) {
 	if raw == nil {
-		return []any{}, true
+		return []string{}, true
 	}
 	args, ok := raw.([]any)
 	if !ok {
 		return nil, false
 	}
-	for _, arg := range args {
-		if _, ok := arg.(string); !ok {
+	result := make([]string, 0, len(args))
+	for _, rawArg := range args {
+		arg, ok := rawArg.(string)
+		if !ok {
 			return nil, false
 		}
+		result = append(result, arg)
 	}
-	return append([]any{}, args...), true
+	return result, true
 }
 
-func selectedRuntimeArguments(args []any, selection Runtime) ([]any, error) {
-	for index, raw := range args {
-		arg := raw.(string)
-		if selection.Model != "" && runtimeArgumentSelects(arg, index, args, selection.Type, true) {
-			return nil, errors.New("runtime args conflict with typed model")
-		}
-		if selection.Effort != "" && runtimeArgumentSelects(arg, index, args, selection.Type, false) {
-			return nil, errors.New("runtime args conflict with typed effort")
-		}
-	}
-	result := append([]any{}, args...)
-	switch selection.Type {
-	case "codex":
-		if selection.Model != "" {
-			result = append(result, "--model", selection.Model)
-		}
-		if selection.Effort != "" {
-			result = append(result, "--config", "model_reasoning_effort="+selection.Effort)
-		}
-	case "claude":
-		if selection.Model != "" {
-			result = append(result, "--model", selection.Model)
-		}
-		if selection.Effort != "" {
-			result = append(result, "--effort", selection.Effort)
-		}
-	default:
-		return nil, errors.New("runtime selection is unsupported")
-	}
-	return result, nil
-}
-
-func runtimeArgumentSelects(arg string, index int, args []any, runtimeType string, model bool) bool {
-	if model {
-		return arg == "--model" || arg == "-m" || strings.HasPrefix(arg, "--model=")
-	}
-	if runtimeType == "claude" {
-		return arg == "--effort" || strings.HasPrefix(arg, "--effort=")
-	}
-	if arg == "--config" || arg == "-c" {
-		return index+1 < len(args) && strings.HasPrefix(args[index+1].(string), "model_reasoning_effort=")
-	}
-	return strings.HasPrefix(arg, "--config=model_reasoning_effort=") || strings.HasPrefix(arg, "-cmodel_reasoning_effort=")
+func selectedRuntimeArguments(args []string, selection Runtime) ([]string, error) {
+	return ApplyRuntimeSelectionArguments(args, selection)
 }
 
 func decodeAgentConfigObject(raw json.RawMessage) (map[string]any, error) {
