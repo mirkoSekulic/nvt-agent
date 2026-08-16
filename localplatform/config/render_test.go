@@ -60,7 +60,50 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		t.Fatalf("native controller policy is invalid: %v\n%s", err, controller)
 	}
 	if len(trusted.Profiles) != 1 || trusted.Profiles[0].Runtime == nil || trusted.Profiles[0].Runtime.Docker == nil ||
-		trusted.Profiles[0].Egress.Transport != "transparent" || !trusted.Profiles[0].Egress.AllowInsecureBroker {
+		trusted.Profiles[0].Egress.Transport != "transparent" || !trusted.Profiles[0].Egress.AllowInsecureBroker || trusted.Profiles[0].DefaultCredentialProvider != "github" {
 		t.Fatalf("local Docker or mediated transport policy missing: %#v", trusted.Profiles)
+	}
+	var agentConfig struct {
+		Runtime struct {
+			Args   []string `json:"args"`
+			Resume struct {
+				Args []string `json:"args"`
+			} `json:"resume"`
+		} `json:"runtime"`
+	}
+	if err := json.Unmarshal(trusted.Profiles[0].AgentConfig, &agentConfig); err != nil {
+		t.Fatal(err)
+	}
+	if got := agentConfig.Runtime.Resume.Args; len(got) != 3 || got[0] != "resume" || got[1] != "--last" || got[2] != "--dangerously-bypass-approvals-and-sandbox" {
+		t.Fatalf("Codex resume command is incomplete: %#v", got)
+	}
+	claudeCompiled := compiled
+	claudeCompiled.Controller.Profiles = append([]manifest.ControllerProfileIntent(nil), compiled.Controller.Profiles...)
+	claudeCompiled.Controller.Profiles[0].Profile.Runtime.Preset = "claude"
+	claudeController, err := serviceconfig.Controller(claudeCompiled, serviceconfig.Instructions{"development": "bounded instructions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claudeTrusted resolvedrun.TrustedConfiguration
+	if err := json.Unmarshal(claudeController, &claudeTrusted); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(claudeTrusted.Profiles[0].AgentConfig, &agentConfig); err != nil {
+		t.Fatal(err)
+	}
+	if got := agentConfig.Runtime.Resume.Args; len(got) != 2 || got[0] != "--continue" || got[1] != "--dangerously-skip-permissions" {
+		t.Fatalf("Claude resume command is incomplete: %#v", got)
+	}
+	github := decoded.Accounts["github"]
+	github.Installations["other"] = "456"
+	decoded.Accounts["github"] = github
+	decoded.Repositories["other"] = manifest.Repository{GitHub: "other/repository", Account: "github"}
+	decoded.Workstations[0].Repositories = append(decoded.Workstations[0].Repositories, "other")
+	ambiguous, err := manifest.Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serviceconfig.Controller(ambiguous, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil || !bytes.Contains([]byte(err.Error()), []byte("default credential provider is ambiguous")) {
+		t.Fatalf("multi-installation default policy did not fail closed: %v", err)
 	}
 }

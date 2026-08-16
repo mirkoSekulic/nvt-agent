@@ -54,7 +54,8 @@ func TestRenderCompleteComposeWithoutHostAuthoredState(t *testing.T) {
 	}
 	var document struct {
 		Services map[string]struct {
-			Command []string `yaml:"command"`
+			Command  []string `yaml:"command"`
+			Networks []string `yaml:"networks"`
 		} `yaml:"services"`
 	}
 	if err := yaml.Unmarshal(encoded, &document); err != nil {
@@ -63,6 +64,10 @@ func TestRenderCompleteComposeWithoutHostAuthoredState(t *testing.T) {
 	command := document.Services["registry-init"].Command
 	if len(command) != 1 || !bytes.Contains([]byte(command[0]), []byte("agents.yaml")) {
 		t.Fatalf("registry initializer must remain one shell argv entry: %#v", command)
+	}
+	brokerNetworks := document.Services["broker"].Networks
+	if len(brokerNetworks) != 2 || brokerNetworks[0] != "agents-proxy" || brokerNetworks[1] != "local-control-plane" {
+		t.Fatalf("broker must join trusted egress and control networks: %#v", brokerNetworks)
 	}
 }
 

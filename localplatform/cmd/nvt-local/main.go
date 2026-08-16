@@ -16,6 +16,7 @@ import (
 
 	"github.com/mirkoSekulic/nvt-agent/localplatform/lifecycle"
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
+	plancontract "github.com/mirkoSekulic/nvt-agent/localplatform/plan"
 	"github.com/mirkoSekulic/nvt-agent/localplatform/producer"
 	"github.com/mirkoSekulic/nvt-agent/localplatform/state"
 )
@@ -27,10 +28,12 @@ var runIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$`)
 var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var runtimeProjectPattern = regexp.MustCompile(`^nvt-local-[a-f0-9]{24}$`)
 var containerIDPattern = regexp.MustCompile(`^[a-f0-9]{12,64}$`)
+var managedVolumeSuffixPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,190}$`)
+var shortHashPattern = regexp.MustCompile(`^[a-f0-9]{24}$`)
 
 type app struct {
 	project string
-	docker  state.DockerCLI
+	docker  state.CommandBoundary
 }
 
 func main() {
@@ -262,8 +265,13 @@ func (application app) validPlatformContainer(labels map[string]string) bool {
 }
 
 func (application app) validRunContainer(labels map[string]string) bool {
-	if labels["nvt.dev/local-controller-owner"] != application.project || !runIDPattern.MatchString(labels["nvt.dev/local-run-id"]) || !digestPattern.MatchString(labels["nvt.dev/local-run-digest"]) ||
-		!runtimeProjectPattern.MatchString(labels["com.docker.compose.project"]) {
+	if labels["nvt.dev/local-controller-owner"] != application.project || !runIDPattern.MatchString(labels["nvt.dev/local-run-id"]) || !digestPattern.MatchString(labels["nvt.dev/local-run-digest"]) {
+		return false
+	}
+	if labels["nvt.dev/local-controller-helper"] == "volume-seed-v1" {
+		return labels["com.docker.compose.project"] == "" && labels["com.docker.compose.service"] == ""
+	}
+	if !runtimeProjectPattern.MatchString(labels["com.docker.compose.project"]) {
 		return false
 	}
 	service := labels["com.docker.compose.service"]
@@ -285,12 +293,20 @@ func (application app) ownedObjects(ctx context.Context, kind string) ([]string,
 		{command, "ls", "--filter", "label=nvt.dev/local-controller-owner=" + application.project, "--filter", "label=nvt.dev/local-run-id", "--filter", "label=nvt.dev/local-run-digest", "--format", "{{.Name}}"},
 	}
 	seen := map[string]struct{}{}
-	for _, query := range queries {
+	expectedVolumes := map[string]map[string]string(nil)
+	for queryIndex, query := range queries {
 		output, err := application.docker.Run(ctx, nil, query...)
 		if err != nil {
 			return nil, fmt.Errorf("cannot inventory exact-owned local %ss", kind)
 		}
-		for _, name := range nonemptyLines(output) {
+		names := nonemptyLines(output)
+		if kind == "volume" && queryIndex == 0 && len(names) != 0 {
+			expectedVolumes, err = application.expectedPlatformVolumes(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, name := range names {
 			if strings.ContainsAny(name, "\x00\r\n") || name == "" {
 				return nil, errors.New("Docker returned an invalid object name")
 			}
@@ -303,8 +319,11 @@ func (application app) ownedObjects(ctx context.Context, kind string) ([]string,
 			if !platformOwned && !runOwned {
 				return nil, fmt.Errorf("refusing ambiguous local %s %s", kind, name)
 			}
-			if kind == "volume" && platformOwned && labels["nvt.dev/local-platform-volume"] != name {
-				return nil, fmt.Errorf("refusing mislabeled local volume %s", name)
+			if kind == "volume" && platformOwned {
+				expected, exists := expectedVolumes[name]
+				if !exists || !equalLabels(labels, expected) {
+					return nil, fmt.Errorf("refusing mislabeled local volume %s", name)
+				}
 			}
 			if kind == "network" && platformOwned && labels["nvt.dev/local-platform-network"] != name {
 				return nil, fmt.Errorf("refusing mislabeled local network %s", name)
@@ -313,6 +332,99 @@ func (application app) ownedObjects(ctx context.Context, kind string) ([]string,
 		}
 	}
 	return sortedKeys(seen), nil
+}
+
+func (application app) expectedPlatformVolumes(ctx context.Context) (map[string]map[string]string, error) {
+	configVolume := plancontract.VolumeName(application.project, plancontract.GeneratedConfigSuffix)
+	expectedConfigLabels := platformVolumeLabels(application.project, configVolume, "local-platform-state", "generated-config")
+	labels, err := application.objectLabels(ctx, "volume", configVolume)
+	if err != nil || !equalLabels(labels, expectedConfigLabels) {
+		return nil, errors.New("refusing local volume reset without an exact-owned state inventory")
+	}
+	output, err := application.docker.Run(ctx, nil,
+		"run", "--rm", "--pull=never", "--network=none", "--read-only",
+		"--mount", "type=volume,source="+configVolume+",target=/state,readonly",
+		"--entrypoint", "/bin/cat", environment("NVT_LOCAL_CONTROLLER_IMAGE", "nvt-local-controller:latest"),
+		"/state/current/state-plan.json",
+	)
+	if err != nil || len(output) == 0 || len(output) > manifest.MaxDocumentBytes {
+		return nil, errors.New("refusing local volume reset without an exact-owned state inventory")
+	}
+	var plan plancontract.Plan
+	if json.Unmarshal(output, &plan) != nil || plan.Project != application.project || plan.Version != "1" || len(plan.Volumes) == 0 || len(plan.Volumes) > 1024 {
+		return nil, errors.New("refusing invalid local volume state inventory")
+	}
+	expected := make(map[string]map[string]string, len(plan.Volumes))
+	for _, volume := range plan.Volumes {
+		if !application.validPlannedVolume(volume) {
+			return nil, errors.New("refusing invalid local volume state inventory")
+		}
+		if _, duplicate := expected[volume.Name]; duplicate {
+			return nil, errors.New("refusing duplicate local volume state inventory")
+		}
+		expected[volume.Name] = volume.Labels
+	}
+	if !equalLabels(expected[configVolume], expectedConfigLabels) {
+		return nil, errors.New("refusing invalid local volume state inventory")
+	}
+	return expected, nil
+}
+
+func (application app) validPlannedVolume(volume plancontract.Volume) bool {
+	prefix := application.project + "-"
+	if !strings.HasPrefix(volume.Name, prefix) || !managedVolumeSuffixPattern.MatchString(strings.TrimPrefix(volume.Name, prefix)) ||
+		volume.Name != volume.Labels["nvt.dev/local-platform-volume"] || volume.Owner != volume.Labels["nvt.dev/local-platform-custodian"] || volume.Role != volume.Labels["nvt.dev/local-platform-role"] ||
+		!equalLabels(volume.Labels, platformVolumeLabels(application.project, volume.Name, volume.Owner, volume.Role)) {
+		return false
+	}
+	fixed := map[string][2]string{
+		plancontract.VolumeName(application.project, "generated-config"): {"local-platform-state", "generated-config"},
+		plancontract.VolumeName(application.project, "broker-data"):      {"broker", "broker-database-audit"},
+		plancontract.VolumeName(application.project, "broker-private"):   {"broker", "broker-identities-canonical-credentials"},
+		plancontract.VolumeName(application.project, "broker-registry"):  {"local-controller", "broker-agent-registry"},
+		plancontract.VolumeName(application.project, "controller-data"):  {"local-controller", "local-controller-database-audit"},
+		plancontract.VolumeName(application.project, "credential-seeds"): {"credential-portal", "credential-portal-seed"},
+	}
+	if identity, exists := fixed[volume.Name]; exists {
+		return volume.Owner == identity[0] && volume.Role == identity[1]
+	}
+	if volume.Role == "producer-state" && strings.HasPrefix(volume.Owner, "producer:") {
+		producerName := strings.TrimPrefix(volume.Owner, "producer:")
+		return runIDPattern.MatchString(producerName) && volume.Name == plancontract.VolumeName(application.project, plancontract.ProducerStateSuffix(producerName))
+	}
+	suffix := strings.TrimPrefix(volume.Name, prefix)
+	switch volume.Role {
+	case "static-private-input":
+		return (volume.Owner == "broker" || strings.HasPrefix(volume.Owner, "producer:") && runIDPattern.MatchString(strings.TrimPrefix(volume.Owner, "producer:"))) && hashedVolumeSuffix(suffix, "input-", "")
+	case "generated-private-source", "generated-private-input":
+		return volume.Owner == "local-platform-state" && hashedVolumeSuffix(suffix, "generated-", "")
+	default:
+		return false
+	}
+}
+
+func platformVolumeLabels(project, name, custodian, role string) map[string]string {
+	return map[string]string{
+		"nvt.dev/local-platform-owner": project, "nvt.dev/local-platform-custodian": custodian,
+		"nvt.dev/local-platform-role": role, "nvt.dev/local-platform-volume": name, "nvt.dev/local-platform-version": "1",
+	}
+}
+
+func equalLabels(actual, expected map[string]string) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	for key, value := range expected {
+		if actual[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func hashedVolumeSuffix(value, prefix, suffix string) bool {
+	digest := strings.TrimSuffix(strings.TrimPrefix(value, prefix), suffix)
+	return strings.HasPrefix(value, prefix) && strings.HasSuffix(value, suffix) && shortHashPattern.MatchString(digest)
 }
 
 func (application app) objectLabels(ctx context.Context, kind, name string) (map[string]string, error) {

@@ -111,7 +111,7 @@ func Render(ctx context.Context, compiled manifest.Compiled, statePlan plancontr
 		"NVT_BROKER_CONFIG": "/etc/nvt-local/broker.json", "NVT_BROKER_AGENTS_CONFIG": "/registry/agents.yaml", "NVT_BROKER_AUDIT_LOG": "/var/lib/nvt/broker/audit.jsonl",
 		"NVT_BROKER_BIND": "0.0.0.0:7347", "NVT_BROKER_STATE_DIR": "/private", "NVT_BROKER_SEED_TARGET_DIR": "portal",
 	}
-	broker := map[string]any{"image": options.BrokerImage, "environment": brokerEnvironment, "volumes": serviceMounts("broker"), "networks": []string{"local-control-plane"}, "depends_on": map[string]any{"registry-init": map[string]string{"condition": "service_completed_successfully"}}, "restart": "unless-stopped", "labels": labels}
+	broker := map[string]any{"image": options.BrokerImage, "environment": brokerEnvironment, "volumes": serviceMounts("broker"), "networks": []string{"agents-proxy", "local-control-plane"}, "depends_on": map[string]any{"registry-init": map[string]string{"condition": "service_completed_successfully"}}, "restart": "unless-stopped", "labels": labels}
 	if portalEnabled {
 		brokerEnvironment["NVT_BROKER_SEED_DIR"] = "/portal-seed"
 		broker["entrypoint"] = []string{"/opt/nvt-broker/broker/seed_supervisor.py", "--", "/opt/nvt-broker/broker/brokerd.py"}

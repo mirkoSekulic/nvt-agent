@@ -161,14 +161,16 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 	}
 	command := runtimeType
 	args := []string{}
-	resumeArgs := []string{}
+	resumeArgs := []string(nil)
 	switch runtimeType {
 	case "codex":
+		resumeArgs = []string{"resume", "--last"}
 		if autonomy == "trusted-local" {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 			resumeArgs = append(resumeArgs, "--dangerously-bypass-approvals-and-sandbox")
 		}
 	case "claude":
+		resumeArgs = []string{"--continue"}
 		if autonomy == "trusted-local" {
 			args = append(args, "--dangerously-skip-permissions")
 			resumeArgs = append(resumeArgs, "--dangerously-skip-permissions")
@@ -223,6 +225,7 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		grantProviders[provider] = struct{}{}
 	}
 	mappingTargets := map[string]map[string]struct{}{}
+	defaultProviders := map[string]struct{}{}
 	for _, account := range intent.CredentialProviders {
 		for _, repository := range repositories {
 			if repository.Account != account.Name {
@@ -236,12 +239,22 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 				mappingTargets[provider] = map[string]struct{}{}
 			}
 			mappingTargets[provider][repository.CheckoutTarget] = struct{}{}
+			if account.Name == intent.DefaultCredentialProvider {
+				defaultProviders[provider] = struct{}{}
+			}
 		}
 	}
 	for _, provider := range sortedNames(mappingTargets) {
 		profile.CredentialProviders = append(profile.CredentialProviders, resolvedrun.CredentialProviderMapping{
 			Name: provider, BrokerProvider: provider, CredentialKind: "mediated", MatchTargets: sortedNames(mappingTargets[provider]),
 		})
+	}
+	if intent.DefaultCredentialProvider != "" {
+		providers := sortedNames(defaultProviders)
+		if len(providers) != 1 {
+			return resolvedrun.Profile{}, errors.New("compiled default credential provider is ambiguous")
+		}
+		profile.DefaultCredentialProvider = providers[0]
 	}
 	if len(profile.Broker.Grants) == 0 {
 		profile.Egress = resolvedrun.Egress{Mode: "direct"}
