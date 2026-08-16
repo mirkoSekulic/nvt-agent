@@ -12,7 +12,10 @@ import (
 	"testing"
 
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
+	producerrender "github.com/mirkoSekulic/nvt-agent/localplatform/producer"
 )
+
+var _ producerrender.ImageInspectRunner = DockerCLI{}
 
 type memoryStore struct {
 	volumes     map[string]Volume
@@ -120,7 +123,11 @@ func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
 	defer inputs.Close()
 	compiled := manifest.Compiled{
 		Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway", CredentialPortalAccounts: []manifest.PortalAccountIntent{{Name: "codex", Preset: "codex-oauth"}}},
-		Producers: []manifest.ProducerIntent{{Owner: "producer:test", Name: "test", Kind: "oci", RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1000, GID: 1000}}},
+		Producers: []manifest.ProducerIntent{{
+			Owner: "producer:test", Name: "test", Kind: "oci",
+			Image:           "ghcr.io/example/test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1000, GID: 1000}, Workflow: "workflow", AdmissionCredential: "producer-admission:test",
+		}},
 		PrivateInputs: []manifest.PrivateInputIntent{
 			{Owner: "local-controller", Name: "development", File: "instructions.md", Purpose: "instructions"},
 			{Owner: "broker", Name: "github-key", File: ".nvt-local/secrets/key", Purpose: "secret"},
@@ -132,6 +139,14 @@ func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
 	plan, err := manager.Ensure(context.Background(), "local-test", compiled, inputs)
 	if err != nil {
 		t.Fatal(err)
+	}
+	producerCompose, err := producerrender.RenderCompose(context.Background(), compiled, plan, producerrender.Options{
+		ImageInspector: producerrender.ImageInspectorFunc(func(context.Context, string) (producerrender.ResolvedImage, error) {
+			return producerrender.ResolvedImage{ID: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, nil
+		}),
+	})
+	if err != nil || !bytes.Contains(producerCompose, []byte("producer-test")) {
+		t.Fatalf("managed plan did not render producer Compose: %v %s", err, producerCompose)
 	}
 	for volume, files := range store.files {
 		if value := files["compiled.json"]; bytes.Contains(value, secret) {
@@ -172,6 +187,7 @@ func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
 	}
 	assertMount("broker", "/private", false)
 	assertMount("credential-portal", "/etc/nvt-local/credential-portal.json", true)
+	assertMount("producer:test", "/etc/nvt-producer/config.json", true)
 	sources := map[string][]byte{}
 	for name, volume := range store.volumes {
 		if volume.Role == "generated-private-source" {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/distribution/reference"
+	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
 )
 
 // CommandBoundary is the only Docker-specific authority. Implementations must
@@ -107,7 +108,7 @@ func (store DockerStore) InitializePrivateSource(ctx context.Context, volume Vol
 }
 
 func (store DockerStore) writeFiles(ctx context.Context, volume Volume, files []StateFile, expectedSize int) error {
-	if !validVolume(volume) || len(files) == 0 || len(files) > 512 {
+	if !validVolume(volume) || len(files) == 0 || len(files) > maxStateFiles {
 		return errors.New("invalid state update")
 	}
 	var archive bytes.Buffer
@@ -304,7 +305,12 @@ sync`
 	return nil
 }
 
-const maxStateFileBytes = (1 << 20) + MaxInstructionBytes
+const (
+	maxStateFileBytes = (1 << 20) + MaxInstructionBytes
+	// One legal manifest may project MaxItems instruction files and MaxItems
+	// producer configurations plus the fixed owner documents.
+	maxStateFiles = 2*manifest.MaxItems + 16
+)
 
 type helperMount struct {
 	volume   Volume

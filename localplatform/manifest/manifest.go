@@ -26,12 +26,14 @@ const (
 	MaxDocumentNodes = 32768
 	MaxDocumentDepth = 64
 	MaxItems         = 256
+	MaxProducers     = 64
 	MaxNameBytes     = 63
 	MaxStringBytes   = 4096
 )
 
 var (
 	namePattern       = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$`)
+	runIDPattern      = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$`)
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	integerPattern    = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)$`)
 	secretKeyPattern  = regexp.MustCompile(`(?i)(secret|token|password|passwd|private.?key|credential|api.?key)`)
@@ -242,6 +244,9 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("too many %s", label)
 		}
 	}
+	if len(m.Producers) > MaxProducers {
+		return errors.New("too many producers")
+	}
 	for name, secret := range m.Secrets {
 		if !validName(name) || !safeRelativePath(secret.File, ".nvt-local/secrets/") {
 			return fmt.Errorf("invalid secret %q", name)
@@ -284,7 +289,7 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, profile := range m.Profiles {
-		if !validName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required", "read-only") {
+		if !validRunIDName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required", "read-only") {
 			return fmt.Errorf("invalid profile %q", name)
 		}
 		if err := uniqueRefs(profile.Accounts, m.Accounts, "account"); err != nil {
@@ -344,7 +349,7 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, workflow := range m.Workflows {
-		if !validName(name) || !has(m.Profiles, workflow.Profile) || !has(m.Repositories, workflow.Repository) || !oneOf(workflow.Retention, "disposable", "retained") {
+		if !validRunIDName(name) || !has(m.Profiles, workflow.Profile) || !has(m.Repositories, workflow.Repository) || !oneOf(workflow.Retention, "disposable", "retained") {
 			return fmt.Errorf("invalid workflow %q", name)
 		}
 		if !profileAllowsRepository(m.Profiles[workflow.Profile], m.Repositories[workflow.Repository]) {
@@ -359,7 +364,7 @@ func (m Manifest) Validate() error {
 	}
 	seenProducers := map[string]struct{}{}
 	for _, producer := range m.Producers {
-		if !validName(producer.Name) || !has(m.Workflows, producer.Workflow) {
+		if !validRunIDName(producer.Name) || !has(m.Workflows, producer.Workflow) {
 			return fmt.Errorf("invalid producer %q", producer.Name)
 		}
 		if _, ok := seenProducers[producer.Name]; ok {
@@ -424,6 +429,9 @@ func (m Manifest) Validate() error {
 }
 
 func validName(v string) bool { return len(v) <= MaxNameBytes && namePattern.MatchString(v) }
+func validRunIDName(v string) bool {
+	return len(v) <= MaxNameBytes && runIDPattern.MatchString(v)
+}
 func validExternalRuntimeIdentity(identity *RuntimeIdentity) bool {
 	return identity != nil && identity.UID > 0 && identity.UID <= 1<<31-1 && identity.GID > 0 && identity.GID <= 1<<31-1
 }

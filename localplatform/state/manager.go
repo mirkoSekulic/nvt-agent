@@ -11,6 +11,7 @@ import (
 	"sort"
 
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
+	producerrender "github.com/mirkoSekulic/nvt-agent/localplatform/producer"
 )
 
 type StateFile struct {
@@ -169,6 +170,13 @@ func configurationFiles(compiled manifest.Compiled, inputs *Inputs, plan Plan) (
 			return nil, err
 		}
 		values["credential-portal.json"] = portal
+	}
+	producerFiles, err := producerrender.Configurations(compiled)
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range producerFiles {
+		values[file.Name] = file.Data
 	}
 	for _, instruction := range inputs.Instructions {
 		values["instructions/"+shortID(instruction.Owner+"\x00"+instruction.Name)] = instruction.Content

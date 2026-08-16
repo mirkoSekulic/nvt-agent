@@ -1,12 +1,10 @@
 package state
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
+	plancontract "github.com/mirkoSekulic/nvt-agent/localplatform/plan"
 )
 
 const (
@@ -30,30 +29,9 @@ const (
 var projectPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,47}$`)
 var producerServicePattern = regexp.MustCompile(`^producer:[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$`)
 
-// Plan is the complete redacted volume and mount contract. It contains no host
-// paths or secret-derived values and is therefore safe to serialize and log.
-type Plan struct {
-	Version string   `json:"version"`
-	Project string   `json:"project"`
-	Volumes []Volume `json:"volumes"`
-	Mounts  []Mount  `json:"mounts"`
-}
-
-type Volume struct {
-	Name      string            `json:"name"`
-	Role      string            `json:"role"`
-	Owner     string            `json:"owner"`
-	Consumers []string          `json:"consumers,omitempty"`
-	Labels    map[string]string `json:"labels"`
-}
-
-type Mount struct {
-	Service  string `json:"service"`
-	Volume   string `json:"volume"`
-	Subpath  string `json:"subpath,omitempty"`
-	Target   string `json:"target"`
-	ReadOnly bool   `json:"readOnly"`
-}
+type Plan = plancontract.Plan
+type Volume = plancontract.Volume
+type Mount = plancontract.Mount
 
 type generatedInput struct {
 	name      string
@@ -134,7 +112,10 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 	if portalEnabled {
 		configConsumers = append(configConsumers, "credential-portal")
 	}
-	config := addVolume("generated-config", "generated-config", "local-platform-state", configConsumers...)
+	for _, producer := range compiled.Producers {
+		configConsumers = append(configConsumers, "producer:"+producer.Name)
+	}
+	config := addVolume(plancontract.GeneratedConfigSuffix, "generated-config", "local-platform-state", configConsumers...)
 	result.configVolume = config.Name
 	addDirectoryMount := func(service string, volume Volume, target string, readOnly bool) {
 		result.Mounts = append(result.Mounts, Mount{Service: service, Volume: volume.Name, Target: target, ReadOnly: readOnly})
@@ -155,6 +136,18 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 		result.directories = append(result.directories, directoryPlan{volume: credentialSeeds.Name, uid: 1000, gid: 1000, mode: 0o700})
 		addDirectoryMount("credential-portal", credentialSeeds, "/seed", false)
 		addDirectoryMount("broker", credentialSeeds, "/portal-seed", true)
+	}
+	for _, producer := range compiled.Producers {
+		service := "producer:" + producer.Name
+		result.Mounts = append(result.Mounts, Mount{
+			Service: service, Volume: config.Name, Subpath: "current/producers/" + producer.Name + ".json",
+			Target: "/etc/nvt-producer/config.json", ReadOnly: true,
+		})
+		if producer.Kind == "github-comments" {
+			state := addVolume(plancontract.ProducerStateSuffix(producer.Name), "producer-state", service, service)
+			result.directories = append(result.directories, directoryPlan{volume: state.Name, uid: producer.RuntimeIdentity.UID, gid: producer.RuntimeIdentity.GID, mode: 0o700})
+			addDirectoryMount(service, state, "/var/lib/nvt-producer", false)
+		}
 	}
 	for _, item := range []struct{ service, subpath, target string }{
 		{"broker", "broker.json", "/etc/nvt-local/broker.json"},
@@ -186,7 +179,7 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 		if !identityOK {
 			return preparedPlan{}, errors.New("private input runtime identity is unavailable")
 		}
-		suffix := "input-" + shortID(input.Owner+"\x00"+input.Name)
+		suffix := plancontract.StaticInputSuffix(input.Owner, input.Name)
 		volume := addVolume(suffix, "static-private-input", input.Owner, input.Owner)
 		result.static = append(result.static, staticInput{input.Owner, input.Name, volume.Name, uid, gid})
 		result.Mounts = append(result.Mounts, Mount{Service: input.Owner, Volume: volume.Name, Subpath: "current/value", Target: privateTarget(input.Name), ReadOnly: true})
@@ -249,7 +242,7 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 			if !identityOK {
 				return preparedPlan{}, errors.New("generated private input runtime identity is unavailable")
 			}
-			copyVolume := addVolume("generated-"+shortID(input.name+"\x00"+consumer), "generated-private-input", "local-platform-state", consumer)
+			copyVolume := addVolume(plancontract.GeneratedInputSuffix(input.name, consumer), "generated-private-input", "local-platform-state", consumer)
 			entry.consumer = append(entry.consumer, consumerCopy{consumer, copyVolume.Name, uid, gid})
 			result.Mounts = append(result.Mounts, Mount{Service: consumer, Volume: copyVolume.Name, Subpath: "current/value", Target: privateTarget(input.name), ReadOnly: true})
 		}
@@ -291,11 +284,8 @@ func serviceIdentity(service string, producers map[string][2]int) (int, int, boo
 	}
 }
 
-func privateTarget(name string) string { return "/run/nvt-private/" + shortID(name) }
-func shortID(value string) string {
-	digest := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(digest[:12])
-}
+func privateTarget(name string) string { return plancontract.PrivateTarget(name) }
+func shortID(value string) string      { return plancontract.ShortID(value) }
 
 func uniqueSorted(values []string) []string {
 	seen := map[string]struct{}{}
@@ -308,18 +298,6 @@ func uniqueSorted(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-// CanonicalJSON returns a stable redacted plan. It is safe for generated
-// configuration because Plan cannot represent secret bytes or host paths.
-func (plan Plan) CanonicalJSON() ([]byte, error) {
-	var output bytes.Buffer
-	encoder := json.NewEncoder(&output)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(plan); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(output.Bytes(), []byte{'\n'}), nil
 }
 
 func generatedBytes(random io.Reader, encoding string) ([]byte, error) {

@@ -18,6 +18,10 @@ workstations, disposable or retained workflows, the built-in
 explicitly named `publicConfig` boundary described below is
 administrator-asserted public data.
 
+Profile, workflow, and producer names use the controller's 63-byte lower-case
+run-ID grammar. A manifest declares at most 64 producers because each producer
+owns one distinct local-controller schedule.
+
 Every Codex or Claude profile explicitly selects one compatible runtime account
 from its account list. Shell profiles select none. The controller projection
 keeps that selection separate as the runtime/egress provider and emits its
@@ -153,9 +157,61 @@ slots before volume creation. Slot and local destination names use a
 domain-separated full SHA-256 mapping of the logical account name; any duplicate
 mapping is rejected before state is written.
 
-This slice prepares state and mount intent only. It does not render or start a
-producer, workstation, workflow, or replacement Compose project; those remain
-behavior-inactive until the later integration slices consume the plan.
+Trusted-state preparation does not start a producer, workstation, workflow, or
+replacement Compose project. The producer renderer below consumes its redacted
+plan, while final lifecycle wiring remains behavior-inactive until the later
+integration slice.
+
+## Local producer rendering
+
+`localplatform/producer` renders one service and one read-only generated
+configuration file for each compiled producer. The generated Compose fragment
+is derived only from compiled intent and the exact managed-state plan. It
+rejects a missing mount, an additional mount, a writable private input, an
+unexpected subpath, a root runtime identity, and a mutable external image
+before returning any YAML.
+
+The packaged `github-comments` preset expands to the existing producer
+contract with local profiled schedule admission. Its configured schedule name
+is the producer name, and `pr-create`, `review`, and `run` all map to the one
+manifest-selected workflow. The generated App configuration names only its
+one repository and its exact private-key mount. Its SQLite state is the only
+writable producer mount, preserving polling cursors, issue/comment
+idempotency, reactions, and restart behavior without a user-authored producer
+configuration or Compose service.
+
+An external OCI producer receives exactly three environment variables:
+
+- `NVT_SCHEDULE_ADMISSION_URL`, naming only its schedule endpoint;
+- `NVT_SCHEDULE_ADMISSION_TOKEN_FILE`, naming its read-only generated token;
+  and
+- `NVT_PRODUCER_CONFIG_FILE`, naming its read-only
+  `nvt.dev/local-producer/v1` configuration.
+
+That configuration contains the producer name, its one workflow, the declared
+`publicConfig`, and a logical-name to mounted-secret-file map. It contains no
+profile, backend, image, repository, provider, broker grant, credential, agent,
+or workstation selection. An external producer receives no state volume; only
+the built-in preset has declared state semantics in v1.
+
+Every producer runs as its compiled non-root identity with a read-only root
+filesystem, all capabilities dropped, `no-new-privileges`, a bounded
+non-executable tmpfs, PID/CPU/memory limits, and a bounded stop grace period.
+Before rendering an external service, the digest-selected image must be
+resolved in the local daemon and its image configuration must declare no OCI
+volumes; the service is pinned to that inspected image ID. This prevents image
+metadata from adding writable anonymous volumes behind the reviewed mount
+plan.
+The fragment includes no host bind, Docker socket, broker/agent credential,
+service dependency, or another producer's volume. One producer therefore
+cannot read another producer's inputs, and its crash/restart lifecycle does not
+gate unrelated producers or workstations.
+
+The fixture OCI image in `localplatform/producer/testfixture` exercises this
+contract. It proves one exact-workflow submission succeeds while attempted
+profile, workflow, backend, image, credential, and repository selections are
+denied. Local-controller admission tests independently prove those unknown or
+unauthorized selections create no durable run and never reach a backend.
 
 ## Example
 
