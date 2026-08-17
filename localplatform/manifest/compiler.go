@@ -49,6 +49,7 @@ type ProducerIntent struct {
 	Image               string                `json:"image,omitempty"`
 	RuntimeIdentity     RuntimeIdentityIntent `json:"runtimeIdentity"`
 	Workflow            string                `json:"workflow"`
+	CommandWorkflows    map[string]string     `json:"commandWorkflows,omitempty"`
 	PublicConfig        map[string]any        `json:"publicConfig,omitempty"`
 	Secrets             map[string]string     `json:"secrets,omitempty"`
 	GitHub              *GitHubProducerIntent `json:"github,omitempty"`
@@ -113,11 +114,12 @@ type ControllerCredentialProviderIntent struct {
 	Preset string `json:"preset"`
 }
 type ProducerAdmissionIntent struct {
-	Producer                string   `json:"producer"`
-	Identity                string   `json:"identity"`
-	Workflow                string   `json:"workflow"`
-	Credential              string   `json:"credential"`
-	AllowedPrincipalIssuers []string `json:"allowedPrincipalIssuers"`
+	Producer                string            `json:"producer"`
+	Identity                string            `json:"identity"`
+	Workflow                string            `json:"workflow"`
+	CommandWorkflows        map[string]string `json:"commandWorkflows,omitempty"`
+	Credential              string            `json:"credential"`
+	AllowedPrincipalIssuers []string          `json:"allowedPrincipalIssuers"`
 }
 type BrokerRepositoryIntent struct {
 	Name             string `json:"name"`
@@ -206,7 +208,7 @@ func Compile(m Manifest) (Compiled, error) {
 		if producer.RuntimeIdentity != nil {
 			identity = RuntimeIdentityIntent{UID: producer.RuntimeIdentity.UID, GID: producer.RuntimeIdentity.GID}
 		}
-		intent := ProducerIntent{Owner: "producer:" + producer.Name, Name: producer.Name, Kind: producer.Preset, Image: producer.Image, RuntimeIdentity: identity, Workflow: producer.Workflow, PublicConfig: producer.PublicConfig, Secrets: sortedMap(producer.Secrets), AdmissionCredential: credential}
+		intent := ProducerIntent{Owner: "producer:" + producer.Name, Name: producer.Name, Kind: producer.Preset, Image: producer.Image, RuntimeIdentity: identity, Workflow: producer.Workflow, CommandWorkflows: sortedMap(producer.CommandWorkflows), PublicConfig: producer.PublicConfig, Secrets: sortedMap(producer.Secrets), AdmissionCredential: credential}
 		if producer.Preset == "github-comments" {
 			account := m.Accounts[producer.Account]
 			owner, repository, _ := githubCoordinates(m.Repositories[producer.Repository])
@@ -225,7 +227,8 @@ func Compile(m Manifest) (Compiled, error) {
 			issuers = []string{"https://github.com"}
 		}
 		sort.Strings(issuers)
-		result.Controller.ProducerAdmissions = append(result.Controller.ProducerAdmissions, ProducerAdmissionIntent{producer.Name, "producer:" + producer.Name, producer.Workflow, credential, issuers})
+		workflows := sortedMap(producer.CommandWorkflows)
+		result.Controller.ProducerAdmissions = append(result.Controller.ProducerAdmissions, ProducerAdmissionIntent{Producer: producer.Name, Identity: "producer:" + producer.Name, Workflow: producer.Workflow, CommandWorkflows: workflows, Credential: credential, AllowedPrincipalIssuers: issuers})
 		result.GeneratedPrivateInputs = append(result.GeneratedPrivateInputs, GeneratedPrivateInputIntent{"local-platform-state", credential, "schedule-admission-token", []string{"local-controller", "producer:" + producer.Name}})
 	}
 	for _, name := range SortedNames(m.Accounts) {

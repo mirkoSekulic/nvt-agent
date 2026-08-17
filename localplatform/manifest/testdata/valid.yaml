@@ -28,6 +28,7 @@ profiles:
       packages: [jq, git]
       mise: [go@latest]
     capabilities: [SYS_PTRACE]
+    plugins: [github-watcher, work-control]
     instructions:
       file: ./.nvt-local/instructions/development.md
 repositories:
@@ -52,6 +53,15 @@ workflows:
     profile: development
     repository: nvt-agent
     retention: disposable
+    lifecycle:
+      completeOn: [plugin.github.pr.merged, plugin.github.pr.closed]
+  nvt-review:
+    profile: development
+    repository: nvt-agent
+    retention: disposable
+    lifecycle:
+      completeOn: [plugin.work.completed]
+      failOn: [plugin.work.failed]
   infrastructure:
     profile: development
     repository: infrastructure
@@ -64,6 +74,10 @@ producers:
     prefix: /nvtagent
     allowedAuthors: [mirkoSekulic]
     workflow: nvt-development
+    commandWorkflows:
+      review: nvt-review
+      run: nvt-review
+      pr-continue: nvt-development
   - name: external-chat
     image: ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     runtimeIdentity:

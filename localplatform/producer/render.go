@@ -136,7 +136,10 @@ func Configurations(compiled manifest.Compiled) ([]ConfigFile, error) {
 }
 
 func githubConfiguration(intent manifest.ProducerIntent) map[string]any {
-	commandWorkflows := map[string]string{"pr-create": intent.Workflow, "review": intent.Workflow, "run": intent.Workflow}
+	commandWorkflows := map[string]string{}
+	for command, workflow := range intent.CommandWorkflows {
+		commandWorkflows[command] = workflow
+	}
 	return map[string]any{
 		"commandPrefixes": []string{intent.GitHub.Prefix},
 		"allowedAuthors":  append([]string(nil), intent.GitHub.AllowedAuthors...),
@@ -266,8 +269,13 @@ func validateIntent(intent manifest.ProducerIntent) error {
 			len(intent.Secrets) != 0 || len(intent.PublicConfig) != 0 {
 			return errors.New("compiled GitHub producer intent is invalid")
 		}
+		for command, workflow := range intent.CommandWorkflows {
+			if (command != "pr-create" && command != "review" && command != "run" && command != "pr-continue") || !localRunIDPattern.MatchString(workflow) {
+				return errors.New("compiled GitHub producer command workflow is invalid")
+			}
+		}
 	case "oci":
-		if intent.GitHub != nil || !immutableImage(intent.Image) {
+		if intent.GitHub != nil || len(intent.CommandWorkflows) != 0 || !immutableImage(intent.Image) {
 			return errors.New("compiled external producer intent is invalid")
 		}
 	default:

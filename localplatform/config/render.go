@@ -105,7 +105,11 @@ func Controller(compiled manifest.Compiled, instructions Instructions) ([]byte, 
 		if !ok || !repositoryOK {
 			return nil, errors.New("compiled workflow references are invalid")
 		}
-		result.Workflows = append(result.Workflows, resolvedrun.Workflow{Name: item.Name, Repositories: []resolvedrun.Repository{renderRepository(repository, profile, accounts)}})
+		lifecycle := &resolvedrun.Lifecycle{CompleteOn: append([]string(nil), item.Workflow.Lifecycle.CompleteOn...), FailOn: append([]string(nil), item.Workflow.Lifecycle.FailOn...)}
+		if len(lifecycle.CompleteOn) == 0 && len(lifecycle.FailOn) == 0 {
+			lifecycle = nil
+		}
+		result.Workflows = append(result.Workflows, resolvedrun.Workflow{Name: item.Name, Repositories: []resolvedrun.Repository{renderRepository(repository, profile, accounts)}, Lifecycle: lifecycle})
 	}
 	for _, item := range compiled.Controller.Workstations {
 		profile, ok := profiles[item.Profile]
@@ -134,15 +138,33 @@ func Controller(compiled manifest.Compiled, instructions Instructions) ([]byte, 
 		workflowRetentions[item.Name] = item.Workflow.Retention
 	}
 	for _, admission := range compiled.Controller.ProducerAdmissions {
+		for command := range admission.CommandWorkflows {
+			if command != "pr-create" && command != "review" && command != "run" && command != "pr-continue" {
+				return nil, errors.New("compiled producer admission has unsupported command mapping")
+			}
+		}
 		profile := workflowProfiles[admission.Workflow]
 		retention := workflowRetentions[admission.Workflow]
 		if profile == "" || retention == "" {
 			return nil, errors.New("compiled producer admission is invalid")
 		}
+		selected := map[string]struct{}{admission.Workflow: {}}
+		for _, workflow := range admission.CommandWorkflows {
+			selected[workflow] = struct{}{}
+		}
+		selections := make([]scheduleSelection, 0, len(selected))
+		for workflow := range selected {
+			selectedProfile, ok := workflowProfiles[workflow]
+			if !ok || workflowRetentions[workflow] != retention {
+				return nil, errors.New("compiled producer admission has incompatible workflow policy")
+			}
+			selections = append(selections, scheduleSelection{Profile: selectedProfile, Workflow: workflow})
+		}
+		sort.Slice(selections, func(i, j int) bool { return selections[i].Workflow < selections[j].Workflow })
 		result.Schedules = append(result.Schedules, schedule{Name: admission.Producer, Producers: []scheduleProducer{{
 			Identity: admission.Identity, TokenFile: plancontract.PrivateTarget(admission.Credential),
 			AllowedPrincipalIssuers: append([]string(nil), admission.AllowedPrincipalIssuers...),
-			Selections:              []scheduleSelection{{Profile: profile, Workflow: admission.Workflow}}, DefaultWorkflow: admission.Workflow,
+			Selections:              selections, DefaultWorkflow: admission.Workflow,
 			Retention: retention, Backend: "local-docker",
 		}}})
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -44,10 +46,13 @@ func TestConfigurationsRenderBuiltInAndBoundedExternalContracts(t *testing.T) {
 	}
 	submission := builtIn["submission"].(map[string]any)
 	workflows := submission["commandWorkflows"].(map[string]any)
-	for _, command := range []string{"pr-create", "review", "run"} {
+	for _, command := range []string{"review", "run", "pr-continue"} {
 		if workflows[command] != "development" {
 			t.Fatalf("command %q workflow = %#v", command, workflows[command])
 		}
+	}
+	if _, exists := workflows["pr-create"]; exists {
+		t.Fatal("pr-create fallback was rendered as an explicit command mapping")
 	}
 	if submission["backend"] != "local" || submission["admissionMode"] != "profiled" ||
 		submission["admissionTokenFile"] != plancontract.PrivateTarget("producer-admission:github") ||
@@ -55,6 +60,42 @@ func TestConfigurationsRenderBuiltInAndBoundedExternalContracts(t *testing.T) {
 		builtIn["state"].(map[string]any)["sqlitePath"] != StatePath+"/state.db" || builtIn["pollInterval"] != "30s" ||
 		builtIn["idempotency"].(map[string]any)["scope"] != "issue" || builtIn["schedulingReactions"].(map[string]any)["enabled"] != true {
 		t.Fatalf("built-in configuration = %#v", builtIn)
+	}
+}
+
+func TestConfigurationsPreserveCompiledGitHubCommandWorkflowsExactly(t *testing.T) {
+	file, err := os.Open(filepath.Join("..", "manifest", "testdata", "valid.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := manifest.Decode(file)
+	_ = file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := manifest.Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := Configurations(compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var configuration map[string]any
+	for _, file := range files {
+		if file.Name == "producers/nvt-comments.json" {
+			if err := json.Unmarshal(file.Data, &configuration); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	submission, ok := configuration["submission"].(map[string]any)
+	if !ok {
+		t.Fatalf("GitHub producer config = %#v", configuration)
+	}
+	got := submission["commandWorkflows"].(map[string]any)
+	if got["review"] != "nvt-review" || got["run"] != "nvt-review" || got["pr-continue"] != "nvt-development" || len(got) != 3 || submission["workflow"] != "nvt-development" {
+		t.Fatalf("submission routing = %#v", submission)
 	}
 }
 
@@ -67,6 +108,18 @@ func TestConfigurationsRejectsNonDNSWorkflow(t *testing.T) {
 	}
 	if _, err := Configurations(compiled); err == nil {
 		t.Fatal("non-DNS built-in workflow was accepted")
+	}
+}
+
+func TestConfigurationsRejectUnsupportedCompiledCommandWorkflow(t *testing.T) {
+	compiled, _ := producerFixture()
+	for index := range compiled.Producers {
+		if compiled.Producers[index].Kind == "github-comments" {
+			compiled.Producers[index].CommandWorkflows = map[string]string{"deploy": "development"}
+		}
+	}
+	if _, err := Configurations(compiled); err == nil {
+		t.Fatal("unsupported compiled command mapping was accepted")
 	}
 }
 
@@ -246,7 +299,7 @@ func renderOptions() Options {
 func producerFixture() (manifest.Compiled, plancontract.Plan) {
 	github := manifest.ProducerIntent{
 		Owner: "producer:github", Name: "github", Kind: "github-comments", RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 65532, GID: 65532},
-		Workflow: "development", AdmissionCredential: "producer-admission:github",
+		Workflow: "development", CommandWorkflows: map[string]string{"review": "development", "run": "development", "pr-continue": "development"}, AdmissionCredential: "producer-admission:github",
 		GitHub: &manifest.GitHubProducerIntent{
 			AppID: 1, InstallationID: 2, PrivateKeySecret: "github-key", RepositoryOwner: "example", RepositoryName: "repo",
 			Prefix: "/nvtagent", AllowedAuthors: []string{"owner"},

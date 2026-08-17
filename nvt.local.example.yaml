@@ -7,6 +7,7 @@ profiles:
       autonomy: trusted-local
     editor:
       preset: code-server
+    plugins: [work-control, github-watcher]
 
 repositories:
   nvt-agent:
@@ -32,6 +33,15 @@ workflows:
     profile: development
     repository: nvt-agent
     retention: disposable
+    lifecycle:
+      completeOn: [plugin.github.pr.merged, plugin.github.pr.closed]
+  nvt-review:
+    profile: development
+    repository: nvt-agent
+    retention: disposable
+    lifecycle:
+      completeOn: [plugin.work.completed]
+      failOn: [plugin.work.failed]
   studio-development:
     profile: development
     repository: studio

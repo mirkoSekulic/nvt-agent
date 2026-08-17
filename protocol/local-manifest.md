@@ -42,6 +42,9 @@ path and upstream, broker repository identity, and optional credential account.
 `github: owner/repository` is shorthand expanded into those exact fields. A
 workstation or workflow references repository names, so GitHub and Azure DevOps
 checkouts use the same selection contract and account choice is unambiguous.
+Workflows also declare provider-neutral `lifecycle.completeOn` and
+`lifecycle.failOn` event-name sets. These are projected unchanged into the
+immutable resolved run; an event may not appear in both sets.
 For explicit credentialed repositories, the broker identity is canonical and
 must match the URL: GitHub uses `owner/repository`, while Azure DevOps literal
 mode uses the complete `dev.azure.com/organization/project/_git/repository`
@@ -90,8 +93,12 @@ the exact interrupted-first-publication form in which generated-config is the
 sole platform-owned volume; every other empty-inventory form fails closed.
 
 The controller projection also contains one producer admission binding per
-producer: stable producer identity, exactly one workflow, and a logical
-generated credential name. Each binding contains a non-empty bounded principal
+producer: stable producer identity, its default workflow, every exact
+command-selected workflow, and a logical generated credential name. Every
+selected workflow is compiled and authorized at this boundary. Unknown or
+ambiguous selections, unsupported command keys, and selections whose retention
+cannot be represented by the schedule's single retention policy fail closed.
+Each binding contains a non-empty bounded principal
 issuer allowlist: `github-comments` expands to `https://github.com`, while an
 external OCI producer declares its issuers explicitly. The corresponding
 generated-private-input entry is owned by local-platform state and lists only
@@ -225,12 +232,21 @@ before returning any YAML.
 
 The packaged `github-comments` preset expands to the existing producer
 contract with local profiled schedule admission. Its configured schedule name
-is the producer name, and `pr-create`, `review`, and `run` all map to the one
-manifest-selected workflow. The generated App configuration names only its
+is the producer name. `commandWorkflows` accepts only `pr-create`, `review`,
+`run`, and `pr-continue` and is rendered exactly; omitted commands are not
+silently routed. The producer's `workflow` is the fallback for `pr-create`
+only. The generated App configuration names only its
 one repository and its exact private-key mount. Its SQLite state is the only
 writable producer mount, preserving polling cursors, issue/comment
 idempotency, reactions, and restart behavior without a user-authored producer
 configuration or Compose service.
+
+GitHub behavior remains explicit profile policy. A profile used for these
+workflows declares both builtin `work-control` and `github-watcher` plugins.
+Review/run workflows terminate on `plugin.work.completed` or
+`plugin.work.failed`; PR-create/continue workflows complete only on
+`plugin.github.pr.merged` or `plugin.github.pr.closed` and therefore ignore a
+work-completed event.
 
 An external OCI producer receives exactly three environment variables:
 

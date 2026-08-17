@@ -420,6 +420,33 @@ func TestExternalProducerPublicConfigIsAnExplicitTrustBoundary(t *testing.T) {
 	}
 }
 
+func TestGitHubCommandWorkflowMappingsCompileExactlyAndFailClosed(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := compiled.Controller.ProducerAdmissions[1].CommandWorkflows
+	if got["review"] != "nvt-review" || got["run"] != "nvt-review" || got["pr-continue"] != "nvt-development" || len(got) != 3 {
+		t.Fatalf("compiled command workflows = %#v", got)
+	}
+	for name, mapping := range map[string]string{"unsupported": "deploy: nvt-review", "unknown": "review: missing"} {
+		t.Run(name, func(t *testing.T) {
+			input := strings.Replace(string(raw), "review: nvt-review", mapping, 1)
+			if _, err := Decode(strings.NewReader(input)); err == nil {
+				t.Fatal("malformed command workflow mapping was accepted")
+			}
+		})
+	}
+}
+
 func TestDecodeRejectsDepthAndNodeBounds(t *testing.T) {
 	deep := "apiVersion: nvt.dev/local/v1\nprofiles:\n  p:\n    runtime: {preset: shell, autonomy: approval-required}\nworkflows:\n  w: {profile: p, repository: a/b, retention: disposable}\nproducers:\n  - name: p\n    image: ghcr.io/a/b@sha256:" + strings.Repeat("a", 64) + "\n    workflow: w\n    config:\n      value: " + strings.Repeat("[", MaxDocumentDepth+1) + "null" + strings.Repeat("]", MaxDocumentDepth+1) + "\n"
 	if _, err := Decode(strings.NewReader(deep)); err == nil {
