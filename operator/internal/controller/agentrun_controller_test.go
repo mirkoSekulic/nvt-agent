@@ -98,7 +98,7 @@ func TestReconcileRotatesEgressCAWithoutMixedPodGenerations(t *testing.T) {
 	}
 
 	now = now.Add(egressCAValidity - egressCARenewalMargin)
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
 			t.Fatal(err)
 		}
@@ -142,6 +142,60 @@ func TestReconcileRotatesEgressCAWithoutMixedPodGenerations(t *testing.T) {
 	}
 	if agent.Annotations[egressCAGenerationAnnotation] != "2" {
 		t.Fatalf("agent generation = %#v", agent.Annotations)
+	}
+}
+
+func TestReconcileDoesNotClassifyRotationOwnedPodTermination(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	run := enforcedAgentRun()
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(run, testBrokerAgentsConfigMap(run.Namespace)).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, Now: func() metav1.Time { return metav1.NewTime(now) }}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	markPodReady(ctx, t, k8sClient, run.Namespace, EgressdPodName(run.Name))
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(egressCAValidity - egressCARenewalMargin)
+	// First pass persists intent without deleting either consumer.
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	var pod corev1.Pod
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: AgentPodName(run.Name)}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Finalizers = []string{"test.nvt.dev/hold-deletion"}
+	if err := k8sClient.Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Delete(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: AgentPodName(run.Name)}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: roleLabelAgent, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 143}}}}
+	if err := k8sClient.Status().Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	var updated nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(run), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if IsTerminalAgentRunPhase(updated.Status.Phase) {
+		t.Fatalf("rotation-owned termination made run terminal: %#v", updated.Status)
+	}
+	if !egressCARotationIntent(&updated) {
+		t.Fatalf("rotation intent was lost: %#v", updated.Status.Conditions)
 	}
 }
 

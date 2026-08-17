@@ -381,15 +381,18 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// Record a terminal workload before any maintenance path can replace its
 		// Pod. In particular, CA rotation must never erase the only durable
 		// lifecycle observation and re-execute a completed entrypoint.
-		observed := agentRun
-		SyncAgentRunLifecycleFromPodTermination(&observed, existingPod, r.now())
-		SyncAgentRunStatusFromPod(&observed, existingPod, r.now())
-		if IsTerminalAgentRunPhase(observed.Status.Phase) {
-			agentRun.Status = observed.Status
-			if err := r.Status().Update(ctx, &agentRun); err != nil {
-				return ctrl.Result{}, fmt.Errorf("record terminal AgentRun Pod before maintenance: %w", err)
+		rotationOwnsTermination := egressCARotationIntent(&agentRun) && !existingPod.DeletionTimestamp.IsZero()
+		if !rotationOwnsTermination {
+			observed := agentRun
+			SyncAgentRunLifecycleFromPodTermination(&observed, existingPod, r.now())
+			SyncAgentRunStatusFromPod(&observed, existingPod, r.now())
+			if IsTerminalAgentRunPhase(observed.Status.Phase) {
+				agentRun.Status = observed.Status
+				if err := r.Status().Update(ctx, &agentRun); err != nil {
+					return ctrl.Result{}, fmt.Errorf("record terminal AgentRun Pod before maintenance: %w", err)
+				}
+				return r.reconcileTerminalResourceCleanup(ctx, &agentRun)
 			}
-			return r.reconcileTerminalResourceCleanup(ctx, &agentRun)
 		}
 	}
 	conditionsChanged := false
@@ -2144,6 +2147,11 @@ func enforcementAgentPodGatesHold(agentRun *nvtv1alpha1.AgentRun) bool {
 		meta.IsStatusConditionTrue(agentRun.Status.Conditions, ConditionEgressCAPublished)
 }
 
+func egressCARotationIntent(agentRun *nvtv1alpha1.AgentRun) bool {
+	condition := meta.FindStatusCondition(agentRun.Status.Conditions, ConditionEgressCAPublished)
+	return condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == "EgressCARotating"
+}
+
 // reconcileEnforcementGates advances the own-Pod machine past egressd
 // creation: wait for egressd Ready, then publish the validated Secret-backed
 // CA. Returns proceed=true only when the agent Pod may be created this pass.
@@ -2338,11 +2346,21 @@ func (r *AgentRunReconciler) reconcileEgressCASecret(ctx context.Context, agentR
 			if !stderrors.Is(err, errEgressCAValidity) {
 				return fmt.Errorf("egress CA Secret %s/%s has invalid keypair: %w", secret.Namespace, secret.Name, err)
 			}
+			if !egressCARotationIntent(agentRun) {
+				r.setRunCondition(agentRun, ConditionEgressCAPublished, metav1.ConditionFalse, "EgressCARotating", "rotating egress CA and recreating trust consumers")
+				if statusErr := r.Status().Update(ctx, agentRun); statusErr != nil {
+					return fmt.Errorf("persist egress CA rotation intent: %w", statusErr)
+				}
+				return errEgressCARotationInProgress
+			}
 			for _, podName := range []string{AgentPodName(agentRun.Name), EgressdPodName(agentRun.Name)} {
 				pod := &corev1.Pod{}
 				if getErr := r.Get(ctx, client.ObjectKey{Namespace: agentRun.Namespace, Name: podName}, pod); getErr == nil {
 					if !metav1.IsControlledBy(pod, agentRun) {
 						return fmt.Errorf("refusing CA rotation: Pod %s is not controlled by AgentRun", podName)
+					}
+					if !pod.DeletionTimestamp.IsZero() {
+						return errEgressCARotationInProgress
 					}
 					if deleteErr := r.Delete(ctx, pod); deleteErr != nil {
 						return fmt.Errorf("delete stale CA consumer Pod %s: %w", podName, deleteErr)

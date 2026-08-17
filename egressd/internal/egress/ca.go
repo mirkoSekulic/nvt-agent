@@ -288,6 +288,13 @@ func (ca *CA) CertPEM() []byte {
 	return append([]byte(nil), ca.certPEM...)
 }
 
+// RenewAfter is the first instant at which this CA enters its bounded renewal
+// window. It contains no secret material and is safe to persist as scheduling
+// metadata.
+func (ca *CA) RenewAfter() time.Time {
+	return ca.cert.NotAfter.Add(-CARenewalMargin)
+}
+
 // WriteKeyPair writes the durable CA certificate and private key. This is for
 // local/host state and operator-owned Secret creation only; egressd never
 // publishes the private key into the agent-visible CA directory.

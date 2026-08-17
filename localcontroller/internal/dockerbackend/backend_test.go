@@ -170,6 +170,9 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 		if contains(arguments, "NVT_EGRESS_CA_CHECK_ONLY=1") && docker.caRenewal {
 			return []byte("renewal-required\n"), nil
 		}
+		if contains(arguments, "NVT_EGRESS_CA_CHECK_ONLY=1") {
+			return []byte("renew-after=2999-01-01T00:00:00Z\n"), nil
+		}
 		if !contains(arguments, "NVT_EGRESS_CA_CHECK_ONLY=1") {
 			docker.caRenewal = false
 		}
@@ -698,6 +701,7 @@ func TestDockerBackendInspectionCoordinatesCARotation(t *testing.T) {
 	}
 	docker.commands = nil
 	docker.caRenewal = true
+	_ = os.Remove(composeCARolloutPath(namesFor(backend.config, run.RunID, desired.SnapshotDigest)))
 	if _, err := backend.Inspect(context.Background(), desired); !errors.Is(err, controller.ErrBackendRetryable) {
 		t.Fatalf("rotation inspection error = %v", err)
 	}
@@ -728,6 +732,7 @@ func TestDockerBackendSkipsCARotationForCompletedAgent(t *testing.T) {
 	}
 	docker.commands = nil
 	docker.caRenewal = true
+	_ = os.Remove(composeCARolloutPath(namesFor(backend.config, run.RunID, desired.SnapshotDigest)))
 	docker.agentStatus = "stopped"
 	observation, err := backend.Inspect(context.Background(), desired)
 	if err != nil || observation.TerminalTarget != controller.StateCompleted {
@@ -741,6 +746,57 @@ func TestDockerBackendSkipsCARotationForCompletedAgent(t *testing.T) {
 	}
 	if !docker.caRenewal {
 		t.Fatal("terminal inspection unexpectedly ran CA rotation")
+	}
+}
+
+func TestDockerBackendResumesInterruptedCARotation(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64)}
+	if _, err := backend.Ensure(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
+	if err := writeComposeCARollout(names, composeCARollout{Phase: "stopped"}); err != nil {
+		t.Fatal(err)
+	}
+	docker.agentStatus = "stopped"
+	docker.caRenewal = true
+	docker.commands = nil
+	if _, err := backend.Inspect(context.Background(), desired); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("recovery inspection error = %v", err)
+	}
+	if composeCARolloutExists(names) {
+		t.Fatal("completed recovery left rollout intent")
+	}
+	if docker.caRenewal {
+		t.Fatal("recovery did not run CA initializer")
+	}
+	commands := []string{}
+	for _, command := range docker.commands {
+		commands = append(commands, strings.Join(command, " "))
+	}
+	joined := strings.Join(commands, "\n")
+	if !strings.Contains(joined, "run --rm ca-init") || !strings.Contains(joined, "--force-recreate egressd agent") {
+		t.Fatalf("interrupted rollout was not resumed:\n%s", joined)
+	}
+}
+
+func TestDockerBackendCachesCARenewalSchedule(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64)}
+	if _, err := backend.Ensure(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	docker.commands = nil
+	for i := 0; i < 2; i++ {
+		if observation, err := backend.Inspect(context.Background(), desired); err != nil || !observation.Ready {
+			t.Fatalf("cached inspection = %#v, %v", observation, err)
+		}
+	}
+	for _, command := range docker.commands {
+		if contains(command, "ca-init") {
+			t.Fatalf("cached renewal schedule launched probe container: %v", command)
+		}
 	}
 }
 

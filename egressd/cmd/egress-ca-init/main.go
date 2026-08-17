@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/egressd/internal/egress"
 )
@@ -57,7 +58,7 @@ func run(args []string) error {
 		if !certExists || !keyExists {
 			return fmt.Errorf("durable CA is incomplete; remove both files and retry")
 		}
-		if _, err := egress.LoadCAWithUpstreams(*certFile, *keyFile, []string(leafDNSNames), []string(upstreamLeafNames)); errors.Is(err, egress.ErrCARenewalRequired) {
+		if ca, err := egress.LoadCAWithUpstreams(*certFile, *keyFile, []string(leafDNSNames), []string(upstreamLeafNames)); errors.Is(err, egress.ErrCARenewalRequired) {
 			if os.Getenv("NVT_EGRESS_CA_CHECK_ONLY") == "1" {
 				fmt.Fprintln(os.Stdout, "renewal-required")
 				return nil
@@ -65,6 +66,8 @@ func run(args []string) error {
 			return rotateCA(*certFile, *keyFile, rotationMarker, []string(leafDNSNames), []string(upstreamLeafNames), fmt.Sprintf("certificate entered the %s renewal window", egress.CARenewalMargin))
 		} else if err != nil {
 			return fmt.Errorf("existing durable CA does not match configured names; delete the egress-ca directory to rotate it: %w", err)
+		} else if os.Getenv("NVT_EGRESS_CA_CHECK_ONLY") == "1" {
+			fmt.Fprintf(os.Stdout, "renew-after=%s\n", ca.RenewAfter().UTC().Format(time.RFC3339))
 		}
 		return nil
 	}
