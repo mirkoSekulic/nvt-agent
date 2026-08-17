@@ -291,6 +291,31 @@ func TestExplicitGitHubRepositoryRequiresAppInstallation(t *testing.T) {
 	}
 }
 
+func TestExplicitRepositoryBrokerIdentityMustMatchProviderTarget(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	github := decoded.Accounts["github"]
+	github.Installations["owner-one"] = "456"
+	decoded.Accounts["github"] = github
+	decoded.Repositories["explicit"] = Repository{URL: "https://github.com/owner-one/repo.git", CheckoutTarget: "github.com/owner-one/repo", BrokerRepository: "alias/repo", Account: "github"}
+	if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), "must match the URL coordinates") {
+		t.Fatalf("mismatched GitHub broker identity was accepted: %v", err)
+	}
+	azure := decoded.Repositories["infrastructure"]
+	azure.BrokerRepository = "example/platform/infrastructure"
+	decoded.Repositories["explicit"] = Repository{URL: "https://github.com/owner-one/repo.git", CheckoutTarget: "github.com/owner-one/repo", BrokerRepository: "owner-one/repo", Account: "github"}
+	decoded.Repositories["infrastructure"] = azure
+	if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), "must match the normalized checkout target") {
+		t.Fatalf("non-normalized Azure broker identity was accepted: %v", err)
+	}
+}
+
 func TestBrokerGrantsDoNotCrossProfilesSharingAnAccount(t *testing.T) {
 	raw, err := os.ReadFile("testdata/valid.yaml")
 	if err != nil {

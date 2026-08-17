@@ -37,7 +37,7 @@ repositories:
   infrastructure:
     url: https://dev.azure.com/example/platform/_git/infrastructure
     checkoutTarget: dev.azure.com/example/platform/_git/infrastructure
-    brokerRepository: example/platform/infrastructure
+    brokerRepository: dev.azure.com/example/platform/_git/infrastructure
     path: infrastructure
     account: azure
 workstations:

@@ -36,6 +36,11 @@ path and upstream, broker repository identity, and optional credential account.
 `github: owner/repository` is shorthand expanded into those exact fields. A
 workstation or workflow references repository names, so GitHub and Azure DevOps
 checkouts use the same selection contract and account choice is unambiguous.
+For explicit credentialed repositories, the broker identity is canonical and
+must match the URL: GitHub uses `owner/repository`, while Azure DevOps literal
+mode uses the complete `dev.azure.com/organization/project/_git/repository`
+target. GitHub App installation provider names are therefore derived from the
+same URL-validated owner in both broker and controller projections.
 
 ## Canonical compilation and ownership
 

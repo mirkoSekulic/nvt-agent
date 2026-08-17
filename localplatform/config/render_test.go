@@ -41,6 +41,7 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		[]byte(`"app-id":3912708`),
 		[]byte(`"installation-id":123`),
 		[]byte(`"auth-file":"/private/portal/` + plancontract.CredentialSlotName("codex") + `"`),
+		[]byte(`"repositories":["dev.azure.com/example/platform/_git/infrastructure"]`),
 	} {
 		if !bytes.Contains(broker, expected) {
 			t.Fatalf("broker configuration omitted private file reference %s: %s", expected, broker)

@@ -489,6 +489,54 @@ func TestGitInjectionRoutingAdvertisesGit(t *testing.T) {
 	}
 }
 
+func TestStaticPATInjectionEnforcesRepositoryScope(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(map[string]roleIdentity{
+		"frontend": {
+			Token: "frontend-token",
+			Role:  "agent",
+			Grants: []roleGrant{{
+				Provider:        "basic-pat-provider",
+				Materialization: "header-inject",
+				Repositories:    []string{"dev.azure.com/org/project/_git/repo"},
+			}, {
+				Provider:        "github-pat-provider",
+				Materialization: "header-inject",
+				Repositories:    []string{"my-user/my-repo"},
+			}},
+		},
+		"frontend-egress": {Token: "frontend-egress-token", Role: "egress", PairedAgent: "frontend"},
+	})
+	request := func(method, path string) map[string]any {
+		return map[string]any{"capability": "basic-pat-provider", "host": "dev.azure.com", "method": method, "path": path}
+	}
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request("GET", "/org/project/_git/repo/info/refs"))
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("scoped PAT fetch was denied: status=%d body=%v", status, body)
+	}
+	githubRequest := map[string]any{"capability": "github-pat-provider", "host": "github.com", "method": "GET", "path": "/my-user/my-repo.git/info/refs"}
+	status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", githubRequest)
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("scoped GitHub PAT fetch was denied: status=%d body=%v", status, body)
+	}
+	for _, test := range []struct {
+		method string
+		path   string
+		error  string
+	}{
+		{"GET", "/org/project/_git/other/info/refs", "repo-not-allowed"},
+		{"GET", "/outside/project/_git/repo/info/refs", "repo-not-allowed"},
+		{"POST", "/org/project/_git/repo/info/refs", "method-not-allowed"},
+		{"GET", "/org/project/_git/repo/HEAD", "path-not-allowed"},
+		{"GET", "/org/project/_git%2frepo/info/refs", "path-not-allowed"},
+	} {
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request(test.method, test.path))
+		if status == http.StatusOK || body["error"] != test.error {
+			t.Fatalf("%s %s expected %s: status=%d body=%v", test.method, test.path, test.error, status, body)
+		}
+	}
+}
+
 // TestGitInjectionAuditsWithoutTokenMaterial pins the audit rules on the git
 // path: allowed and denied requests are audited with host/method/path
 // context and the minted installation token never appears in the audit log.

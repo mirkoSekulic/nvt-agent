@@ -2,6 +2,7 @@ import base64
 import fnmatch
 import re
 from pathlib import Path
+from urllib.parse import unquote
 
 from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
 from broker.core.errors import ProviderError
@@ -170,6 +171,9 @@ class StaticTokenProvider:
         raise ProviderError("identity-not-supported", f"provider {self.name} does not support commit identity; use identity.mode=explicit")
 
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
+        if self.injection_git:
+            repo = self._injection_git_repository(host, method, path)
+            self._ensure_repo_allowed(repo, (grant or {}).get("repositories"))
         if self.injection_basic_username is not None:
             encoded = base64.b64encode(f"{self.injection_basic_username}:{self.token}".encode("utf-8")).decode("ascii")
             value = f"Basic {encoded}"
@@ -181,3 +185,24 @@ class StaticTokenProvider:
         # agent's placeholder version is removed before injection.
         strip = list(headers.keys())
         return headers, None, strip
+
+    def _injection_git_repository(self, host, method, path):
+        if not path.startswith("/") or not path[1:] or any(not part for part in path[1:].split("/")):
+            raise ProviderError("path-not-allowed")
+        parts = [unquote(part) for part in path[1:].split("/")]
+        if any(part in {".", ".."} or "/" in part or "\\" in part for part in parts):
+            raise ProviderError("path-not-allowed")
+        if len(parts) >= 3 and parts[-2:] == ["info", "refs"]:
+            expected_method = "GET"
+            repository_parts = parts[:-2]
+        elif len(parts) >= 2 and parts[-1] in {"git-upload-pack", "git-receive-pack"}:
+            expected_method = "POST"
+            repository_parts = parts[:-1]
+        else:
+            raise ProviderError("path-not-allowed")
+        if method.upper() != expected_method:
+            raise ProviderError("method-not-allowed")
+        repository_parts[-1] = repository_parts[-1].removesuffix(".git")
+        if not repository_parts[-1]:
+            raise ProviderError("path-not-allowed")
+        return self.normalize_target(f"https://{host}/{'/'.join(repository_parts)}")
