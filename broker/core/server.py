@@ -701,7 +701,7 @@ def make_handler(broker):
             principal = None
             try:
                 if self.path in DYNAMIC_COORDINATION_API_PATHS:
-                    raw_payload = bytearray(self.read_enrollment_body(16 * 1024))
+                    raw_payload = bytearray(self.read_dynamic_account_body(16 * 1024))
                     try:
                         response = broker.dynamic_coordination_request(
                             request_id,
@@ -721,7 +721,7 @@ def make_handler(broker):
                     if broker.dynamic_account_authenticator is None:
                         raise ProviderError("not-found", "not-found", 404)
                     principal = broker.dynamic_account_authenticator.authenticate(self.headers.get("authorization"))
-                    raw_payload = bytearray(self.read_enrollment_body(MAX_DYNAMIC_ACCOUNT_BODY_BYTES))
+                    raw_payload = bytearray(self.read_dynamic_account_body(MAX_DYNAMIC_ACCOUNT_BODY_BYTES))
                     try:
                         response = broker.dynamic_account_request(
                             request_id, self.path, raw_payload, principal
@@ -798,6 +798,21 @@ def make_handler(broker):
             if not isinstance(payload, dict):
                 raise ProviderError("request-not-object")
             return payload
+
+        def read_dynamic_account_body(self, maximum):
+            try:
+                length = int(self.headers.get("content-length") or "0")
+            except ValueError as error:
+                raise ProviderError("invalid-request") from error
+            if length <= 0 or length > maximum:
+                raise ProviderError("invalid-request")
+            try:
+                body = self.rfile.read(length)
+            except TimeoutError as error:
+                raise ProviderError("invalid-request") from error
+            if len(body) != length:
+                raise ProviderError("invalid-request")
+            return body
 
         def write_json(self, status, payload):
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")

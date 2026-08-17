@@ -4,7 +4,6 @@ WORKDIR /src
 COPY operator ./operator
 COPY protocol/eligibility ./protocol/eligibility
 COPY protocol/localroutes ./protocol/localroutes
-COPY hostbundle ./hostbundle
 COPY gateway ./gateway
 WORKDIR /src/gateway
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/nvt-agent-gateway ./cmd/nvt-agent-gateway

@@ -715,6 +715,9 @@ grep -A5 'workspace:' "${PROFILE_RENDER}" | grep -q 'storageClassName: managed-c
 grep -A3 'preparations:' "${PROFILE_RENDER}" | grep -q 'operation: identity'
 grep -A3 'workspaceInstructions: |' "${PROFILE_RENDER}" | grep -q 'Follow the administrator-owned repository workflow.'
 grep -A3 'workspaceInstructions: |' "${PROFILE_RENDER}" | grep -q 'Keep changes focused and run repository checks.'
+helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/dynamic-principal-values.yaml" > "${DYNAMIC_PRINCIPAL_RENDER}"
+helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/dynamic-principal-values.yaml" \
+  --set-string broker.dynamicAccountAssertionRotationEpoch=epoch-2 > "${DYNAMIC_PRINCIPAL_ROTATED_RENDER}"
 if grep -Eq 'principalCredentialSelection|principal-account-client|NVT_PRINCIPAL_ACCOUNT' "${DEFAULT_RENDER}"; then
   echo "default render unexpectedly enabled dynamic operator resolution" >&2
   exit 1

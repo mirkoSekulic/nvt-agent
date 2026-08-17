@@ -41,8 +41,6 @@ spec:
                   message: spec.egressMaxConcurrentTunnels requires spec.egressTransport forward-proxy or transparent
                 - rule: "has(self.profileProvenance) == has(oldSelf.profileProvenance) && (!has(self.profileProvenance) || self.profileProvenance == oldSelf.profileProvenance)"
                   message: spec.profileProvenance is immutable
-                - rule: "has(self.execution) == has(oldSelf.execution) && (!has(self.execution) || self.execution == oldSelf.execution)"
-                  message: spec.execution is immutable
                 - rule: "self.workspace == oldSelf.workspace"
                   message: spec.workspace is immutable
                 - rule: "has(self.egress) == has(oldSelf.egress) && (!has(self.egress) || self.egress == oldSelf.egress)"
