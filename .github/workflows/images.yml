@@ -12,14 +12,21 @@ on:
       - "egressd/**"
       - "captured/**"
       - "operator/**"
+      - "executiondrivers/qemu/**"
+      - "executiondrivers/azure/**"
+      - "hostbundle/**"
+      - "protocol/guestenrollment/**"
       - "protocol/eligibility/**"
       - "gateway/**"
       - "localcontroller/**"
       - "protocol/localroutes/**"
       - "protocol/resolvedrun/**"
       - "credentialportal/**"
+      - "nativeegressrelay/**"
       - "producers/github-comments/**"
       - "tests/fixtures/echo/**"
+      - "tests/fixtures/execution-driver/**"
+      - "tests/operator/execution-driver-host-image-smoke.sh"
       - "scripts/**"
       - "compose.infra.yaml"
       - "tests/runtime/local_controller_compose_test.go"
@@ -37,14 +44,21 @@ on:
       - "egressd/**"
       - "captured/**"
       - "operator/**"
+      - "executiondrivers/qemu/**"
+      - "executiondrivers/azure/**"
+      - "hostbundle/**"
+      - "protocol/guestenrollment/**"
       - "protocol/eligibility/**"
       - "gateway/**"
       - "localcontroller/**"
       - "protocol/localroutes/**"
       - "protocol/resolvedrun/**"
       - "credentialportal/**"
+      - "nativeegressrelay/**"
       - "producers/github-comments/**"
       - "tests/fixtures/echo/**"
+      - "tests/fixtures/execution-driver/**"
+      - "tests/operator/execution-driver-host-image-smoke.sh"
       - "scripts/**"
       - "compose.infra.yaml"
       - "tests/runtime/local_controller_compose_test.go"
@@ -91,6 +105,18 @@ jobs:
           - name: operator
             dockerfile: operator/Dockerfile
             image: nvt-operator:test
+          - name: execution-driver-host
+            dockerfile: operator/executiondriver/host-image/Dockerfile
+            image: nvt-execution-driver-host:test
+            hostIntegration: true
+          - name: qemu-execution-driver
+            dockerfile: executiondrivers/qemu/Dockerfile
+            image: nvt-qemu-execution-driver:test
+            qemuIntegration: true
+          - name: azure-execution-driver
+            dockerfile: executiondrivers/azure/Dockerfile
+            image: nvt-azure-execution-driver:test
+            azureIntegration: true
           - name: gateway
             dockerfile: gateway/Dockerfile
             image: nvt-agent-gateway:test
@@ -100,6 +126,10 @@ jobs:
           - name: credential-portal
             dockerfile: credentialportal/Dockerfile
             image: nvt-credential-portal:test
+          - name: native-egress-relay
+            dockerfile: nativeegressrelay/Dockerfile
+            image: nvt-native-egress-relay:test
+            nativeEgressRelayIntegration: true
           - name: producer
             dockerfile: producers/github-comments/Dockerfile
             image: nvt-github-comments-producer:test
@@ -126,3 +156,23 @@ jobs:
         env:
           NVT_DIND_TEST_IMAGE: ${{ matrix.image }}
         run: bash "${{ matrix.integration }}"
+      - name: Run execution-driver host OCI smoke
+        if: matrix.hostIntegration
+        env:
+          NVT_EXECUTION_DRIVER_HOST_IMAGE: ${{ matrix.image }}
+        run: bash tests/operator/execution-driver-host-image-smoke.sh
+      - name: Run QEMU execution-driver TCG image smoke
+        if: matrix.qemuIntegration
+        env:
+          NVT_QEMU_DRIVER_IMAGE: ${{ matrix.image }}
+        run: bash executiondrivers/qemu/image-smoke.sh
+      - name: Run Azure execution-driver OCI contract
+        if: matrix.azureIntegration
+        env:
+          NVT_AZURE_DRIVER_IMAGE: ${{ matrix.image }}
+        run: bash executiondrivers/azure/image-test.sh
+      - name: Run native-egress relay OCI contract
+        if: matrix.nativeEgressRelayIntegration
+        env:
+          NVT_NATIVE_EGRESS_RELAY_IMAGE: ${{ matrix.image }}
+        run: bash nativeegressrelay/image-test.sh

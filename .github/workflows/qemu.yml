@@ -1,0 +1,89 @@
+name: qemu reference driver
+
+on:
+  pull_request:
+    paths:
+      - "executiondrivers/qemu/**"
+      - "hostbundle/**"
+      - "gateway/**"
+      - "broker/**"
+      - "operator/**"
+      - "protocol/guestenrollment/**"
+      - "charts/**"
+      - "tests/fixtures/host-bundle-registry/**"
+      - "tests/operator/kind/cases/qemu-external-execution.sh"
+      - "tests/operator/kind/extract-oci-file.py"
+      - "tests/operator/kind/lib.sh"
+      - "tests/operator/kind/smoke.sh"
+      - "Makefile"
+      - ".github/workflows/qemu.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qemu-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: |
+            operator/go.sum
+            executiondrivers/qemu/go.mod
+      - name: Vet and race-test QEMU driver
+        run: |
+          cd executiondrivers/qemu
+          go vet ./...
+          go test -race -count=1 ./...
+
+  real-guest-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CREATE_CLUSTER: 1
+      DELETE_CLUSTER: 1
+      CLUSTER: nvt-qemu-${{ github.run_id }}
+      KIND_SMOKE_CASE: qemu-external-execution
+      KIND_SMOKE_MODE: kind
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: |
+            operator/go.sum
+            executiondrivers/qemu/go.mod
+            hostbundle/go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: azure/setup-helm@v4
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.0
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/mono \
+            /usr/local/share/powershell /opt/hostedtoolcache/PowerShell || true
+          sudo apt-get clean || true
+          df -h
+      - name: Install kind
+        run: |
+          go install sigs.k8s.io/kind@v0.24.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          python3 -m pip install PyYAML
+      - name: Run real QEMU/TCG AgentRun lifecycle
+        run: make operator-kind-smoke
+      - name: Cleanup kind cluster
+        if: always()
+        run: kind delete cluster --name "${CLUSTER}" >/dev/null 2>&1 || true

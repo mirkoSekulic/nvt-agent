@@ -7,6 +7,11 @@ on:
       - ".github/workflows/charts.yml"
       - ".github/scripts/chart-version-exists.sh"
       - ".github/scripts/release-*.sh"
+      - "hostbundle/**"
+      - "protocol/host-bundle.md"
+      - "protocol/guest-enrollment.md"
+      - "protocol/guest-runtime-identity.md"
+      - "protocol/guestenrollment/**"
       - "tests/operator/helm/**"
   push:
     branches:
@@ -28,6 +33,12 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hostbundle/go.mod
+          cache-dependency-path: |
+            hostbundle/go.mod
+            protocol/guestenrollment/go.mod
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
       - name: Validate coordinated chart release
         env:
@@ -142,8 +153,11 @@ jobs:
           - nvt-egressd
           - nvt-captured
           - nvt-operator
+          - nvt-execution-driver-host
+          - nvt-azure-execution-driver
           - nvt-agent-gateway
           - nvt-credential-portal
+          - nvt-native-egress-relay
           - nvt-github-comments-producer
     concurrency:
       group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}-${{ matrix.image }}
@@ -173,9 +187,49 @@ jobs:
           bash .github/scripts/release-images.sh \
             "${owner}" "${RELEASE_TAG}" "${REVISION}" "https://github.com/${GITHUB_REPOSITORY}"
 
+  publish_host_bundle:
+    needs: [release_metadata, preflight]
+    if: needs.release_metadata.result == 'success' && needs.preflight.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}-host-bundle
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REVISION: ${{ needs.release_metadata.outputs.revision }}
+      RELEASE_TAG: ${{ needs.release_metadata.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hostbundle/go.mod
+          cache-dependency-path: |
+            hostbundle/go.mod
+            protocol/guestenrollment/go.mod
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+        with:
+          version: 1.3.0
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" | oras login ghcr.io \
+            --username "${GITHUB_ACTOR}" \
+            --password-stdin
+      - name: Publish and verify native host bundle
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          bash .github/scripts/release-host-bundle.sh \
+            "${owner}" "${RELEASE_TAG}" "${REVISION}" "https://github.com/${GITHUB_REPOSITORY}"
+
   publish:
-    needs: [release_metadata, preflight, publish_image]
-    if: needs.release_metadata.result == 'success' && needs.preflight.result == 'success' && needs.publish_image.result == 'success'
+    needs: [release_metadata, preflight, publish_image, publish_host_bundle]
+    if: needs.release_metadata.result == 'success' && needs.preflight.result == 'success' && needs.publish_image.result == 'success' && needs.publish_host_bundle.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
@@ -238,5 +292,5 @@ jobs:
           fi
 
           # The preceding jobs have verified coordinated metadata and anonymous
-          # access for all nine images.
+          # access for all twelve images and the native host-bundle artifact.
           helm push "${package}" "oci://${repository}"
