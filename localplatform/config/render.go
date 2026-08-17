@@ -336,7 +336,7 @@ func renderRepository(item manifest.ControllerRepositoryIntent, profile manifest
 }
 
 func runtimeGrant(provider, preset string) resolvedrun.BrokerGrant {
-	hosts := []string{"chatgpt.com:443"}
+	hosts := []string{"chatgpt.com:443", "api.openai.com:443", "auth.openai.com:443"}
 	if preset == "claude-oauth" {
 		hosts = []string{"api.anthropic.com:443", "mcp-proxy.anthropic.com:443"}
 	}
@@ -368,7 +368,13 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 		switch account.Preset {
 		case "codex-oauth":
 			providers = append(providers, map[string]any{"name": named.Name, "plugin": "codex-oauth", "config": map[string]any{
-				"auth-file": "/private/portal/" + plancontract.CredentialSlotName(named.Name), "injection-hosts": []string{"chatgpt.com"},
+				"auth-file": "/private/portal/" + plancontract.CredentialSlotName(named.Name), "refresh-margin-seconds": 3600,
+				"injection-hosts": []string{"chatgpt.com", "api.openai.com", "auth.openai.com"},
+				"placeholder-file": map[string]any{
+					"path": ".codex/auth.json", "hosts": []string{"chatgpt.com", "api.openai.com", "auth.openai.com"},
+					"id-token-claims": []map[string]any{{"claim": "chatgpt_account_id", "claim-path": []string{"https://api.openai.com/auth", "chatgpt_account_id"}}},
+				},
+				"injection-claim-headers": []map[string]any{{"header": "ChatGPT-Account-ID", "claim-path": []string{"https://api.openai.com/auth", "chatgpt_account_id"}}},
 			}})
 		case "claude-oauth":
 			providers = append(providers, map[string]any{"name": named.Name, "plugin": "claude-oauth", "config": map[string]any{
