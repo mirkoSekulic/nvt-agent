@@ -182,7 +182,7 @@ func (application app) reset(ctx context.Context) error {
 			return err
 		}
 		if len(containers) != 0 {
-			if _, err := application.docker.Run(ctx, nil, append([]string{"rm", "--force"}, containers...)...); err != nil {
+			if _, err := application.docker.Run(ctx, nil, append([]string{"rm", "--force", "--volumes"}, containers...)...); err != nil {
 				return errors.New("cannot remove exact-owned local containers")
 			}
 		}

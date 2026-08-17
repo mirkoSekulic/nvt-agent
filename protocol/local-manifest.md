@@ -195,7 +195,9 @@ the smaller generic output limit. Reset uses that aligned bound for both the
 historical inventory payload and exact-owned volume-name enumeration.
 Reset snapshots and validates that inventory before deletion, removes every
 other exact-owned volume first, and deletes generated-config as the final
-volume so an interrupted retry retains its ownership anchor.
+volume so an interrupted retry retains its ownership anchor. Verified
+exact-owned containers are removed with their anonymous volumes; explicitly
+named platform and run volumes remain governed by the ownership inventory.
 
 Credential-portal account projection is bounded to the portal contract's 128
 slots before volume creation. Slot and local destination names use a

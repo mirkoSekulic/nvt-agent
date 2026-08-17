@@ -526,6 +526,9 @@ func TestDockerBackendOwnershipAndCleanupFailClosed(t *testing.T) {
 		if contains(command, "--remove-orphans") || contains(command, "down") {
 			t.Fatalf("broad Compose cleanup bypassed ownership checks: %v", command)
 		}
+		if len(command) > 0 && command[0] == "rm" && !contains(command, "--volumes") {
+			t.Fatalf("exact-owned container cleanup retained anonymous volumes: %v", command)
+		}
 	}
 	for key, labels := range docker.objects {
 		if labels[runLabel] == run.RunID {

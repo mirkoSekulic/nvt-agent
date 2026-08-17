@@ -124,6 +124,67 @@ func TestOwnedVolumesAcceptOnlyEmptyFirstInitializationAnchor(t *testing.T) {
 	}
 }
 
+func TestResetRemovesAnonymousVolumesFromExactOwnedContainers(t *testing.T) {
+	project := "nvt-local"
+	containerID := strings.Repeat("a", 64)
+	docker := &resetContainerDocker{id: containerID, labels: map[string]string{
+		"nvt.dev/local-platform-owner":   project,
+		"nvt.dev/local-platform-version": "1",
+		"com.docker.compose.project":     project,
+		"com.docker.compose.service":     "local-controller",
+	}}
+	if err := (app{project: project, docker: docker}).reset(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range docker.commands {
+		if len(command) > 0 && command[0] == "rm" {
+			if !containsTestArgument(command, "--force") || !containsTestArgument(command, "--volumes") || command[len(command)-1] != containerID {
+				t.Fatalf("container removal did not include anonymous volumes: %v", command)
+			}
+			return
+		}
+	}
+	t.Fatal("reset did not remove the exact-owned container")
+}
+
+type resetContainerDocker struct {
+	id       string
+	labels   map[string]string
+	commands [][]string
+}
+
+func (docker *resetContainerDocker) Run(_ context.Context, _ io.Reader, arguments ...string) ([]byte, error) {
+	docker.commands = append(docker.commands, append([]string(nil), arguments...))
+	if len(arguments) == 0 {
+		return nil, errors.New("missing command")
+	}
+	switch arguments[0] {
+	case "ps":
+		if strings.Contains(strings.Join(arguments, " "), "local-platform-owner") {
+			return []byte(docker.id + "\n"), nil
+		}
+		return nil, nil
+	case "container":
+		return json.Marshal(docker.labels)
+	case "rm":
+		return nil, nil
+	case "network", "volume":
+		if len(arguments) > 1 && arguments[1] == "ls" {
+			return nil, nil
+		}
+	}
+	return nil, errors.New("unexpected Docker command")
+}
+
+func containsTestArgument(arguments []string, expected string) bool {
+	for _, argument := range arguments {
+		if argument == expected {
+			return true
+		}
+	}
+	return false
+}
+
 type resetDocker struct {
 	project         string
 	plan            []byte

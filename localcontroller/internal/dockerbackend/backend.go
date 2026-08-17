@@ -497,7 +497,7 @@ func (backend *Backend) pruneStaleOwnedResources(ctx context.Context, run resolv
 		if err := verifyLabelMap(values, labels); err != nil {
 			return err
 		}
-		if _, err := backend.docker.Run(ctx, nil, "rm", "-f", container); err != nil {
+		if _, err := backend.docker.Run(ctx, nil, "rm", "--force", "--volumes", container); err != nil {
 			return err
 		}
 	}
@@ -545,7 +545,7 @@ func (backend *Backend) removeOutdatedConfinementAgent(ctx context.Context, proj
 		if values[agentConfinementRevisionLabel] == agentConfinementRevision {
 			continue
 		}
-		if _, err := backend.docker.Run(ctx, nil, "rm", "-f", container); err != nil {
+		if _, err := backend.docker.Run(ctx, nil, "rm", "--force", "--volumes", container); err != nil {
 			return err
 		}
 	}
@@ -565,7 +565,7 @@ func (backend *Backend) removeOwnedComposeService(ctx context.Context, project, 
 		if err := backend.verifyContainer(ctx, container, labels); err != nil {
 			return err
 		}
-		if _, err := backend.docker.Run(ctx, nil, "rm", "-f", container); err != nil {
+		if _, err := backend.docker.Run(ctx, nil, "rm", "--force", "--volumes", container); err != nil {
 			return err
 		}
 	}
@@ -681,7 +681,7 @@ func (backend *Backend) seedVolume(ctx context.Context, volume string, files map
 	defer func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
-		_, _ = backend.docker.Run(cleanupContext, nil, "rm", "-f", container)
+		_, _ = backend.docker.Run(cleanupContext, nil, "rm", "--force", "--volumes", container)
 	}()
 	archive, err := seedArchive(files)
 	if err != nil {
@@ -743,7 +743,7 @@ func (backend *Backend) removeOwnedContainers(ctx context.Context, labels ownedL
 		if err := backend.verifyContainer(ctx, container, labels); err != nil {
 			return err
 		}
-		if _, err := backend.docker.Run(ctx, nil, "rm", "-f", container); err != nil {
+		if _, err := backend.docker.Run(ctx, nil, "rm", "--force", "--volumes", container); err != nil {
 			return err
 		}
 	}

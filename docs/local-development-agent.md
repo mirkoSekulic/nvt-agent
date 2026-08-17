@@ -47,7 +47,8 @@ gateway. Enroll it there; the broker imports it into canonical private storage.
   credentials, databases, workspaces, and sessions.
 - `make local-reset` explicitly removes only resources carrying the complete
   expected local-platform or local-controller ownership labels. It destroys
-  credentials and workstation state.
+  credentials and workstation state, including anonymous Docker volumes
+  attached to those verified containers.
 
 Removing a workstation from the manifest is non-destructive. Immutable drift
 for an existing workstation fails closed.
