@@ -107,12 +107,52 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 				Args []string `json:"args"`
 			} `json:"resume"`
 		} `json:"runtime"`
+		Preseed struct {
+			Files []struct {
+				Path      string         `json:"path"`
+				Mode      string         `json:"mode"`
+				Overwrite bool           `json:"overwrite"`
+				Content   string         `json:"content"`
+				JSON      map[string]any `json:"json"`
+			} `json:"files"`
+		} `json:"preseed"`
+		CodeServer struct {
+			AgentTerminal struct {
+				OpenOnStartup bool `json:"openOnStartup"`
+			} `json:"agentTerminal"`
+			Settings struct {
+				Overwrite bool           `json:"overwrite"`
+				Values    map[string]any `json:"values"`
+			} `json:"settings"`
+		} `json:"code-server"`
 	}
 	if err := json.Unmarshal(trusted.Profiles[0].AgentConfig, &agentConfig); err != nil {
 		t.Fatal(err)
 	}
 	if got := agentConfig.Runtime.Resume.Args; len(got) != 3 || got[0] != "resume" || got[1] != "--last" || got[2] != "--dangerously-bypass-approvals-and-sandbox" {
 		t.Fatalf("Codex resume command is incomplete: %#v", got)
+	}
+	if len(agentConfig.Preseed.Files) != 1 || agentConfig.Preseed.Files[0].Path != "$HOME/.codex/config.toml" ||
+		agentConfig.Preseed.Files[0].Mode != "0600" || agentConfig.Preseed.Files[0].Overwrite ||
+		!strings.Contains(agentConfig.Preseed.Files[0].Content, `[projects."/workspace"]`) ||
+		!strings.Contains(agentConfig.Preseed.Files[0].Content, `trust_level = "trusted"`) ||
+		!strings.Contains(agentConfig.Preseed.Files[0].Content, "hide_rate_limit_model_nudge = true") {
+		t.Fatalf("Codex first-run preseed is incomplete: %#v", agentConfig.Preseed.Files)
+	}
+	if !agentConfig.CodeServer.AgentTerminal.OpenOnStartup || !agentConfig.CodeServer.Settings.Overwrite {
+		t.Fatalf("managed code-server defaults are incomplete: %#v", agentConfig.CodeServer)
+	}
+	for key, expected := range map[string]any{
+		"workbench.colorTheme":             "Default Dark Modern",
+		"workbench.startupEditor":          "none",
+		"security.workspace.trust.enabled": false,
+		"extensions.ignoreRecommendations": true,
+		"editor.minimap.enabled":           false,
+		"keyboard.dispatch":                "keyCode",
+	} {
+		if got := agentConfig.CodeServer.Settings.Values[key]; got != expected {
+			t.Fatalf("code-server setting %q = %#v, want %#v", key, got, expected)
+		}
 	}
 	claudeRuntimeCompiled := compiled
 	claudeRuntimeCompiled.Controller.Profiles = append([]manifest.ControllerProfileIntent(nil), compiled.Controller.Profiles...)
@@ -130,6 +170,17 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	}
 	if got := agentConfig.Runtime.Resume.Args; len(got) != 2 || got[0] != "--continue" || got[1] != "--dangerously-skip-permissions" {
 		t.Fatalf("Claude resume command is incomplete: %#v", got)
+	}
+	if len(agentConfig.Preseed.Files) != 2 || agentConfig.Preseed.Files[0].Path != "$HOME/.claude/settings.json" || agentConfig.Preseed.Files[1].Path != "$HOME/.claude.json" {
+		t.Fatalf("Claude first-run preseed is incomplete: %#v", agentConfig.Preseed.Files)
+	}
+	projects, ok := agentConfig.Preseed.Files[1].JSON["projects"].(map[string]any)
+	if !ok {
+		t.Fatalf("Claude workspace trust projects are missing: %#v", agentConfig.Preseed.Files[1].JSON)
+	}
+	workspace, ok := projects["/workspace"].(map[string]any)
+	if !ok || workspace["hasTrustDialogAccepted"] != true {
+		t.Fatalf("Claude workspace trust is incomplete: %#v", projects)
 	}
 	if _, err := serviceconfig.Controller(compiled, serviceconfig.Instructions{"development": strings.Repeat("x", resolvedrun.MaxWorkspaceInstructionsBytes+1)}); err == nil {
 		t.Fatal("controller projection accepted oversized native workspace instructions")

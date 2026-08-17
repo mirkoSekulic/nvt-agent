@@ -241,10 +241,28 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 	for _, name := range intent.Profile.Plugins {
 		plugins = append(plugins, map[string]any{"name": name, "source": "builtin"})
 	}
+	codeServerEnabled := intent.Profile.Editor.Preset != "none"
+	codeServer := map[string]any{
+		"agentTerminal": map[string]any{"openOnStartup": codeServerEnabled},
+	}
+	if codeServerEnabled {
+		codeServer["settings"] = map[string]any{
+			"overwrite": true,
+			"values": map[string]any{
+				"workbench.colorTheme":             "Default Dark Modern",
+				"workbench.startupEditor":          "none",
+				"security.workspace.trust.enabled": false,
+				"extensions.ignoreRecommendations": true,
+				"editor.minimap.enabled":           false,
+				"keyboard.dispatch":                "keyCode",
+			},
+		}
+	}
 	agentConfig := mustJSON(map[string]any{
 		"runtime":     map[string]any{"command": command, "args": args, "resume": map[string]any{"command": command, "args": resumeArgs}},
+		"preseed":     runtimePreseed(runtimeType),
 		"tools":       map[string]any{"packages": intent.Profile.Tools.Packages, "mise": intent.Profile.Tools.Mise},
-		"code-server": map[string]any{"agentTerminal": map[string]any{"openOnStartup": intent.Profile.Editor.Preset != "none"}},
+		"code-server": codeServer,
 		"plugins":     plugins,
 	})
 	profile := resolvedrun.Profile{
@@ -322,6 +340,46 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		profile.Egress.MaxConcurrentTunnels = 128
 	}
 	return profile, nil
+}
+
+func runtimePreseed(runtimeType string) map[string]any {
+	files := []any{}
+	switch runtimeType {
+	case "codex":
+		files = append(files, map[string]any{
+			"path":      "$HOME/.codex/config.toml",
+			"mode":      "0600",
+			"overwrite": false,
+			"content": "check_for_update_on_startup = false\n\n" +
+				"[projects.\"/workspace\"]\ntrust_level = \"trusted\"\n\n" +
+				"[notice]\nhide_rate_limit_model_nudge = true\n",
+		})
+	case "claude":
+		files = append(files,
+			map[string]any{
+				"path":      "$HOME/.claude/settings.json",
+				"mode":      "0600",
+				"overwrite": false,
+				"json": map[string]any{
+					"theme":                             "dark-daltonized",
+					"skipDangerousModePermissionPrompt": true,
+				},
+			},
+			map[string]any{
+				"path":      "$HOME/.claude.json",
+				"mode":      "0600",
+				"overwrite": false,
+				"json": map[string]any{
+					"hasCompletedOnboarding": true,
+					"theme":                  "dark",
+					"projects": map[string]any{
+						"/workspace": map[string]any{"hasTrustDialogAccepted": true},
+					},
+				},
+			},
+		)
+	}
+	return map[string]any{"files": files}
 }
 
 func renderRepository(item manifest.ControllerRepositoryIntent, profile manifest.ControllerProfileIntent, accounts map[string]manifest.Account) resolvedrun.Repository {
