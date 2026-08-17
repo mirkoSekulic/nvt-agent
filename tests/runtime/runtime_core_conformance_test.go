@@ -104,6 +104,8 @@ func TestWriteAgentInstructionsIncludesGitHubPRWorkflowWhenToolsAreAvailable(t *
 	required := []string{
 		"## GitHub PR Workflow",
 		"Use `gh-auth` for GitHub CLI operations.",
+		"Do not use `gh-auth auth status` to test access",
+		"even when an auth-status probe would fail.",
 		"gh-auth pr create --repo OWNER/REPO --fill",
 		"github-watch register --repo OWNER/REPO --number PR_NUMBER --label work",
 		"Registered dynamic watches auto-remove after the PR is merged or closed by",
