@@ -42,6 +42,9 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		[]byte(`"app-id":3912708`),
 		[]byte(`"installation-id":123`),
 		[]byte(`"auth-file":"/private/portal/` + plancontract.CredentialSlotName("codex") + `"`),
+		[]byte(`"injection-hosts":["chatgpt.com","api.openai.com","auth.openai.com"]`),
+		[]byte(`"path":".codex/auth.json"`),
+		[]byte(`"header":"ChatGPT-Account-ID"`),
 		[]byte(`"repositories":["dev.azure.com/example/platform/_git/infrastructure"]`),
 	} {
 		if !bytes.Contains(broker, expected) {
@@ -76,8 +79,14 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		trusted.Profiles[0].Egress.Transport != "transparent" || !trusted.Profiles[0].Egress.AllowInsecureBroker || trusted.Profiles[0].DefaultCredentialProvider != "github" {
 		t.Fatalf("local Docker or mediated transport policy missing: %#v", trusted.Profiles)
 	}
-	githubGrantFound := false
+	githubGrantFound, codexGrantFound := false, false
 	for _, grant := range trusted.Profiles[0].Broker.Grants {
+		if grant.Provider == "codex" {
+			codexGrantFound = true
+			if grant.Materialization != "placeholder-file" || strings.Join(grant.EgressHosts, ",") != "chatgpt.com:443,api.openai.com:443,auth.openai.com:443" {
+				t.Fatalf("Codex grant omitted placeholder mediation hosts: %#v", grant)
+			}
+		}
 		if grant.Provider == "github" {
 			githubGrantFound = true
 			if strings.Join(grant.EgressHosts, ",") != "github.com:443,api.github.com:443" {
@@ -87,6 +96,9 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	}
 	if !githubGrantFound {
 		t.Fatalf("GitHub repository grant is missing: %#v", trusted.Profiles[0].Broker.Grants)
+	}
+	if !codexGrantFound {
+		t.Fatalf("Codex runtime grant is missing: %#v", trusted.Profiles[0].Broker.Grants)
 	}
 	var agentConfig struct {
 		Runtime struct {
