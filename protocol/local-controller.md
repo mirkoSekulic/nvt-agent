@@ -127,9 +127,8 @@ retention, and explicit authenticated deletion continue through the durable
 controller lifecycle without an implicit volume-deletion deadline. Producer
 bearers stay in private regular files (no group/other permissions), are
 32-4096 bytes, are hashed at startup, and are never logged, returned, or stored
-in SQLite. In the shipped Compose deployment, place them beneath the host
-`.broker/` directory and reference the corresponding `/broker-state/<name>`
-path mounted into the controller, as shown above.
+in SQLite. The local-manifest renderer generates them into separate managed
+volumes and mounts only each exact private file into the controller.
 
 The complete workstation set is installed in one SQLite transaction. Deadline
 convergence, snapshot/replay, capacity, durable tombstone, and
@@ -506,7 +505,7 @@ silently recreates or partially recovers uncertain state.
 
 The shared local proxy, gateway, broker, and controller use Docker restart
 policies so an ordinary daemon or Docker Desktop restart restores the public
-route without rerunning `infra-up`. This guarantee assumes Docker retains its
+route without rerunning `local-up`. This guarantee assumes Docker retains its
 data root and named volumes. Engine reset, volume pruning, namespace deletion,
 or Docker Desktop data loss is destructive and requires an independent backup.
 

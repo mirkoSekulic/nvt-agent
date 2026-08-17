@@ -8,7 +8,7 @@ CODEX_AUTH_SECRET ?= $(SECRET)
 GITHUB_APP_PRIVATE_KEY_FILE ?=
 PRODUCER_GITHUB_APP_SECRET ?= nvt-github-app
 PRODUCER_GITHUB_APP_KEY ?= private-key.pem
-BROKER_ENV_FILE ?= .broker/env
+BROKER_ENV_FILE ?= .nvt-local/secrets/broker-env
 BROKER_ENV_SECRET ?= nvt-broker-env
 PRODUCER_IMAGE ?= nvt-github-comments-producer:latest
 GATEWAY_IMAGE ?= nvt-agent-gateway:latest
@@ -30,13 +30,14 @@ CALICO_MANIFEST ?= https://raw.githubusercontent.com/projectcalico/calico/$(CALI
 OPERATOR_KIND_HELM_ARGS ?=
 OPERATOR_KIND_LOCAL_IMAGE_ARGS := --set runtime.image.repository=nvt-agent-runtime --set runtime.image.tag=latest --set dind.image.repository=$(word 1,$(subst :, ,$(DIND_IMAGE))) --set dind.image.tag=$(word 2,$(subst :, ,$(DIND_IMAGE))) --set broker.image.repository=nvt-broker --set broker.image.tag=latest --set egress.egressd.image.repository=$(word 1,$(subst :, ,$(EGRESSD_IMAGE))) --set egress.egressd.image.tag=$(word 2,$(subst :, ,$(EGRESSD_IMAGE))) --set egress.captured.image.repository=$(word 1,$(subst :, ,$(CAPTURED_IMAGE))) --set egress.captured.image.tag=$(word 2,$(subst :, ,$(CAPTURED_IMAGE))) --set operator.image.repository=nvt-operator --set operator.image.tag=latest
 OPERATOR_KIND_GATEWAY ?= 0
+LOCAL_MANIFEST ?= nvt.local.yaml
 
 ifeq ($(OPERATOR_KIND_GATEWAY),1)
 OPERATOR_KIND_EXTRA_IMAGE_TARGETS := gateway-kind-load
 OPERATOR_KIND_GATEWAY_HELM_ARGS := --set gateway.enabled=true --set gateway.image.repository=$(word 1,$(subst :, ,$(GATEWAY_IMAGE))) --set gateway.image.tag=$(word 2,$(subst :, ,$(GATEWAY_IMAGE)))
 endif
 
-.PHONY: runtime-build dind-build broker-build local-controller-build egressd-build captured-build native-egress-relay-build transparent-compose-smoke echo-build echo-kind-load operator-build execution-driver-host-build qemu-execution-driver-build qemu-execution-driver-test azure-execution-driver-build azure-execution-driver-test host-bundle-build host-bundle-test eligibility-test guest-enrollment-test producer-build gateway-build credential-portal-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret codex-mediated-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm plugin-init
+.PHONY: runtime-build dind-build broker-build local-controller-build egressd-build captured-build native-egress-relay-build transparent-compose-smoke echo-build echo-kind-load operator-build execution-driver-host-build qemu-execution-driver-build qemu-execution-driver-test azure-execution-driver-build azure-execution-driver-test host-bundle-build host-bundle-test eligibility-test guest-enrollment-test producer-build gateway-build credential-portal-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret codex-mediated-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule local-images local-init local-up local-status local-down local-reset plugin-init
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -223,14 +224,22 @@ operator-smoke-schedule:
 	@test -n "$(NAME)" || (echo "usage: make operator-smoke-schedule NAME=<name> [CLUSTER=nvt-smoke] [NAMESPACE=nvt]"; exit 1)
 	NAME="$(NAME)" NAMESPACE="$(NAMESPACE)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" ACTIVE_DEADLINE_SECONDS="$(ACTIVE_DEADLINE_SECONDS)" COMPLETED_TTL_SECONDS="$(COMPLETED_TTL_SECONDS)" SMOKE_DELAY_SECONDS="$(SMOKE_DELAY_SECONDS)" bash tests/operator/kind/smoke-scheduler-job.sh apply
 
-infra-up:
-	bash scripts/infra-up.sh
+local-images: runtime-build dind-build broker-build local-controller-build gateway-build credential-portal-build egressd-build captured-build producer-build
 
-infra-down:
-	bash scripts/infra-down.sh
+local-init:
+	cd localplatform && NVT_LOCAL_MANIFEST="../$(LOCAL_MANIFEST)" go run ./cmd/nvt-local init
 
-infra-network-rm:
-	bash scripts/infra-network-rm.sh
+local-up:
+	cd localplatform && NVT_LOCAL_MANIFEST="../$(LOCAL_MANIFEST)" go run ./cmd/nvt-local up
+
+local-status:
+	cd localplatform && go run ./cmd/nvt-local status
+
+local-down:
+	cd localplatform && go run ./cmd/nvt-local down
+
+local-reset:
+	cd localplatform && go run ./cmd/nvt-local reset
 
 plugin-init:
 	@test -n "$(NAME)" || (echo "usage: make plugin-init NAME=<name> [DIR=runtime/plugins]"; exit 1)

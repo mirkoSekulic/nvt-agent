@@ -332,6 +332,9 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 		if strings.Contains(joined, tokens.agent) || strings.Contains(joined, tokens.egress) {
 			t.Fatalf("credential entered command arguments: %q", joined)
 		}
+		if len(command) > 0 && command[0] == "create" && !contains(command, seedHelperLabel+"="+seedHelperValue) {
+			t.Fatalf("seed helper omitted its exact-owned identity: %q", joined)
+		}
 	}
 	if len(docker.inputs) < 3 || bytes.Contains(docker.inputs[0], []byte(tokens.egress)) || !bytes.Contains(docker.inputs[1], []byte(tokens.egress)) || bytes.Contains(docker.inputs[1], []byte("REAL-ACCESS-TOKEN-NEEDLE")) {
 		t.Fatalf("broker bearer was not confined to the paired-egress private seed stream")
@@ -376,6 +379,19 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 	observation, err := backend.Inspect(context.Background(), desired)
 	if err != nil || !observation.Ready {
 		t.Fatalf("inspect = %#v %v", observation, err)
+	}
+}
+
+func TestSeedHelperIdentityIsVerified(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	labels := ownedLabels{Owner: backend.config.Owner, RunID: run.RunID, Digest: strings.Repeat("a", 64)}
+	docker.containers["seed-helper"] = labelMap(labels)
+	if err := backend.verifySeedHelperContainer(context.Background(), "seed-helper", labels); !errors.Is(err, errOwnershipConflict) {
+		t.Fatalf("unmarked seed helper verification = %v", err)
+	}
+	docker.containers["seed-helper"][seedHelperLabel] = seedHelperValue
+	if err := backend.verifySeedHelperContainer(context.Background(), "seed-helper", labels); err != nil {
+		t.Fatalf("exact seed helper verification = %v", err)
 	}
 }
 
@@ -509,6 +525,9 @@ func TestDockerBackendOwnershipAndCleanupFailClosed(t *testing.T) {
 	for _, command := range docker.commands {
 		if contains(command, "--remove-orphans") || contains(command, "down") {
 			t.Fatalf("broad Compose cleanup bypassed ownership checks: %v", command)
+		}
+		if len(command) > 0 && command[0] == "rm" && !contains(command, "--volumes") {
+			t.Fatalf("exact-owned container cleanup retained anonymous volumes: %v", command)
 		}
 	}
 	for key, labels := range docker.objects {

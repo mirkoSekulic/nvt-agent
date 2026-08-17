@@ -96,7 +96,7 @@ make operator-codex-auth-secret \
   NAMESPACE=nvt CLUSTER=nvt-smoke
 
 make broker-env-secret \
-  BROKER_ENV_FILE=.broker/env \
+  BROKER_ENV_FILE=.nvt-local/secrets/broker-env \
   BROKER_ENV_SECRET=nvt-broker-env \
   NAMESPACE=nvt CLUSTER=nvt-smoke
 

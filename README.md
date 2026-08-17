@@ -85,10 +85,8 @@ Containers.
 Requirements: Docker with Compose, Make, and a browser.
 
 ```sh
-make runtime-build dind-build broker-build local-controller-build gateway-build egressd-build captured-build
-mkdir -p .broker
-cp templates/local-controller.yaml .broker/local-controller.yaml
-make infra-up
+cp nvt.local.example.yaml nvt.local.yaml
+make local-images local-init local-up
 ```
 
 Open:
@@ -97,10 +95,11 @@ Open:
 http://nvt.agent.localhost:4090
 ```
 
-Edit the one native platform file to define reusable profiles/workflows,
-persistent workstations, and producer schedules. Provider implementations and
-credentials stay in broker configuration. Start with
-[Native local workstations](docs/local-development-agent.md).
+`nvt.local.yaml` is the only local configuration entry point. It defines
+profiles, repositories, persistent workstations, workflows, accounts, routes,
+broker grants, and producers. Secret files are referenced beneath the ignored
+`.nvt-local/secrets/` directory; Codex and Claude OAuth accounts are enrolled
+through the local portal. See [Native local workstations](docs/local-development-agent.md).
 
 ## Kubernetes
 

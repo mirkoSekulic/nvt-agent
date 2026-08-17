@@ -326,7 +326,9 @@ func TestGitInjectionAPIPathUsesBearerDialect(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(gitIdentities(nil))
 
-	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", gitInjectionRequest("GET", "/repos/my-user/my-repo/pulls/123"))
+	request := gitInjectionRequest("GET", "/repos/my-user/my-repo/pulls/123")
+	request["host"] = "api.github.com"
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request)
 	if status != http.StatusOK || body["ok"] != true {
 		t.Fatalf("API path injection denied: status=%d body=%v", status, body)
 	}
@@ -464,7 +466,7 @@ func TestGitInjectionRoutingAdvertisesGit(t *testing.T) {
 		t.Fatalf("git-capable provider routing must set git: true, got %v", body)
 	}
 	hosts, _ := body["hosts"].([]any)
-	if len(hosts) != 1 || hosts[0] != "github.com" {
+	if len(hosts) != 2 || hosts[0] != "github.com" || hosts[1] != "api.github.com" {
 		t.Fatalf("unexpected routing hosts %v", body["hosts"])
 	}
 
@@ -486,6 +488,100 @@ func TestGitInjectionRoutingAdvertisesGit(t *testing.T) {
 	}
 	if _, present := body["git"]; present {
 		t.Fatalf("non-git provider routing must not set git, got %v", body)
+	}
+}
+
+func TestStaticPATInjectionEnforcesRepositoryScope(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(map[string]roleIdentity{
+		"frontend": {
+			Token: "frontend-token",
+			Role:  "agent",
+			Grants: []roleGrant{{
+				Provider:        "basic-pat-provider",
+				Materialization: "header-inject",
+				Repositories:    []string{"dev.azure.com/org/project/_git/repo"},
+			}, {
+				Provider:        "github-pat-provider",
+				Materialization: "header-inject",
+				Repositories:    []string{"my-user/my-repo"},
+			}},
+		},
+		"frontend-egress": {Token: "frontend-egress-token", Role: "egress", PairedAgent: "frontend"},
+	})
+	request := func(method, path string) map[string]any {
+		return map[string]any{"capability": "basic-pat-provider", "host": "dev.azure.com", "method": method, "path": path}
+	}
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request("GET", "/org/project/_git/repo/info/refs"))
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("scoped PAT fetch was denied: status=%d body=%v", status, body)
+	}
+	for _, operation := range []struct {
+		method string
+		path   string
+	}{
+		{"GET", "/org/project/_apis/git/repositories/repo/pullrequests"},
+		{"POST", "/org/project/_apis/git/repositories/repo/pullrequests"},
+		{"PATCH", "/org/project/_apis/git/repositories/repo/pullrequests/123"},
+	} {
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request(operation.method, operation.path))
+		if status != http.StatusOK || body["ok"] != true {
+			t.Fatalf("scoped Azure PAT API request %s %s was denied: status=%d body=%v", operation.method, operation.path, status, body)
+		}
+	}
+	githubRequest := map[string]any{"capability": "github-pat-provider", "host": "github.com", "method": "GET", "path": "/my-user/my-repo.git/info/refs"}
+	status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", githubRequest)
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("scoped GitHub PAT fetch was denied: status=%d body=%v", status, body)
+	}
+	githubRequest["host"] = "api.github.com"
+	for _, operation := range []struct {
+		method string
+		path   string
+	}{
+		{"GET", "/repos/my-user/my-repo/pulls"},
+		{"POST", "/repos/my-user/my-repo/pulls"},
+		{"PATCH", "/repos/my-user/my-repo/pulls/123"},
+	} {
+		githubRequest["method"], githubRequest["path"] = operation.method, operation.path
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", githubRequest)
+		if status != http.StatusOK || body["ok"] != true {
+			t.Fatalf("scoped GitHub PAT API request %s %s was denied: status=%d body=%v", operation.method, operation.path, status, body)
+		}
+	}
+	for _, operation := range []struct {
+		method string
+		path   string
+		error  string
+	}{
+		{"GET", "/repos/my-user/other/pulls", "repo-not-allowed"},
+		{"DELETE", "/repos/my-user/my-repo/pulls/123", "method-not-allowed"},
+		{"GET", "/user/repos", "path-not-allowed"},
+	} {
+		githubRequest["method"], githubRequest["path"] = operation.method, operation.path
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", githubRequest)
+		if status == http.StatusOK || body["error"] != operation.error {
+			t.Fatalf("GitHub %s %s expected %s: status=%d body=%v", operation.method, operation.path, operation.error, status, body)
+		}
+	}
+	for _, test := range []struct {
+		method string
+		path   string
+		error  string
+	}{
+		{"GET", "/org/project/_git/other/info/refs", "repo-not-allowed"},
+		{"GET", "/outside/project/_git/repo/info/refs", "repo-not-allowed"},
+		{"GET", "/org/project/_apis/git/repositories/other/pullrequests", "repo-not-allowed"},
+		{"DELETE", "/org/project/_apis/git/repositories/repo/pullrequests/123", "method-not-allowed"},
+		{"GET", "/org/project/_apis/projects", "path-not-allowed"},
+		{"POST", "/org/project/_git/repo/info/refs", "method-not-allowed"},
+		{"GET", "/org/project/_git/repo/HEAD", "path-not-allowed"},
+		{"GET", "/org/project/_git%2frepo/info/refs", "path-not-allowed"},
+	} {
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request(test.method, test.path))
+		if status == http.StatusOK || body["error"] != test.error {
+			t.Fatalf("%s %s expected %s: status=%d body=%v", test.method, test.path, test.error, status, body)
+		}
 	}
 }
 
