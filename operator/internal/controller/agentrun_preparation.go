@@ -106,7 +106,6 @@ type podCredentialVolumeMountState struct {
 
 const defaultProjectedVolumeMode int32 = 420
 
-// Reconcile renders the AgentRun config, creates the agent Pod, and syncs basic Pod-phase status.
 func (r *AgentRunReconciler) reconcileAgentConfigMap(
 	ctx context.Context,
 	agentRun *nvtv1alpha1.AgentRun,

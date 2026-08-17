@@ -2,38 +2,32 @@ package controller
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
-	"math/big"
 	"net"
 	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 )
 
+// AgentRunEgressEnforced reports whether the run opted into network-enforced
+// egress (own-Pod egressd + NetworkPolicies). Validation guarantees this
+// implies mediated mode.
 func AgentRunEgressEnforced(agentRun *nvtv1alpha1.AgentRun) bool {
 	return agentRun.Spec.EgressEnforcement && AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated
 }
@@ -221,276 +215,6 @@ func headerInjectGrants(agentRun *nvtv1alpha1.AgentRun) []nvtv1alpha1.AgentRunBr
 	return grants
 }
 
-func (r *AgentRunReconciler) setRunCondition(agentRun *nvtv1alpha1.AgentRun, conditionType string, status metav1.ConditionStatus, reason, message string) bool {
-	return meta.SetStatusCondition(&agentRun.Status.Conditions, metav1.Condition{
-		Type:               conditionType,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: agentRun.Generation,
-	})
-}
-
-func enforcementAgentPodGatesHold(agentRun *nvtv1alpha1.AgentRun) bool {
-	return meta.IsStatusConditionTrue(agentRun.Status.Conditions, ConditionBrokerPolicyReady) &&
-		meta.IsStatusConditionTrue(agentRun.Status.Conditions, ConditionEgressCAPublished)
-}
-
-// reconcileEnforcementGates advances the own-Pod machine past egressd
-// creation: wait for egressd Ready, then publish the validated Secret-backed
-// CA. Returns proceed=true only when the agent Pod may be created this pass.
-func (r *AgentRunReconciler) reconcileEnforcementGates(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (ctrl.Result, bool, bool, error) {
-	changed := false
-	egressdPod := &corev1.Pod{}
-	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressdPodName(agentRun.Name)}
-	if err := r.Get(ctx, key, egressdPod); err != nil {
-		return ctrl.Result{}, false, changed, fmt.Errorf("get egressd Pod: %w", err)
-	}
-	if !isPodReady(egressdPod) {
-		changed = r.setRunCondition(agentRun, ConditionEgressdReady, metav1.ConditionFalse, "EgressdNotReady", "waiting for egressd Pod readiness (CA endpoint /healthz)") || changed
-		return ctrl.Result{RequeueAfter: egressdReadyRequeue}, false, changed, nil
-	}
-	changed = r.setRunCondition(agentRun, ConditionEgressdReady, metav1.ConditionTrue, "EgressdReady", "egressd Pod is ready") || changed
-
-	published, err := r.publishEgressCAConfigMap(ctx, agentRun)
-	if err != nil {
-		changed = r.setRunCondition(agentRun, ConditionEgressCAPublished, metav1.ConditionFalse, "CAPublishFailed", err.Error()) || changed
-		return ctrl.Result{}, false, changed, err
-	}
-	if !published {
-		return ctrl.Result{RequeueAfter: egressdReadyRequeue}, false, changed, nil
-	}
-	changed = r.setRunCondition(agentRun, ConditionEgressCAPublished, metav1.ConditionTrue, "EgressCAPublished", "CA certificate published to the per-run ConfigMap") || changed
-	return ctrl.Result{}, true, changed, nil
-}
-
-func isPodReady(pod *corev1.Pod) bool {
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodReady {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-	return false
-}
-
-// publishEgressCAConfigMap publishes ca.crt from the operator-owned per-run CA
-// Secret into the ConfigMap mounted by the agent. The private key stays only in
-// the Secret mounted into egressd.
-func (r *AgentRunReconciler) publishEgressCAConfigMap(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (bool, error) {
-	secret := &corev1.Secret{}
-	secretKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressCASecretName(agentRun.Name)}
-	if err := r.Get(ctx, secretKey, secret); err != nil {
-		return false, fmt.Errorf("get egress CA Secret: %w", err)
-	}
-	if !metav1.IsControlledBy(secret, agentRun) {
-		return false, fmt.Errorf("egress CA Secret %s/%s exists but is not controlled by AgentRun %s", secret.Namespace, secret.Name, agentRun.Name)
-	}
-	certPEM := secret.Data[egressCACertKey]
-	if err := validateCAKeyPairPEM(certPEM, secret.Data[egressCAKeyKey]); err != nil {
-		return false, fmt.Errorf("egress CA Secret contains invalid keypair: %w", err)
-	}
-	configMap := &corev1.ConfigMap{}
-	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressCAConfigMapName(agentRun.Name)}
-	err := r.Get(ctx, key, configMap)
-	if err == nil {
-		if !metav1.IsControlledBy(configMap, agentRun) {
-			return false, fmt.Errorf("egress CA ConfigMap %s/%s exists but is not controlled by AgentRun %s", key.Namespace, key.Name, agentRun.Name)
-		}
-		if configMap.Data[egressCACertKey] == string(certPEM) &&
-			reflect.DeepEqual(configMap.Labels, agentRunLabels(agentRun.Name)) {
-			return true, nil
-		}
-		configMap.Labels = agentRunLabels(agentRun.Name)
-		configMap.Data = map[string]string{egressCACertKey: string(certPEM)}
-		if err := r.Update(ctx, configMap); err != nil {
-			return false, fmt.Errorf("update egress CA ConfigMap: %w", err)
-		}
-		return true, nil
-	}
-	if !errors.IsNotFound(err) {
-		return false, fmt.Errorf("get egress CA ConfigMap: %w", err)
-	}
-	desired, err := DesiredEgressCAConfigMap(agentRun, r.Scheme, certPEM)
-	if err != nil {
-		return false, err
-	}
-	if err := r.Create(ctx, desired); err != nil {
-		return false, fmt.Errorf("create egress CA ConfigMap: %w", err)
-	}
-	return true, nil
-}
-
-// validateCACertificatePEM accepts only certificate PEM blocks: anything
-// else — a private key above all — must never reach the published ConfigMap.
-func validateCACertificatePEM(data []byte) error {
-	_, err := parseCACertificatesPEM(data)
-	return err
-}
-
-func parseCACertificatesPEM(data []byte) ([]*x509.Certificate, error) {
-	rest := data
-	certs := []*x509.Certificate{}
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		if block.Type != "CERTIFICATE" {
-			return nil, fmt.Errorf("unexpected PEM block %q", block.Type)
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("parse certificate: %w", err)
-		}
-		certs = append(certs, cert)
-	}
-	if len(certs) == 0 {
-		return nil, fmt.Errorf("no certificate PEM block found")
-	}
-	if strings.TrimSpace(string(rest)) != "" {
-		return nil, fmt.Errorf("trailing non-PEM data after certificates")
-	}
-	return certs, nil
-}
-
-func validateCAKeyPairPEM(certPEM, keyPEM []byte) error {
-	certs, err := parseCACertificatesPEM(certPEM)
-	if err != nil {
-		return err
-	}
-	if len(keyPEM) == 0 {
-		return fmt.Errorf("missing key %s", egressCAKeyKey)
-	}
-	block, rest := pem.Decode(keyPEM)
-	if block == nil {
-		return fmt.Errorf("no EC private key PEM block found")
-	}
-	if block.Type != "EC PRIVATE KEY" {
-		return fmt.Errorf("unexpected PEM block %q", block.Type)
-	}
-	if strings.TrimSpace(string(rest)) != "" {
-		return fmt.Errorf("trailing non-PEM data after private key")
-	}
-	key, err := x509.ParseECPrivateKey(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("parse private key: %w", err)
-	}
-	certKey, ok := certs[0].PublicKey.(*ecdsa.PublicKey)
-	if !ok {
-		return fmt.Errorf("certificate public key is %T, want ECDSA", certs[0].PublicKey)
-	}
-	if certKey.Curve != key.Curve || certKey.X.Cmp(key.X) != 0 || certKey.Y.Cmp(key.Y) != 0 {
-		return fmt.Errorf("%s does not match %s", egressCAKeyKey, egressCACertKey)
-	}
-	return nil
-}
-
-// DesiredEgressCAConfigMap wraps the public CA certificate for the agent Pod
-// to mount read-only at the managed egress CA path.
-func DesiredEgressCAConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme, certPEM []byte) (*corev1.ConfigMap, error) {
-	configMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      EgressCAConfigMapName(agentRun.Name),
-			Namespace: agentRun.Namespace,
-			Labels:    agentRunLabels(agentRun.Name),
-		},
-		Data: map[string]string{egressCACertKey: string(certPEM)},
-	}
-	if err := controllerutil.SetControllerReference(agentRun, configMap, scheme); err != nil {
-		return nil, fmt.Errorf("set egress CA ConfigMap owner: %w", err)
-	}
-	return configMap, nil
-}
-
-func (r *AgentRunReconciler) reconcileEgressCASecret(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
-	secret := &corev1.Secret{}
-	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressCASecretName(agentRun.Name)}
-	err := r.Get(ctx, key, secret)
-	if err == nil {
-		if !metav1.IsControlledBy(secret, agentRun) {
-			return fmt.Errorf("egress CA Secret %s/%s exists but is not controlled by AgentRun %s", secret.Namespace, secret.Name, agentRun.Name)
-		}
-		if err := validateCAKeyPairPEM(secret.Data[egressCACertKey], secret.Data[egressCAKeyKey]); err != nil {
-			return fmt.Errorf("egress CA Secret %s/%s has invalid keypair: %w", secret.Namespace, secret.Name, err)
-		}
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return fmt.Errorf("get egress CA Secret: %w", err)
-	}
-	// In forward-proxy mode the durable CA must also permit the MITM upstream
-	// hosts, or the agent's TLS verification of the minted upstream leaf fails
-	// the CA name constraint.
-	leafNames := append(egressdLeafDNSNames(agentRun), forwardProxyUpstreamHosts(agentRun)...)
-	data, err := generateEgressCASecretData(leafNames)
-	if err != nil {
-		return err
-	}
-	desired := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      EgressCASecretName(agentRun.Name),
-			Namespace: agentRun.Namespace,
-			Labels:    agentRunLabels(agentRun.Name),
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: data,
-	}
-	if err := controllerutil.SetControllerReference(agentRun, desired, r.Scheme); err != nil {
-		return fmt.Errorf("set egress CA Secret owner: %w", err)
-	}
-	if err := r.Create(ctx, desired); err != nil {
-		return fmt.Errorf("create egress CA Secret: %w", err)
-	}
-	return nil
-}
-
-func generateEgressCASecretData(leafDNSNames []string) (map[string][]byte, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("generate egress CA key: %w", err)
-	}
-	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
-	serial, err := rand.Int(rand.Reader, serialLimit)
-	if err != nil {
-		return nil, fmt.Errorf("generate egress CA serial: %w", err)
-	}
-	template := &x509.Certificate{
-		SerialNumber:                serial,
-		Subject:                     pkix.Name{CommonName: "nvt-egressd per-run CA"},
-		NotBefore:                   time.Now().Add(-5 * time.Minute),
-		NotAfter:                    time.Now().Add(30 * 24 * time.Hour),
-		IsCA:                        true,
-		BasicConstraintsValid:       true,
-		MaxPathLenZero:              true,
-		KeyUsage:                    x509.KeyUsageCertSign,
-		PermittedDNSDomainsCritical: true,
-		PermittedDNSDomains:         append([]string{"localhost"}, leafDNSNames...),
-		PermittedIPRanges: []*net.IPNet{
-			{IP: net.IPv4(127, 0, 0, 0).To4(), Mask: net.CIDRMask(8, 32)},
-			{IP: net.IPv6loopback, Mask: net.CIDRMask(128, 128)},
-		},
-		ExcludedDNSDomains:      nil,
-		ExcludedIPRanges:        nil,
-		PermittedEmailAddresses: nil,
-		ExcludedEmailAddresses:  nil,
-		PermittedURIDomains:     nil,
-		ExcludedURIDomains:      nil,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		return nil, fmt.Errorf("create egress CA certificate: %w", err)
-	}
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		return nil, fmt.Errorf("marshal egress CA key: %w", err)
-	}
-	return map[string][]byte{
-		egressCACertKey: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		egressCAKeyKey:  pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
-	}, nil
-}
-
 func (r *AgentRunReconciler) reconcileEgressdPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
 	pod := &corev1.Pod{}
 	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressdPodName(agentRun.Name)}
@@ -507,6 +231,9 @@ func (r *AgentRunReconciler) reconcileEgressdPod(ctx context.Context, agentRun *
 	}
 	desired, err := DesiredEgressdPod(agentRun, r.Scheme)
 	if err != nil {
+		return err
+	}
+	if err := r.applyEgressCAGeneration(ctx, agentRun, desired); err != nil {
 		return err
 	}
 	if err := r.Create(ctx, desired); err != nil {

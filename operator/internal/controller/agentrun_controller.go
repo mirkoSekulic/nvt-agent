@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"reflect"
 	"sort"
 	"time"
 
@@ -13,8 +12,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -94,17 +91,21 @@ const (
 	// in its own Pod behind a per-run Service. The operator owns a durable
 	// per-run CA Secret mounted only into egressd and publishes ca.crt only to
 	// the agent ConfigMap.
-	agentRunLabelKey       = "nvt.dev/agentrun"
-	roleLabelKey           = "nvt.dev/role"
-	roleLabelAgent         = "agent"
-	roleLabelEgressd       = "egressd"
-	egressCAPort           = 8470
-	egressRouteBasePort    = 8471
-	egressForwardProxyPort = 8473 // forward-proxy CONNECT listener (own-Pod)
-	egressCACertKey        = "ca.crt"
-	egressCAKeyKey         = "ca.key"
-	egressdConfigName      = "egressd-config"
-	egressdReadyRequeue    = 2 * time.Second
+	agentRunLabelKey             = "nvt.dev/agentrun"
+	roleLabelKey                 = "nvt.dev/role"
+	roleLabelAgent               = "agent"
+	roleLabelEgressd             = "egressd"
+	egressCAPort                 = 8470
+	egressRouteBasePort          = 8471
+	egressForwardProxyPort       = 8473 // forward-proxy CONNECT listener (own-Pod)
+	egressCACertKey              = "ca.crt"
+	egressCAKeyKey               = "ca.key"
+	egressCAGenerationAnnotation = "nvt.dev/egress-ca-generation"
+	egressCADigestAnnotation     = "nvt.dev/egress-ca-sha256"
+	egressCARenewalMargin        = 7 * 24 * time.Hour
+	egressCAValidity             = 30 * 24 * time.Hour
+	egressdConfigName            = "egressd-config"
+	egressdReadyRequeue          = 2 * time.Second
 
 	brokerAgentsConfigMapName              = "nvt-broker-agents"
 	brokerAgentsConfigKey                  = "agents.yaml"
@@ -133,6 +134,11 @@ const (
 	unexpectedAgentExitReason              = "Agent container terminated unexpectedly"
 	generatedTokenByteLength               = 32
 	defaultRunRetentionSeconds             = 30 * 24 * 60 * 60
+)
+
+var (
+	errEgressCARotationInProgress = fmt.Errorf("egress CA rotation in progress")
+	errEgressCAValidity           = fmt.Errorf("egress CA validity requires rotation")
 )
 
 var defaultExternalTCPPorts = []int{80, 443}
@@ -199,6 +205,7 @@ type AgentRunReconciler struct {
 	BrokerHTTPClient *http.Client
 }
 
+// Reconcile renders the AgentRun config, creates the agent Pod, and syncs basic Pod-phase status.
 func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var agentRun nvtv1alpha1.AgentRun
 	if err := r.Get(ctx, req.NamespacedName, &agentRun); err != nil {
@@ -260,6 +267,22 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if existingPod != nil {
 		if err := r.ensureImmutablePodSecurityState(ctx, &agentRun, existingPod); err != nil {
 			return ctrl.Result{}, err
+		}
+		// Record a terminal workload before any maintenance path can replace its
+		// Pod. In particular, CA rotation must never erase the only durable
+		// lifecycle observation and re-execute a completed entrypoint.
+		rotationOwnsTermination := egressCARotationIntent(&agentRun) && !existingPod.DeletionTimestamp.IsZero()
+		if !rotationOwnsTermination {
+			observed := agentRun
+			SyncAgentRunLifecycleFromPodTermination(&observed, existingPod, r.now())
+			SyncAgentRunStatusFromPod(&observed, existingPod, r.now())
+			if IsTerminalAgentRunPhase(observed.Status.Phase) {
+				agentRun.Status = observed.Status
+				if err := r.Status().Update(ctx, &agentRun); err != nil {
+					return ctrl.Result{}, fmt.Errorf("record terminal AgentRun Pod before maintenance: %w", err)
+				}
+				return r.reconcileTerminalResourceCleanup(ctx, &agentRun)
+			}
 		}
 	}
 	conditionsChanged := false
@@ -354,6 +377,14 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// injectable material lazily and fail-closed on the first proxied
 		// request, and CA generation needs no broker at all.
 		if err := r.reconcileEgressCASecret(ctx, &agentRun); err != nil {
+			if err == errEgressCARotationInProgress {
+				if r.setRunCondition(&agentRun, ConditionEgressCAPublished, metav1.ConditionFalse, "EgressCARotating", "rotating egress CA and recreating trust consumers") {
+					if statusErr := r.Status().Update(ctx, &agentRun); statusErr != nil {
+						return ctrl.Result{}, statusErr
+					}
+				}
+				return ctrl.Result{RequeueAfter: egressdReadyRequeue}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		if err := r.reconcileNetworkPolicies(ctx, &agentRun); err != nil {
@@ -442,7 +473,15 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if deadlineExceeded || err != nil {
 		return deadlineResult, err
 	}
-	return earliestRequeue(deadlineResult, workspaceResult), nil
+	result := earliestRequeue(deadlineResult, workspaceResult)
+	if enforced {
+		caResult, caErr := r.egressCARenewalRequeue(ctx, &agentRun)
+		if caErr != nil {
+			return ctrl.Result{}, caErr
+		}
+		result = earliestRequeue(result, caResult)
+	}
+	return result, nil
 }
 
 func hasLegacyExternalFinalizer(agentRun *nvtv1alpha1.AgentRun) bool {
@@ -527,561 +566,6 @@ func isBrokerAgentsConfigMap(object client.Object) bool {
 	return object.GetName() == brokerAgentsConfigMapName
 }
 
-func (r *AgentRunReconciler) reconcileTerminalResourceCleanup(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (ctrl.Result, error) {
-	if agentRun.Status.Phase == nvtv1alpha1.AgentRunPhaseDeadlineExceeded {
-		complete, err := r.deleteTerminalOperationalResources(ctx, agentRun)
-		if err != nil || !complete {
-			return ctrl.Result{RequeueAfter: terminalResourceCleanupRequeue}, err
-		}
-		return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
-	}
-
-	remaining, shouldDelete := TerminalPodCleanupDelay(agentRun, r.now())
-	if remaining > 0 {
-		return ctrl.Result{RequeueAfter: remaining}, nil
-	}
-	if !shouldDelete {
-		return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
-	}
-
-	complete, err := r.deleteTerminalOperationalResources(ctx, agentRun)
-	if err != nil || !complete {
-		return ctrl.Result{RequeueAfter: terminalResourceCleanupRequeue}, err
-	}
-
-	return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
-}
-
-func (r *AgentRunReconciler) reconcileTerminalAgentRunRetention(
-	ctx context.Context,
-	agentRun *nvtv1alpha1.AgentRun,
-) (ctrl.Result, error) {
-	remaining, shouldDelete := RunRetentionDelay(agentRun, r.now())
-	if remaining > 0 {
-		return ctrl.Result{RequeueAfter: remaining}, nil
-	}
-	if !shouldDelete {
-		return ctrl.Result{}, nil
-	}
-	if err := r.Delete(ctx, agentRun); err != nil {
-		return ctrl.Result{}, fmt.Errorf("delete retained AgentRun: %w", err)
-	}
-	return ctrl.Result{}, nil
-}
-
-func (r *AgentRunReconciler) reconcileActiveDeadline(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (ctrl.Result, bool, error) {
-	now := r.now()
-	remaining, exceeded := ActiveDeadlineDelay(agentRun, now)
-	if remaining > 0 {
-		return ctrl.Result{RequeueAfter: remaining}, false, nil
-	}
-	if !exceeded {
-		return ctrl.Result{}, false, nil
-	}
-
-	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseDeadlineExceeded
-	agentRun.Status.FinishedAt = &now
-	agentRun.Status.Reason = activeDeadlineReason
-	if err := r.Status().Update(ctx, agentRun); err != nil {
-		return ctrl.Result{}, true, fmt.Errorf("mark AgentRun active deadline exceeded: %w", err)
-	}
-	result, err := r.reconcileTerminalResourceCleanup(ctx, agentRun)
-	return result, true, err
-}
-
-func (r *AgentRunReconciler) deleteTerminalOperationalResources(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (bool, error) {
-	cleanupErrors := []error{}
-	if err := r.removeBrokerAgentsPolicyEntry(ctx, agentRun); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Errorf("revoke terminal AgentRun broker policy: %w", err))
-	}
-
-	agentPod, agentPodErr := r.getOwnedTerminalPod(ctx, agentRun, AgentPodName(agentRun.Name), "terminal AgentRun agent Pod")
-	if agentPodErr != nil {
-		cleanupErrors = append(cleanupErrors, agentPodErr)
-	}
-	egressdPod, egressdPodErr := r.getOwnedTerminalPod(ctx, agentRun, EgressdPodName(agentRun.Name), "terminal AgentRun egressd Pod")
-	if egressdPodErr != nil {
-		cleanupErrors = append(cleanupErrors, egressdPodErr)
-	}
-	// Ownership must be known before deleting either Pod. A foreign same-name
-	// Pod leaves the complete workload and its network fence untouched.
-	if agentPodErr != nil || egressdPodErr != nil {
-		return false, utilerrors.NewAggregate(cleanupErrors)
-	}
-	podDeleteFailed := false
-	for _, pod := range []struct {
-		object      *corev1.Pod
-		description string
-	}{
-		{object: agentPod, description: "terminal AgentRun agent Pod"},
-		{object: egressdPod, description: "terminal AgentRun egressd Pod"},
-	} {
-		if pod.object == nil || !pod.object.DeletionTimestamp.IsZero() {
-			continue
-		}
-		if err := r.deleteOwnedObject(ctx, pod.object, pod.description); err != nil {
-			cleanupErrors = append(cleanupErrors, err)
-			podDeleteFailed = true
-		}
-	}
-
-	agentPod, agentPodErr = r.getOwnedTerminalPod(ctx, agentRun, AgentPodName(agentRun.Name), "terminal AgentRun agent Pod")
-	if agentPodErr != nil {
-		cleanupErrors = append(cleanupErrors, agentPodErr)
-	}
-	egressdPod, egressdPodErr = r.getOwnedTerminalPod(ctx, agentRun, EgressdPodName(agentRun.Name), "terminal AgentRun egressd Pod")
-	if egressdPodErr != nil {
-		cleanupErrors = append(cleanupErrors, egressdPodErr)
-	}
-	if podDeleteFailed || agentPod != nil || egressdPod != nil || agentPodErr != nil || egressdPodErr != nil {
-		return false, utilerrors.NewAggregate(cleanupErrors)
-	}
-
-	resources := []struct {
-		object      client.Object
-		name        string
-		description string
-	}{
-		{object: &corev1.PersistentVolumeClaim{}, name: WorkspacePVCName(agentRun.Name), description: "terminal AgentRun workspace PVC"},
-		{object: &corev1.PersistentVolumeClaim{}, name: DockerPVCName(agentRun.Name), description: "terminal AgentRun Docker PVC"},
-		{object: &corev1.Service{}, name: EgressdServiceName(agentRun.Name), description: "terminal AgentRun egressd Service"},
-		{object: &networkingv1.NetworkPolicy{}, name: AgentNetworkPolicyName(agentRun.Name), description: "terminal AgentRun agent NetworkPolicy"},
-		{object: &networkingv1.NetworkPolicy{}, name: EgressdNetworkPolicyName(agentRun.Name), description: "terminal AgentRun egressd NetworkPolicy"},
-		{object: &corev1.ConfigMap{}, name: AgentConfigMapName(agentRun.Name), description: "terminal AgentRun agent config ConfigMap"},
-		{object: &corev1.ConfigMap{}, name: EgressdConfigMapName(agentRun.Name), description: "terminal AgentRun egressd config ConfigMap"},
-		{object: &corev1.ConfigMap{}, name: EgressCAConfigMapName(agentRun.Name), description: "terminal AgentRun egress CA ConfigMap"},
-		{object: &corev1.Secret{}, name: BrokerTokenSecretName(agentRun.Name), description: "terminal AgentRun broker token Secret"},
-		{object: &corev1.Secret{}, name: EgressTokenSecretName(agentRun.Name), description: "terminal AgentRun egress token Secret"},
-		{object: &corev1.Secret{}, name: CallbackTokenSecretName(agentRun.Name), description: "terminal AgentRun callback token Secret"},
-		{object: &corev1.Secret{}, name: EgressCASecretName(agentRun.Name), description: "terminal AgentRun egress CA keypair Secret"},
-	}
-	for _, resource := range resources {
-		if err := r.deleteOwnedObjectByName(ctx, agentRun, resource.object, resource.name, resource.description); err != nil {
-			cleanupErrors = append(cleanupErrors, err)
-		}
-	}
-
-	return true, utilerrors.NewAggregate(cleanupErrors)
-}
-
-func (r *AgentRunReconciler) getOwnedTerminalPod(
-	ctx context.Context,
-	agentRun *nvtv1alpha1.AgentRun,
-	name string,
-	description string,
-) (*corev1.Pod, error) {
-	pod := &corev1.Pod{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: agentRun.Namespace, Name: name}, pod); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get %s for cleanup: %w", description, err)
-	}
-	if !metav1.IsControlledBy(pod, agentRun) {
-		return nil, fmt.Errorf("%s %s/%s exists but is not controlled by AgentRun %s", description, pod.Namespace, pod.Name, agentRun.Name)
-	}
-	return pod, nil
-}
-
-func (r *AgentRunReconciler) deleteOwnedAgentPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, description string) error {
-	if err := r.deleteOwnedPodByName(ctx, agentRun, AgentPodName(agentRun.Name), description); err != nil {
-		return err
-	}
-	if AgentRunEgressEnforced(agentRun) {
-		// The paired egressd Pod has no purpose past the run; the remaining
-		// enforcement objects are garbage-collected with the AgentRun.
-		return r.deleteOwnedPodByName(ctx, agentRun, EgressdPodName(agentRun.Name), description+" (egressd)")
-	}
-	return nil
-}
-
-func (r *AgentRunReconciler) deleteOwnedPodByName(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, name, description string) error {
-	return r.deleteOwnedObjectByName(ctx, agentRun, &corev1.Pod{}, name, description)
-}
-
-func (r *AgentRunReconciler) deleteOwnedObjectByName(
-	ctx context.Context,
-	agentRun *nvtv1alpha1.AgentRun,
-	object client.Object,
-	name string,
-	description string,
-) error {
-	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: name}
-	if err := r.Get(ctx, key, object); err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("get %s for cleanup: %w", description, err)
-	}
-	if !metav1.IsControlledBy(object, agentRun) {
-		return fmt.Errorf("%s %s/%s exists but is not controlled by AgentRun %s", description, object.GetNamespace(), object.GetName(), agentRun.Name)
-	}
-	return r.deleteOwnedObject(ctx, object, description)
-}
-
-func (r *AgentRunReconciler) deleteOwnedObject(ctx context.Context, object client.Object, description string) error {
-	deleteOptions := []client.DeleteOption{}
-	if uid := object.GetUID(); uid != "" {
-		deleteOptions = append(deleteOptions, client.Preconditions{UID: &uid})
-	}
-	if err := r.Delete(ctx, object, deleteOptions...); err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("delete %s: %w", description, err)
-	}
-	return nil
-}
-
-func (r *AgentRunReconciler) finalizeAgentRun(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
-	if !controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
-		return nil
-	}
-
-	if err := r.removeBrokerAgentsPolicyEntry(ctx, agentRun); err != nil {
-		return err
-	}
-	controllerutil.RemoveFinalizer(agentRun, agentRunFinalizer)
-	if err := r.Update(ctx, agentRun); err != nil {
-		return fmt.Errorf("remove AgentRun finalizer: %w", err)
-	}
-
-	return nil
-}
-
-func (r *AgentRunReconciler) now() metav1.Time {
-	if r.Now != nil {
-		return r.Now()
-	}
-	return metav1.Now()
-}
-
-func (r *AgentRunReconciler) reconcileEgressdConfigMap(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, podExists bool) error {
-	if AgentRunEgressMode(agentRun) != nvtv1alpha1.AgentRunEgressMediated {
-		return nil
-	}
-	configMap := &corev1.ConfigMap{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressdConfigMapName(agentRun.Name)}, configMap)
-	if err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("get AgentRun egressd config ConfigMap: %w", err)
-	}
-	if err == nil && podExists {
-		// Never rewrite egressd config under an existing Pod: the Pod's
-		// mounts were rendered against this config, and operator broker env
-		// changes must not retarget a running run.
-		if !metav1.IsControlledBy(configMap, agentRun) {
-			return fmt.Errorf("AgentRun egressd config ConfigMap %s/%s exists but is not controlled by AgentRun %s", configMap.Namespace, configMap.Name, agentRun.Name)
-		}
-		return nil
-	}
-	desired, err2 := DesiredEgressdConfigMap(agentRun, r.Scheme)
-	if err2 != nil {
-		return err2
-	}
-	if err != nil {
-		if createErr := r.Create(ctx, desired); createErr != nil {
-			return fmt.Errorf("create AgentRun egressd config ConfigMap: %w", createErr)
-		}
-		return nil
-	}
-	if !metav1.IsControlledBy(configMap, agentRun) {
-		return fmt.Errorf("AgentRun egressd config ConfigMap %s/%s exists but is not controlled by AgentRun %s", configMap.Namespace, configMap.Name, agentRun.Name)
-	}
-	if reflect.DeepEqual(configMap.Data, desired.Data) &&
-		reflect.DeepEqual(configMap.Labels, desired.Labels) &&
-		reflect.DeepEqual(configMap.OwnerReferences, desired.OwnerReferences) {
-		return nil
-	}
-	configMap.Labels = desired.Labels
-	configMap.OwnerReferences = desired.OwnerReferences
-	configMap.Data = desired.Data
-	if err := r.Update(ctx, configMap); err != nil {
-		return fmt.Errorf("update AgentRun egressd config ConfigMap: %w", err)
-	}
-	return nil
-}
-
-func (r *AgentRunReconciler) reconcileBrokerAgentsPolicy(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
-	secret := &corev1.Secret{}
-	secretKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: BrokerTokenSecretName(agentRun.Name)}
-	if err := r.Get(ctx, secretKey, secret); err != nil {
-		return fmt.Errorf("get AgentRun broker token Secret %s/%s for broker policy: %w", secretKey.Namespace, secretKey.Name, err)
-	}
-	token := secret.Data[brokerTokenKey]
-	if len(token) == 0 {
-		return fmt.Errorf("AgentRun broker token Secret %s/%s is missing %s", secret.Namespace, secret.Name, brokerTokenKey)
-	}
-
-	entry := brokerAgentEntry{
-		ID:          AgentRunBrokerID(agentRun.Namespace, agentRun.Name),
-		TokenSHA256: BrokerTokenHash(token),
-		Grants:      BrokerAgentGrants(agentRun.Spec.Broker),
-	}
-	entries := []brokerAgentEntry{entry}
-	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
-		egressSecret := &corev1.Secret{}
-		egressSecretKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressTokenSecretName(agentRun.Name)}
-		if err := r.Get(ctx, egressSecretKey, egressSecret); err != nil {
-			return fmt.Errorf("get AgentRun egress token Secret %s/%s for broker policy: %w", egressSecretKey.Namespace, egressSecretKey.Name, err)
-		}
-		egressToken := egressSecret.Data[egressTokenKey]
-		if len(egressToken) == 0 {
-			return fmt.Errorf("AgentRun egress token Secret %s/%s is missing %s", egressSecret.Namespace, egressSecret.Name, egressTokenKey)
-		}
-		entries = append(entries, brokerAgentEntry{
-			ID:          AgentRunEgressBrokerID(agentRun.Namespace, agentRun.Name),
-			TokenSHA256: BrokerTokenHash(egressToken),
-			Role:        "egress",
-			PairedAgent: AgentRunBrokerID(agentRun.Namespace, agentRun.Name),
-			Grants:      []brokerAgentGrantEntry{},
-		})
-	}
-
-	if err := r.updateBrokerAgentsPolicy(ctx, agentRun.Namespace, func(policy brokerAgentsPolicy) (brokerAgentsPolicy, error) {
-		for _, entry := range entries {
-			policy = UpsertBrokerAgent(policy, entry)
-		}
-		return policy, nil
-	}); err != nil {
-		if errors.IsNotFound(err) {
-			return fmt.Errorf("broker agents ConfigMap %s/%s is required before reconciling AgentRun broker policy: %w", agentRun.Namespace, brokerAgentsConfigMapName, err)
-		}
-		return err
-	}
-
-	return nil
-}
-
-func (r *AgentRunReconciler) removeBrokerAgentsPolicyEntry(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
-	err := r.updateBrokerAgentsPolicy(ctx, agentRun.Namespace, func(policy brokerAgentsPolicy) (brokerAgentsPolicy, error) {
-		policy = RemoveBrokerAgent(policy, AgentRunBrokerID(agentRun.Namespace, agentRun.Name))
-		policy = RemoveBrokerAgent(policy, AgentRunEgressBrokerID(agentRun.Namespace, agentRun.Name))
-		return policy, nil
-	})
-	if errors.IsNotFound(err) {
-		// Fail open on deletion so AgentRun cleanup is not blocked if broker
-		// infrastructure was removed first in a local/kind POC cluster.
-		return nil
-	}
-	return err
-}
-
-func (r *AgentRunReconciler) updateBrokerAgentsPolicy(
-	ctx context.Context,
-	namespace string,
-	mutate func(brokerAgentsPolicy) (brokerAgentsPolicy, error),
-) error {
-	key := client.ObjectKey{Namespace: namespace, Name: brokerAgentsConfigMapName}
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		configMap := &corev1.ConfigMap{}
-		if err := r.Get(ctx, key, configMap); err != nil {
-			return err
-		}
-		rawPolicy, ok := configMap.Data[brokerAgentsConfigKey]
-		if !ok {
-			return fmt.Errorf("broker agents ConfigMap %s/%s is missing %s", key.Namespace, key.Name, brokerAgentsConfigKey)
-		}
-		policy, err := ParseBrokerAgentsYAML(rawPolicy)
-		if err != nil {
-			return fmt.Errorf("parse broker agents ConfigMap %s/%s %s: %w", key.Namespace, key.Name, brokerAgentsConfigKey, err)
-		}
-		updatedPolicy, err := mutate(policy)
-		if err != nil {
-			return err
-		}
-		if err := ValidateBrokerAgentsPolicy(updatedPolicy); err != nil {
-			return fmt.Errorf("validate broker agents ConfigMap %s/%s %s: %w", key.Namespace, key.Name, brokerAgentsConfigKey, err)
-		}
-		rendered, err := RenderBrokerAgentsYAML(updatedPolicy)
-		if err != nil {
-			return fmt.Errorf("render broker agents ConfigMap %s/%s %s: %w", key.Namespace, key.Name, brokerAgentsConfigKey, err)
-		}
-		if configMap.Data[brokerAgentsConfigKey] == rendered {
-			return nil
-		}
-		if configMap.Data == nil {
-			configMap.Data = map[string]string{}
-		}
-		configMap.Data[brokerAgentsConfigKey] = rendered
-		if err := r.Update(ctx, configMap); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return err
-		}
-		return fmt.Errorf("update broker agents ConfigMap %s/%s: %w", key.Namespace, key.Name, err)
-	}
-
-	return nil
-}
-
-func (r *AgentRunReconciler) reconcileBrokerTokenSecret(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
-	return r.reconcileTokenSecret(ctx, agentRun, BrokerTokenSecretName(agentRun.Name), brokerTokenKey)
-}
-
-func (r *AgentRunReconciler) reconcileEgressTokenSecret(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
-	if AgentRunEgressMode(agentRun) != nvtv1alpha1.AgentRunEgressMediated {
-		return nil
-	}
-	return r.reconcileTokenSecret(ctx, agentRun, EgressTokenSecretName(agentRun.Name), egressTokenKey)
-}
-
-func (r *AgentRunReconciler) reconcileCallbackTokenSecret(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
-	return r.reconcileTokenSecret(ctx, agentRun, CallbackTokenSecretName(agentRun.Name), callbackTokenKey)
-}
-
-func (r *AgentRunReconciler) reconcileTokenSecret(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, name, key string) error {
-	secret := &corev1.Secret{}
-	secretKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: name}
-	if err := r.Get(ctx, secretKey, secret); err != nil {
-		if !errors.IsNotFound(err) {
-			return fmt.Errorf("get AgentRun token Secret %s/%s: %w", secretKey.Namespace, secretKey.Name, err)
-		}
-		desired, desiredErr := DesiredTokenSecret(agentRun, r.Scheme, name, key, nil)
-		if desiredErr != nil {
-			return desiredErr
-		}
-		if createErr := r.Create(ctx, desired); createErr != nil {
-			return fmt.Errorf("create AgentRun token Secret %s/%s: %w", secretKey.Namespace, secretKey.Name, createErr)
-		}
-		return nil
-	}
-	if !metav1.IsControlledBy(secret, agentRun) {
-		return fmt.Errorf("AgentRun token Secret %s/%s exists but is not controlled by AgentRun %s", secret.Namespace, secret.Name, agentRun.Name)
-	}
-
-	token := secret.Data[key]
-	desired, err := DesiredTokenSecret(agentRun, r.Scheme, name, key, token)
-	if err != nil {
-		return err
-	}
-	if secret.Type == desired.Type &&
-		reflect.DeepEqual(secret.Labels, desired.Labels) &&
-		reflect.DeepEqual(secret.OwnerReferences, desired.OwnerReferences) &&
-		reflect.DeepEqual(secret.Data, desired.Data) {
-		return nil
-	}
-
-	secret.Labels = desired.Labels
-	secret.OwnerReferences = desired.OwnerReferences
-	secret.Type = desired.Type
-	secret.Data = desired.Data
-	if err := r.Update(ctx, secret); err != nil {
-		return fmt.Errorf("update AgentRun token Secret %s/%s: %w", secret.Namespace, secret.Name, err)
-	}
-
-	return nil
-}
-
-func (r *AgentRunReconciler) setAgentRunFailed(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, reason string) error {
-	key := client.ObjectKeyFromObject(agentRun)
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current := &nvtv1alpha1.AgentRun{}
-		if err := r.Get(ctx, key, current); err != nil {
-			return err
-		}
-		now := r.now()
-		current.Status.Phase = nvtv1alpha1.AgentRunPhaseFailed
-		current.Status.Reason = reason
-		if current.Status.FinishedAt == nil {
-			current.Status.FinishedAt = &now
-		}
-		return r.Status().Update(ctx, current)
-	})
-}
-
-// createAgentPod renders and creates the AgentRun Pod; the caller has already
-// established that no Pod exists.
-func (r *AgentRunReconciler) createAgentPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (*corev1.Pod, error) {
-	// Pods are create-once for this slice because most spec fields are immutable.
-	// A future replacement policy can decide how to handle spec changes.
-	desired, err := DesiredAgentPod(agentRun, r.Scheme)
-	if err != nil {
-		return nil, err
-	}
-	if createErr := r.Create(ctx, desired); createErr != nil {
-		return nil, fmt.Errorf("create AgentRun Pod: %w", createErr)
-	}
-	return desired, nil
-}
-
-// getOwnedAgentPod returns the AgentRun's Pod, nil when it does not exist yet.
-func (r *AgentRunReconciler) getOwnedAgentPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (*corev1.Pod, error) {
-	pod := &corev1.Pod{}
-	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentPodName(agentRun.Name)}
-	if err := r.Get(ctx, key, pod); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get AgentRun Pod: %w", err)
-	}
-	if !metav1.IsControlledBy(pod, agentRun) {
-		return nil, fmt.Errorf("AgentRun Pod %s/%s exists but is not controlled by AgentRun %s", pod.Namespace, pod.Name, agentRun.Name)
-	}
-	return pod, nil
-}
-
-func (r *AgentRunReconciler) getOwnedEgressdPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (*corev1.Pod, error) {
-	pod := &corev1.Pod{}
-	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressdPodName(agentRun.Name)}
-	if err := r.Get(ctx, key, pod); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get egressd Pod: %w", err)
-	}
-	if !metav1.IsControlledBy(pod, agentRun) {
-		return nil, fmt.Errorf("egressd Pod %s/%s exists but is not controlled by AgentRun %s", pod.Namespace, pod.Name, agentRun.Name)
-	}
-	return pod, nil
-}
-
-func (r *AgentRunReconciler) repairOwnedPodLabels(ctx context.Context, pod *corev1.Pod, required map[string]string) error {
-	changed := false
-	if pod.Labels == nil {
-		pod.Labels = map[string]string{}
-		changed = true
-	}
-	for key, value := range required {
-		if pod.Labels[key] != value {
-			pod.Labels[key] = value
-			changed = true
-		}
-	}
-	if !changed {
-		return nil
-	}
-	if err := r.Update(ctx, pod); err != nil {
-		return fmt.Errorf("repair Pod %s/%s labels: %w", pod.Namespace, pod.Name, err)
-	}
-	return nil
-}
-
-// validateBrokerCASecret ensures the configured broker CA Secret exists in
-// the AgentRun namespace and carries ca.crt before any Pod mounts it: the
-// Pod projects ca.crt non-optionally, so a bring-your-own TLS Secret without
-// that key would wedge every agent Pod in FailedMount.
-func (r *AgentRunReconciler) validateBrokerCASecret(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
-	if !brokerCADistributed() {
-		return nil
-	}
-	name := BrokerCASecretName()
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: agentRun.Namespace, Name: name}, secret); err != nil {
-		if errors.IsNotFound(err) {
-			return fmt.Errorf("broker CA Secret %s/%s not found: broker TLS requires a Secret carrying the CA certificate under key %s", agentRun.Namespace, name, brokerCAKey)
-		}
-		return fmt.Errorf("get broker CA Secret %s/%s: %w", agentRun.Namespace, name, err)
-	}
-	if len(secret.Data[brokerCAKey]) == 0 {
-		return fmt.Errorf("broker CA Secret %s/%s is missing key %s: bring-your-own broker TLS Secrets must include the CA certificate", agentRun.Namespace, name, brokerCAKey)
-	}
-	return nil
-}
-
-// AgentRunEgressEnforced reports whether the run opted into network-enforced
-// egress (own-Pod egressd + NetworkPolicies). Validation guarantees this
-// implies mediated mode.
 func ptrTo[T any](value T) *T {
 	return &value
 }

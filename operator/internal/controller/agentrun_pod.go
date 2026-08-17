@@ -16,6 +16,7 @@ import (
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 )
 
+// DesiredAgentPod returns the create-once Pod spec for an AgentRun.
 func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
 	return buildDesiredAgentPod(agentRun, scheme, false)
 }
