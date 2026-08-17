@@ -172,7 +172,7 @@ class StaticTokenProvider:
 
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
         if self.injection_git:
-            repo = self._injection_git_repository(host, method, path)
+            repo = self._injection_repository(host, method, path)
             self._ensure_repo_allowed(repo, (grant or {}).get("repositories"))
         if self.injection_basic_username is not None:
             encoded = base64.b64encode(f"{self.injection_basic_username}:{self.token}".encode("utf-8")).decode("ascii")
@@ -186,21 +186,30 @@ class StaticTokenProvider:
         strip = list(headers.keys())
         return headers, None, strip
 
-    def _injection_git_repository(self, host, method, path):
+    def _injection_repository(self, host, method, path):
         if not path.startswith("/") or not path[1:] or any(not part for part in path[1:].split("/")):
             raise ProviderError("path-not-allowed")
         parts = [unquote(part) for part in path[1:].split("/")]
         if any(part in {".", ".."} or "/" in part or "\\" in part for part in parts):
             raise ProviderError("path-not-allowed")
+        method = method.upper()
         if len(parts) >= 3 and parts[-2:] == ["info", "refs"]:
             expected_method = "GET"
             repository_parts = parts[:-2]
         elif len(parts) >= 2 and parts[-1] in {"git-upload-pack", "git-receive-pack"}:
             expected_method = "POST"
             repository_parts = parts[:-1]
+        elif host == "dev.azure.com" and len(parts) >= 6 and parts[2:5] == ["_apis", "git", "repositories"]:
+            if method not in {"GET", "POST", "PATCH"}:
+                raise ProviderError("method-not-allowed")
+            return self.normalize_target(f"https://{host}/{parts[0]}/{parts[1]}/_git/{parts[5]}")
+        elif host == "github.com" and len(parts) >= 3 and parts[0] == "repos":
+            if method not in {"GET", "POST", "PATCH"}:
+                raise ProviderError("method-not-allowed")
+            return self.normalize_target(f"https://{host}/{parts[1]}/{parts[2]}")
         else:
             raise ProviderError("path-not-allowed")
-        if method.upper() != expected_method:
+        if method != expected_method:
             raise ProviderError("method-not-allowed")
         repository_parts[-1] = repository_parts[-1].removesuffix(".git")
         if not repository_parts[-1]:

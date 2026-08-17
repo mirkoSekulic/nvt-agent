@@ -514,10 +514,52 @@ func TestStaticPATInjectionEnforcesRepositoryScope(t *testing.T) {
 	if status != http.StatusOK || body["ok"] != true {
 		t.Fatalf("scoped PAT fetch was denied: status=%d body=%v", status, body)
 	}
+	for _, operation := range []struct {
+		method string
+		path   string
+	}{
+		{"GET", "/org/project/_apis/git/repositories/repo/pullrequests"},
+		{"POST", "/org/project/_apis/git/repositories/repo/pullrequests"},
+		{"PATCH", "/org/project/_apis/git/repositories/repo/pullrequests/123"},
+	} {
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request(operation.method, operation.path))
+		if status != http.StatusOK || body["ok"] != true {
+			t.Fatalf("scoped Azure PAT API request %s %s was denied: status=%d body=%v", operation.method, operation.path, status, body)
+		}
+	}
 	githubRequest := map[string]any{"capability": "github-pat-provider", "host": "github.com", "method": "GET", "path": "/my-user/my-repo.git/info/refs"}
 	status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", githubRequest)
 	if status != http.StatusOK || body["ok"] != true {
 		t.Fatalf("scoped GitHub PAT fetch was denied: status=%d body=%v", status, body)
+	}
+	for _, operation := range []struct {
+		method string
+		path   string
+	}{
+		{"GET", "/repos/my-user/my-repo/pulls"},
+		{"POST", "/repos/my-user/my-repo/pulls"},
+		{"PATCH", "/repos/my-user/my-repo/pulls/123"},
+	} {
+		githubRequest["method"], githubRequest["path"] = operation.method, operation.path
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", githubRequest)
+		if status != http.StatusOK || body["ok"] != true {
+			t.Fatalf("scoped GitHub PAT API request %s %s was denied: status=%d body=%v", operation.method, operation.path, status, body)
+		}
+	}
+	for _, operation := range []struct {
+		method string
+		path   string
+		error  string
+	}{
+		{"GET", "/repos/my-user/other/pulls", "repo-not-allowed"},
+		{"DELETE", "/repos/my-user/my-repo/pulls/123", "method-not-allowed"},
+		{"GET", "/user/repos", "path-not-allowed"},
+	} {
+		githubRequest["method"], githubRequest["path"] = operation.method, operation.path
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", githubRequest)
+		if status == http.StatusOK || body["error"] != operation.error {
+			t.Fatalf("GitHub %s %s expected %s: status=%d body=%v", operation.method, operation.path, operation.error, status, body)
+		}
 	}
 	for _, test := range []struct {
 		method string
@@ -526,6 +568,9 @@ func TestStaticPATInjectionEnforcesRepositoryScope(t *testing.T) {
 	}{
 		{"GET", "/org/project/_git/other/info/refs", "repo-not-allowed"},
 		{"GET", "/outside/project/_git/repo/info/refs", "repo-not-allowed"},
+		{"GET", "/org/project/_apis/git/repositories/other/pullrequests", "repo-not-allowed"},
+		{"DELETE", "/org/project/_apis/git/repositories/repo/pullrequests/123", "method-not-allowed"},
+		{"GET", "/org/project/_apis/projects", "path-not-allowed"},
 		{"POST", "/org/project/_git/repo/info/refs", "method-not-allowed"},
 		{"GET", "/org/project/_git/repo/HEAD", "path-not-allowed"},
 		{"GET", "/org/project/_git%2frepo/info/refs", "path-not-allowed"},
