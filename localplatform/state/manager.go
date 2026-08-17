@@ -27,6 +27,9 @@ type StateFile struct {
 // Store is the narrow trusted-state persistence boundary. Implementations must
 // never copy Data into commands, environment values, labels, output, or logs.
 type Store interface {
+	// ValidateVolumes performs a read-only exact-label check and returns the
+	// names that already exist.
+	ValidateVolumes(context.Context, []Volume) (map[string]bool, error)
 	EnsureVolumes(context.Context, []Volume) (map[string]bool, error)
 	// ReadVolumeInventory verifies and reads an existing generated-config
 	// volume, or returns an empty result without creating the volume when it
@@ -93,12 +96,37 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 	if err != nil {
 		return Plan{}, errors.New("generated configuration is invalid")
 	}
-	_, err = manager.Store.EnsureVolumes(ctx, prepared.Volumes)
+	existing, err := manager.Store.ValidateVolumes(ctx, prepared.Volumes)
 	if err != nil {
 		return Plan{}, errors.New("trusted state volume ownership conflict or storage failure")
 	}
 	sourceStates := map[string]PrivateSourceState{}
 	for _, input := range prepared.generated {
+		if !existing[input.sourceVolume] {
+			continue
+		}
+		expectedSize := generatedValueSize(input.encoding)
+		state, err := manager.Store.InspectPrivateSource(ctx, volumes[input.sourceVolume], expectedSize)
+		if err != nil || state == PrivateSourceInvalid || state == PrivateSourceCorrupt {
+			return Plan{}, errors.New("generated private state is missing or corrupt")
+		}
+		sourceStates[input.sourceVolume] = state
+	}
+	configVolume := volumes[prepared.configVolume]
+	if _, err := manager.Store.EnsureVolumes(ctx, []Volume{configVolume}); err != nil {
+		return Plan{}, errors.New("trusted state inventory volume creation failed")
+	}
+	if err := manager.Store.ReplaceFiles(ctx, configVolume, configuration); err != nil {
+		return Plan{}, errors.New("generated configuration storage failed")
+	}
+	_, err = manager.Store.EnsureVolumes(ctx, prepared.Volumes)
+	if err != nil {
+		return Plan{}, errors.New("trusted state volume ownership conflict or storage failure")
+	}
+	for _, input := range prepared.generated {
+		if _, inspected := sourceStates[input.sourceVolume]; inspected {
+			continue
+		}
 		expectedSize := generatedValueSize(input.encoding)
 		state, err := manager.Store.InspectPrivateSource(ctx, volumes[input.sourceVolume], expectedSize)
 		if err != nil || state == PrivateSourceInvalid || state == PrivateSourceCorrupt {
@@ -118,9 +146,6 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 		if err := manager.Store.EnsureDirectory(ctx, volumes[directory.volume], directory.uid, directory.gid, directory.mode); err != nil {
 			return Plan{}, errors.New("trusted state directory initialization failed")
 		}
-	}
-	if err := manager.Store.ReplaceFiles(ctx, volumes[prepared.configVolume], configuration); err != nil {
-		return Plan{}, errors.New("generated configuration storage failed")
 	}
 	for _, input := range prepared.static {
 		reader, err := inputs.privateReader(input.owner, input.name)

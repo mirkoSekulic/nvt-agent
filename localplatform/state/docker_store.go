@@ -36,28 +36,43 @@ type DockerStore struct {
 	HelperImage string
 }
 
-func (store DockerStore) EnsureVolumes(ctx context.Context, volumes []Volume) (map[string]bool, error) {
+func (store DockerStore) ValidateVolumes(ctx context.Context, volumes []Volume) (map[string]bool, error) {
+	_, existing, err := store.classifyVolumes(ctx, volumes)
+	return existing, err
+}
+
+func (store DockerStore) classifyVolumes(ctx context.Context, volumes []Volume) ([]Volume, map[string]bool, error) {
 	if store.Docker == nil || !validHelperImage(store.HelperImage) {
-		return nil, errors.New("docker state store configuration invalid")
+		return nil, nil, errors.New("docker state store configuration invalid")
 	}
 	ordered := append([]Volume(nil), volumes...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
 	missing := []Volume{}
+	existing := map[string]bool{}
 	for _, volume := range ordered {
 		if !validVolume(volume) {
-			return nil, errors.New("invalid managed volume")
+			return nil, nil, errors.New("invalid managed volume")
 		}
 		found, err := store.volumeExists(ctx, volume)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if !found {
 			missing = append(missing, volume)
 			continue
 		}
 		if err := store.verifyVolume(ctx, volume); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		existing[volume.Name] = true
+	}
+	return missing, existing, nil
+}
+
+func (store DockerStore) EnsureVolumes(ctx context.Context, volumes []Volume) (map[string]bool, error) {
+	missing, _, err := store.classifyVolumes(ctx, volumes)
+	if err != nil {
+		return nil, err
 	}
 	created := map[string]bool{}
 	for _, volume := range missing {

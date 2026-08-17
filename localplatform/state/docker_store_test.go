@@ -178,6 +178,10 @@ func TestDockerStoreCreatesAndAdoptsOnlyExactlyLabeledVolumes(t *testing.T) {
 	docker := &fakeDocker{volumes: map[string]map[string]string{}}
 	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("a", 64)}
 	volume := Volume{Name: "local-test-state", Role: "test-state", Owner: "broker", Consumers: []string{"broker"}, Labels: map[string]string{ownerLabel: "local-test", custodianLabel: "broker", roleLabel: "test-state", volumeLabel: "local-test-state", versionLabel: stateVersion}}
+	existing, err := store.ValidateVolumes(context.Background(), []Volume{volume})
+	if err != nil || len(existing) != 0 || len(docker.volumes) != 0 {
+		t.Fatalf("read-only validation = %v, %v", existing, err)
+	}
 	created, err := store.EnsureVolumes(context.Background(), []Volume{volume})
 	if err != nil || !created[volume.Name] {
 		t.Fatalf("create = %v, %v", created, err)

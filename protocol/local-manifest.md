@@ -72,6 +72,11 @@ validated historical ownership inventory before creating any missing volume.
 The generated-config inventory reader treats an absent volume as first
 initialization without creating it; an invalid, oversized, or over-capacity
 union therefore cannot leave exact-owned volumes outside the reset inventory.
+After validating all existing volume labels, reconciliation creates only the
+generated-config volume and durably publishes the complete union there before
+creating any other missing volume. Reset accepts an empty inventory only for
+the exact interrupted-first-publication form in which generated-config is the
+sole platform-owned volume; every other empty-inventory form fails closed.
 
 The controller projection also contains one producer admission binding per
 producer: stable producer identity, exactly one workflow, and a logical

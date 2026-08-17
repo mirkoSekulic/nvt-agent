@@ -106,6 +106,24 @@ func TestOwnedVolumesRequireCompletePersistedLabelMap(t *testing.T) {
 	}
 }
 
+func TestOwnedVolumesAcceptOnlyEmptyFirstInitializationAnchor(t *testing.T) {
+	project := "nvt-local"
+	configName := plancontract.VolumeName(project, plancontract.GeneratedConfigSuffix)
+	configLabels := platformVolumeLabels(project, configName, "local-platform-state", "generated-config")
+	docker := &resetDocker{project: project, platformVolumes: []string{configName}, labels: map[string]map[string]string{configName: configLabels}}
+	application := app{project: project, docker: docker}
+	names, err := application.ownedObjects(context.Background(), "volume")
+	if err != nil || len(names) != 1 || names[0] != configName {
+		t.Fatalf("interrupted first initialization inventory = %#v, %v", names, err)
+	}
+	brokerName := plancontract.VolumeName(project, "broker-data")
+	docker.platformVolumes = append(docker.platformVolumes, brokerName)
+	docker.labels[brokerName] = platformVolumeLabels(project, brokerName, "broker", "broker-database-audit")
+	if _, err := application.ownedObjects(context.Background(), "volume"); err == nil {
+		t.Fatal("empty inventory with additional platform volumes was accepted")
+	}
+}
+
 type resetDocker struct {
 	project         string
 	plan            []byte

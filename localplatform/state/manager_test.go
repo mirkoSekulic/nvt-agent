@@ -28,6 +28,7 @@ type memoryStore struct {
 	conflict    bool
 	writes      int
 	failVolume  string
+	failCreate  string
 }
 
 func newMemoryStore() *memoryStore {
@@ -48,17 +49,33 @@ func validStateCompiled() manifest.Compiled {
 		Gateway: manifest.GatewayIntent{Owner: "gateway"},
 	}
 }
-func (store *memoryStore) EnsureVolumes(_ context.Context, volumes []Volume) (map[string]bool, error) {
+func (store *memoryStore) ValidateVolumes(_ context.Context, volumes []Volume) (map[string]bool, error) {
 	if store.conflict {
 		return nil, errors.New("conflict")
 	}
-	created := map[string]bool{}
+	existingNames := map[string]bool{}
 	for _, volume := range volumes {
 		if existing, ok := store.volumes[volume.Name]; ok {
 			if !maps.Equal(existing.Labels, volume.Labels) {
 				return nil, errors.New("conflict")
 			}
+			existingNames[volume.Name] = true
+		}
+	}
+	return existingNames, nil
+}
+
+func (store *memoryStore) EnsureVolumes(ctx context.Context, volumes []Volume) (map[string]bool, error) {
+	if _, err := store.ValidateVolumes(ctx, volumes); err != nil {
+		return nil, err
+	}
+	created := map[string]bool{}
+	for _, volume := range volumes {
+		if _, ok := store.volumes[volume.Name]; ok {
 			continue
+		}
+		if volume.Name == store.failCreate {
+			return nil, errors.New("injected create failure")
 		}
 		store.volumes[volume.Name] = volume
 		created[volume.Name] = true
@@ -394,6 +411,31 @@ func TestManagerRejectsOversizedCurrentVolumeInventoryBeforeCreation(t *testing.
 	}
 	if len(store.volumes) != 0 || store.writes != 0 {
 		t.Fatal("oversized current volume inventory changed managed state")
+	}
+}
+
+func TestManagerPublishesInventoryBeforeCreatingOtherVolumes(t *testing.T) {
+	compiled := validStateCompiled()
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	store := newMemoryStore()
+	store.failCreate = "local-test-controller-data"
+	if _, err := (Manager{Store: store}).Ensure(context.Background(), "local-test", compiled, inputs); err == nil {
+		t.Fatal("injected volume creation failure succeeded")
+	}
+	configName := "local-test-generated-config"
+	inventoryData := store.files[configName]["volume-inventory.json"]
+	var inventory plancontract.VolumeInventory
+	if json.Unmarshal(inventoryData, &inventory) != nil || len(inventory.Volumes) == 0 {
+		t.Fatal("ownership inventory was not durable before other volume creation")
+	}
+	expected := map[string]struct{}{}
+	for _, volume := range inventory.Volumes {
+		expected[volume.Name] = struct{}{}
+	}
+	for name := range store.volumes {
+		if _, ok := expected[name]; !ok {
+			t.Fatalf("created volume is absent from durable inventory: %s", name)
+		}
 	}
 }
 

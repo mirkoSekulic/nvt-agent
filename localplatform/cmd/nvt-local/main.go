@@ -311,7 +311,7 @@ func (application app) ownedObjects(ctx context.Context, kind string) ([]string,
 		}
 		names := nonemptyLines(output)
 		if kind == "volume" && queryIndex == 0 && len(names) != 0 {
-			expectedVolumes, err = application.expectedPlatformVolumes(ctx)
+			expectedVolumes, err = application.expectedPlatformVolumes(ctx, names)
 			if err != nil {
 				return nil, err
 			}
@@ -355,7 +355,7 @@ func (application app) ownedObjects(ctx context.Context, kind string) ([]string,
 	return names, nil
 }
 
-func (application app) expectedPlatformVolumes(ctx context.Context) (map[string]map[string]string, error) {
+func (application app) expectedPlatformVolumes(ctx context.Context, platformVolumes []string) (map[string]map[string]string, error) {
 	configVolume := plancontract.VolumeName(application.project, plancontract.GeneratedConfigSuffix)
 	expectedConfigLabels := platformVolumeLabels(application.project, configVolume, "local-platform-state", "generated-config")
 	labels, err := application.objectLabels(ctx, "volume", configVolume)
@@ -369,7 +369,13 @@ func (application app) expectedPlatformVolumes(ctx context.Context) (map[string]
 	}
 	config := plancontract.Volume{Name: configVolume, Owner: "local-platform-state", Role: "generated-config", Labels: expectedConfigLabels}
 	output, err := (state.DockerStore{Docker: application.docker, HelperImage: helperImage}).ReadVolumeInventory(ctx, config)
-	if err != nil || len(output) == 0 || len(output) > state.MaxVolumeInventoryBytes {
+	if err != nil || len(output) > state.MaxVolumeInventoryBytes {
+		return nil, errors.New("refusing local volume reset without an exact-owned state inventory")
+	}
+	if len(output) == 0 {
+		if len(platformVolumes) == 1 && platformVolumes[0] == configVolume {
+			return map[string]map[string]string{configVolume: expectedConfigLabels}, nil
+		}
 		return nil, errors.New("refusing local volume reset without an exact-owned state inventory")
 	}
 	var inventory plancontract.VolumeInventory
