@@ -15,7 +15,23 @@ import (
 )
 
 func TestRenderCompleteComposeWithoutHostAuthoredState(t *testing.T) {
-	path := filepath.Join("..", "..", "nvt.local.example.yaml")
+	examplePath := filepath.Join("..", "..", "nvt.local.example.yaml")
+	example, err := os.ReadFile(examplePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "nvt.local.yaml")
+	secretDirectory := filepath.Join(root, ".nvt-local", "secrets", "github")
+	if err := os.MkdirAll(secretDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretDirectory, "app.pem"), []byte("test-private-input"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, example, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)

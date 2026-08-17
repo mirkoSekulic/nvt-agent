@@ -37,6 +37,15 @@ interactive policy. `read-only` is not accepted because the unchanged runtime
 contract has no enforceable read-only boundary for a root agent with workspace
 and nested-Docker access; silently weakening it to interactive is forbidden.
 
+Profile plugins use a string shorthand for an ordinary builtin plugin, or a
+structured builtin policy with `name`, optional `when`, `restart`, bounded
+public `config`, and `egress.provider`. The egress provider names one account
+allowed by the profile. The controller projection resolves that account to one
+exact broker grant and rejects missing or ambiguous provider bindings. The
+runtime then supplies the plugin process with its provider-scoped mediated
+HTTPS proxy and `NVT_PLUGIN_EGRESS_PROVIDER`; transparent egress never guesses
+which credential provider should authorize a request.
+
 Each repository supplies an HTTPS URL, exact checkout target, optional checkout
 path and upstream, broker repository identity, and optional credential account.
 `github: owner/repository` is shorthand expanded into those exact fields. A
@@ -247,6 +256,11 @@ Review/run workflows terminate on `plugin.work.completed` or
 `plugin.work.failed`; PR-create/continue workflows complete only on
 `plugin.github.pr.merged` or `plugin.github.pr.closed` and therefore ignore a
 work-completed event.
+
+A workstation does not register a pull request automatically. After creating
+a PR, the agent calls `github-watch register`; the `github-watcher` process then
+polls that persisted registration using its profile-declared mediated egress
+provider.
 
 An external OCI producer receives exactly three environment variables:
 

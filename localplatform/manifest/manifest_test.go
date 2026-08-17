@@ -447,6 +447,47 @@ func TestGitHubCommandWorkflowMappingsCompileExactlyAndFailClosed(t *testing.T) 
 	}
 }
 
+func TestProfilePluginShorthandAndStructuredPolicyCompileExactly(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugins := decoded.Profiles["development"].Plugins
+	if len(plugins) != 2 || plugins[0].Name != "work-control" || plugins[0].Egress != nil || plugins[1].Name != "github-watcher" || plugins[1].Egress == nil || plugins[1].Egress.Provider != "github" {
+		t.Fatalf("decoded plugins = %#v", plugins)
+	}
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := compiled.Controller.Profiles[0].Profile.Plugins
+	if len(got) != 2 || got[0].Name != "github-watcher" || got[0].When != "after-agent" || got[0].Restart != "always" || got[0].Egress == nil || got[0].Egress.Provider != "github" || got[1].Name != "work-control" {
+		t.Fatalf("compiled plugins = %#v", got)
+	}
+	for name, replacement := range map[string]string{
+		"unknown provider": "provider: missing",
+		"unknown field":    "provider: github\n          capability: guessed",
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := strings.Replace(string(raw), "provider: github", replacement, 1)
+			if _, err := Decode(strings.NewReader(input)); err == nil {
+				t.Fatal("invalid structured plugin policy was accepted")
+			}
+		})
+	}
+	profile := decoded.Profiles["development"]
+	profile.Plugins = append([]Plugin(nil), profile.Plugins...)
+	profile.Plugins[1].Restart = "sometimes"
+	decoded.Profiles["development"] = profile
+	if err := decoded.Validate(); err == nil {
+		t.Fatal("invalid plugin restart policy was accepted")
+	}
+}
+
 func TestDecodeRejectsDepthAndNodeBounds(t *testing.T) {
 	deep := "apiVersion: nvt.dev/local/v1\nprofiles:\n  p:\n    runtime: {preset: shell, autonomy: approval-required}\nworkflows:\n  w: {profile: p, repository: a/b, retention: disposable}\nproducers:\n  - name: p\n    image: ghcr.io/a/b@sha256:" + strings.Repeat("a", 64) + "\n    workflow: w\n    config:\n      value: " + strings.Repeat("[", MaxDocumentDepth+1) + "null" + strings.Repeat("]", MaxDocumentDepth+1) + "\n"
 	if _, err := Decode(strings.NewReader(deep)); err == nil {

@@ -28,7 +28,15 @@ profiles:
       packages: [jq, git]
       mise: [go@latest]
     capabilities: [SYS_PTRACE]
-    plugins: [github-watcher, work-control]
+    plugins:
+      - work-control
+      - name: github-watcher
+        when: after-agent
+        restart: always
+        egress:
+          provider: github
+        config:
+          poll-seconds: 30
     instructions:
       file: ./.nvt-local/instructions/development.md
 repositories:

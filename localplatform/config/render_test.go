@@ -127,9 +127,6 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		trusted.Profiles[0].Egress.Transport != "transparent" || !trusted.Profiles[0].Egress.AllowInsecureBroker || trusted.Profiles[0].DefaultCredentialProvider != "github" {
 		t.Fatalf("local Docker or mediated transport policy missing: %#v", trusted.Profiles)
 	}
-	if !bytes.Contains(trusted.Profiles[0].AgentConfig, []byte(`"name":"github-watcher"`)) || !bytes.Contains(trusted.Profiles[0].AgentConfig, []byte(`"name":"work-control"`)) {
-		t.Fatalf("explicit workflow plugins are missing from agent config: %s", trusted.Profiles[0].AgentConfig)
-	}
 	githubGrantFound, codexGrantFound := false, false
 	for _, grant := range trusted.Profiles[0].Broker.Grants {
 		if grant.Provider == "codex" {
@@ -152,6 +149,15 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		t.Fatalf("Codex runtime grant is missing: %#v", trusted.Profiles[0].Broker.Grants)
 	}
 	var agentConfig struct {
+		Plugins []struct {
+			Name    string         `json:"name"`
+			When    string         `json:"when"`
+			Restart string         `json:"restart"`
+			Config  map[string]any `json:"config"`
+			Egress  struct {
+				Provider string `json:"provider"`
+			} `json:"egress"`
+		} `json:"plugins"`
 		Runtime struct {
 			Args   []string `json:"args"`
 			Resume struct {
@@ -179,6 +185,23 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	}
 	if err := json.Unmarshal(trusted.Profiles[0].AgentConfig, &agentConfig); err != nil {
 		t.Fatal(err)
+	}
+	pluginByName := map[string]struct {
+		when, restart, provider string
+		config                  map[string]any
+	}{}
+	for _, plugin := range agentConfig.Plugins {
+		pluginByName[plugin.Name] = struct {
+			when, restart, provider string
+			config                  map[string]any
+		}{plugin.When, plugin.Restart, plugin.Egress.Provider, plugin.Config}
+	}
+	watcher := pluginByName["github-watcher"]
+	if watcher.when != "after-agent" || watcher.restart != "always" || watcher.provider != "github" || fmt.Sprint(watcher.config["poll-seconds"]) != "30" {
+		t.Fatalf("mediated github-watcher plugin policy = %#v", watcher)
+	}
+	if workControl, exists := pluginByName["work-control"]; !exists || workControl.provider != "" {
+		t.Fatalf("ordinary work-control plugin policy = %#v", workControl)
 	}
 	if got := agentConfig.Runtime.Resume.Args; len(got) != 3 || got[0] != "resume" || got[1] != "--last" || got[2] != "--dangerously-bypass-approvals-and-sandbox" {
 		t.Fatalf("Codex resume command is incomplete: %#v", got)
@@ -275,8 +298,8 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serviceconfig.Controller(ambiguous, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil || !bytes.Contains([]byte(err.Error()), []byte("default credential provider is ambiguous")) {
-		t.Fatalf("multi-installation default policy did not fail closed: %v", err)
+	if _, err := serviceconfig.Controller(ambiguous, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil || !bytes.Contains([]byte(err.Error()), []byte("plugin egress provider is ambiguous")) {
+		t.Fatalf("multi-installation plugin egress policy did not fail closed: %v", err)
 	}
 }
 

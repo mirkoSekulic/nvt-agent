@@ -66,6 +66,56 @@ plugins:
 	}
 }
 
+func TestPluginEgressLetsGithubWatcherUseMediatedTransportWithoutDirectProvider(t *testing.T) {
+	f := newFixture(t)
+	f.writePluginEgressRuntime("github-main")
+	command := f.writeTool("mediated-github-watcher", fmt.Sprintf(`#!/usr/bin/env python3
+import importlib.util
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(%s)
+module_path = root / "runtime" / "plugins" / "github-watcher" / "github_watcher_lib.py"
+sys.path.insert(0, str(module_path.parent))
+spec = importlib.util.spec_from_file_location("github_watcher_lib", module_path)
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
+
+class Response:
+    def __enter__(self): return self
+    def __exit__(self, *_args): return False
+    def read(self): return b'{"ok":true}'
+
+requests = []
+def fake_urlopen(request, timeout):
+    requests.append(request)
+    return Response()
+
+lib.urlopen = fake_urlopen
+if os.environ.get("NVT_PLUGIN_EGRESS_PROVIDER") != "github-main":
+    raise SystemExit("mediated plugin provider was not installed")
+if lib.github_request("/repos/example/repository/pulls/1", "") != {"ok": True}:
+    raise SystemExit("unexpected watcher response")
+if len(requests) != 1 or requests[0].get_header("Authorization") is not None:
+    raise SystemExit("watcher did not use credential-free mediated transport")
+`, quoteYAML(f.root)))
+	config := f.writeAgentConfig(fmt.Sprintf(`
+plugins:
+  - name: github-watcher
+    source: custom
+    command: %s
+    when: after-agent
+    restart: never
+    egress:
+      provider: github-main
+`, quoteYAML(command)))
+	f.runWithEnv(runPluginsBin(f.root), true, []string{
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_FORWARD_PROXY_URL_GITHUB_MAIN=http://github-main@127.0.0.1:8470",
+	}, "after-agent", config)
+}
+
 func TestPluginEgressAbsentAndDirectModesAreUnchanged(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("plugin-egress-exec", "#!/usr/bin/env bash\nexec python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "plugin-egress-exec.py"))+" \"$@\"\n")

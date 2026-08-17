@@ -260,8 +260,25 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		return resolvedrun.Profile{}, errors.New("compiled runtime preset is invalid")
 	}
 	plugins := make([]any, 0, len(intent.Profile.Plugins))
-	for _, name := range intent.Profile.Plugins {
-		plugins = append(plugins, map[string]any{"name": name, "source": "builtin"})
+	for _, plugin := range intent.Profile.Plugins {
+		rendered := map[string]any{"name": plugin.Name, "source": "builtin"}
+		if plugin.When != "" {
+			rendered["when"] = plugin.When
+		}
+		if plugin.Restart != "" {
+			rendered["restart"] = plugin.Restart
+		}
+		if len(plugin.Config) != 0 {
+			rendered["config"] = plugin.Config
+		}
+		if plugin.Egress != nil {
+			provider, err := pluginEgressProvider(intent, plugin.Egress.Provider, accounts, repositories)
+			if err != nil {
+				return resolvedrun.Profile{}, err
+			}
+			rendered["egress"] = map[string]any{"provider": provider}
+		}
+		plugins = append(plugins, rendered)
 	}
 	codeServerEnabled := intent.Profile.Editor.Preset != "none"
 	codeServer := map[string]any{
@@ -362,6 +379,33 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		profile.Egress.MaxConcurrentTunnels = 128
 	}
 	return profile, nil
+}
+
+func pluginEgressProvider(intent manifest.ControllerProfileIntent, account string, accounts map[string]manifest.Account, repositories map[string]manifest.ControllerRepositoryIntent) (string, error) {
+	provider := ""
+	for _, grant := range intent.BrokerGrants {
+		if grant.Account != account {
+			continue
+		}
+		candidates := []string{account}
+		if grant.Purpose != "runtime-injection" {
+			candidates = candidates[:0]
+			for _, repositoryName := range grant.Repositories {
+				repository := brokerRepositoryByIdentity(repositories, repositoryName, account)
+				candidates = append(candidates, providerFor(account, repository.BrokerRepository, accounts[account]))
+			}
+		}
+		for _, candidate := range candidates {
+			if provider != "" && provider != candidate {
+				return "", errors.New("compiled plugin egress provider is ambiguous")
+			}
+			provider = candidate
+		}
+	}
+	if provider == "" {
+		return "", errors.New("compiled plugin egress provider is unavailable")
+	}
+	return provider, nil
 }
 
 func runtimePreseed(runtimeType string) map[string]any {

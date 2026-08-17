@@ -158,12 +158,19 @@ func Compile(m Manifest) (Compiled, error) {
 		profile.Tools.Packages = append([]string(nil), profile.Tools.Packages...)
 		profile.Tools.Mise = append([]string(nil), profile.Tools.Mise...)
 		profile.Capabilities = append([]string(nil), profile.Capabilities...)
-		profile.Plugins = append([]string(nil), profile.Plugins...)
+		profile.Plugins = append([]Plugin(nil), profile.Plugins...)
+		for index := range profile.Plugins {
+			profile.Plugins[index].Config = cloneConfig(profile.Plugins[index].Config)
+			if profile.Plugins[index].Egress != nil {
+				egress := *profile.Plugins[index].Egress
+				profile.Plugins[index].Egress = &egress
+			}
+		}
 		sort.Strings(profile.Accounts)
 		sort.Strings(profile.Tools.Packages)
 		sort.Strings(profile.Tools.Mise)
 		sort.Strings(profile.Capabilities)
-		sort.Strings(profile.Plugins)
+		sort.Slice(profile.Plugins, func(i, j int) bool { return profile.Plugins[i].Name < profile.Plugins[j].Name })
 		grants := compileBrokerGrants(m, name)
 		result.Broker.Profiles = append(result.Broker.Profiles, BrokerProfileIntent{Name: name, Accounts: append([]string(nil), profile.Accounts...), Grants: grants})
 		controllerProfile := ControllerProfileIntent{Name: name, Profile: profile, DefaultCredentialProvider: defaultRepositoryAccount(m, name), EgressProxyProvider: profile.Runtime.Account, BrokerGrants: cloneBrokerGrants(grants)}
@@ -341,6 +348,32 @@ func sortedMap[T any](input map[string]T) map[string]T {
 		result[key] = input[key]
 	}
 	return result
+}
+
+func cloneConfig(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	result := make(map[string]any, len(input))
+	for key, value := range input {
+		result[key] = cloneConfigValue(value)
+	}
+	return result
+}
+
+func cloneConfigValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneConfig(typed)
+	case []any:
+		result := make([]any, len(typed))
+		for index := range typed {
+			result[index] = cloneConfigValue(typed[index])
+		}
+		return result
+	default:
+		return value
+	}
 }
 
 // CanonicalJSON is the stable serialization used for equality, hashing, and

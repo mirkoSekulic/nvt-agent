@@ -71,7 +71,34 @@ type Profile struct {
 	Capabilities             []string `json:"capabilities,omitempty"`
 	Instructions             *FileRef `json:"instructions,omitempty"`
 	Editor                   Editor   `json:"editor,omitempty"`
-	Plugins                  []string `json:"plugins,omitempty"`
+	Plugins                  []Plugin `json:"plugins,omitempty"`
+}
+
+type Plugin struct {
+	Name    string         `json:"name"`
+	When    string         `json:"when,omitempty"`
+	Restart string         `json:"restart,omitempty"`
+	Config  map[string]any `json:"config,omitempty"`
+	Egress  *PluginEgress  `json:"egress,omitempty"`
+}
+
+type PluginEgress struct {
+	Provider string `json:"provider"`
+}
+
+func (p *Plugin) UnmarshalJSON(data []byte) error {
+	var shorthand string
+	if err := json.Unmarshal(data, &shorthand); err == nil {
+		*p = Plugin{Name: shorthand}
+		return nil
+	}
+	type plain Plugin
+	var value plain
+	if err := strictJSON(data, &value); err != nil {
+		return err
+	}
+	*p = Plugin(value)
+	return nil
 }
 
 type Runtime struct {
@@ -320,8 +347,21 @@ func (m Manifest) Validate() error {
 		if err := uniqueStrings(profile.Capabilities); err != nil {
 			return err
 		}
-		if err := uniqueStrings(profile.Plugins); err != nil {
-			return err
+		seenPlugins := map[string]struct{}{}
+		for _, plugin := range profile.Plugins {
+			if !validName(plugin.Name) || !oneOf(plugin.When, "", "before-agent", "after-agent") || !oneOf(plugin.Restart, "", "never", "on-failure", "always") {
+				return fmt.Errorf("profile %q has an invalid plugin", name)
+			}
+			if _, duplicate := seenPlugins[plugin.Name]; duplicate {
+				return fmt.Errorf("profile %q has duplicate plugin %q", name, plugin.Name)
+			}
+			seenPlugins[plugin.Name] = struct{}{}
+			if err := validateConfig(plugin.Config, 0); err != nil {
+				return fmt.Errorf("profile %q plugin %q config: %w", name, plugin.Name, err)
+			}
+			if plugin.Egress != nil && (!has(m.Accounts, plugin.Egress.Provider) || !contains(profile.Accounts, plugin.Egress.Provider)) {
+				return fmt.Errorf("profile %q plugin %q has an invalid egress provider", name, plugin.Name)
+			}
 		}
 		if profile.Instructions != nil && !safeRelativePath(profile.Instructions.File, "") {
 			return fmt.Errorf("profile %q has unsafe instruction path", name)
