@@ -289,7 +289,7 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, profile := range m.Profiles {
-		if !validRunIDName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required", "read-only") {
+		if !validRunIDName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required") {
 			return fmt.Errorf("invalid profile %q", name)
 		}
 		if err := uniqueRefs(profile.Accounts, m.Accounts, "account"); err != nil {

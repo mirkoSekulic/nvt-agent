@@ -203,10 +203,10 @@ class StaticTokenProvider:
             if method not in {"GET", "POST", "PATCH"}:
                 raise ProviderError("method-not-allowed")
             return self.normalize_target(f"https://{host}/{parts[0]}/{parts[1]}/_git/{parts[5]}")
-        elif host == "github.com" and len(parts) >= 3 and parts[0] == "repos":
+        elif host in {"github.com", "api.github.com"} and len(parts) >= 3 and parts[0] == "repos":
             if method not in {"GET", "POST", "PATCH"}:
                 raise ProviderError("method-not-allowed")
-            return self.normalize_target(f"https://{host}/{parts[1]}/{parts[2]}")
+            return self.normalize_target(f"https://github.com/{parts[1]}/{parts[2]}")
         else:
             raise ProviderError("path-not-allowed")
         if method != expected_method:

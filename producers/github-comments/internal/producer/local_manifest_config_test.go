@@ -22,7 +22,7 @@ accounts:
     installations: {acme: "456"}
 profiles:
   development:
-    runtime: {preset: shell, autonomy: read-only}
+    runtime: {preset: shell, autonomy: approval-required}
     accounts: [github]
 repositories:
   widget: {github: acme/widget, account: github}

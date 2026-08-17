@@ -24,7 +24,7 @@ func TestLocalManifestProducerNameMatchesScheduleValidator(t *testing.T) {
 	const raw = `apiVersion: nvt.dev/local/v1
 profiles:
   engineering:
-    runtime: {preset: shell, autonomy: read-only}
+    runtime: {preset: shell, autonomy: approval-required}
 repositories:
   widget:
     url: https://example.test/acme/widget.git

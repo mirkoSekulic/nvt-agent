@@ -37,6 +37,7 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	}
 	for _, expected := range [][]byte{
 		[]byte(`"private-key-file":"` + plancontract.PrivateTarget("github-key") + `"`),
+		[]byte(`"injection-hosts":["github.com","api.github.com"]`),
 		[]byte(`"token-file":"` + plancontract.PrivateTarget("azure-token") + `"`),
 		[]byte(`"app-id":3912708`),
 		[]byte(`"installation-id":123`),
@@ -74,6 +75,18 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	if len(trusted.Profiles) != 1 || trusted.Profiles[0].Runtime == nil || trusted.Profiles[0].Runtime.Docker == nil ||
 		trusted.Profiles[0].Egress.Transport != "transparent" || !trusted.Profiles[0].Egress.AllowInsecureBroker || trusted.Profiles[0].DefaultCredentialProvider != "github" {
 		t.Fatalf("local Docker or mediated transport policy missing: %#v", trusted.Profiles)
+	}
+	githubGrantFound := false
+	for _, grant := range trusted.Profiles[0].Broker.Grants {
+		if grant.Provider == "github" {
+			githubGrantFound = true
+			if strings.Join(grant.EgressHosts, ",") != "github.com:443,api.github.com:443" {
+				t.Fatalf("GitHub grant omitted the API injection route: %#v", grant)
+			}
+		}
+	}
+	if !githubGrantFound {
+		t.Fatalf("GitHub repository grant is missing: %#v", trusted.Profiles[0].Broker.Grants)
 	}
 	var agentConfig struct {
 		Runtime struct {
@@ -116,6 +129,12 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	}
 	if _, err := serviceconfig.Controller(overpopulated, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil {
 		t.Fatal("controller projection accepted too many native workstations")
+	}
+	readOnly := compiled
+	readOnly.Controller.Profiles = append([]manifest.ControllerProfileIntent(nil), compiled.Controller.Profiles...)
+	readOnly.Controller.Profiles[0].Profile.Runtime.Autonomy = "read-only"
+	if _, err := serviceconfig.Controller(readOnly, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil || !strings.Contains(err.Error(), "compiled runtime autonomy is unsupported") {
+		t.Fatalf("unsupported compiled read-only autonomy did not fail closed: %v", err)
 	}
 	github := decoded.Accounts["github"]
 	github.Installations["other"] = "456"

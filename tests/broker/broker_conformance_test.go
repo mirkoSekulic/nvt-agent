@@ -533,6 +533,7 @@ providers:
       api-url: %[1]q
       injection-hosts:
         - github.com
+        - api.github.com
     allow:
       repositories:
 %[4]s      permissions:
@@ -584,6 +585,7 @@ providers:
       token-env: TEST_PAT_TOKEN
       injection-hosts:
         - github.com
+        - api.github.com
       injection-basic-username: git
       injection-git: true
     allow:

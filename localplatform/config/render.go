@@ -205,9 +205,14 @@ func validateNativeProjection(configuration nativeConfiguration) error {
 
 func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]manifest.Account, repositories map[string]manifest.ControllerRepositoryIntent, instructions string) (resolvedrun.Profile, error) {
 	runtimeType := intent.Profile.Runtime.Preset
-	autonomy := "interactive"
-	if intent.Profile.Runtime.Autonomy == "trusted-local" {
+	autonomy := ""
+	switch intent.Profile.Runtime.Autonomy {
+	case "trusted-local":
 		autonomy = "trusted-local"
+	case "approval-required":
+		autonomy = "interactive"
+	default:
+		return resolvedrun.Profile{}, errors.New("compiled runtime autonomy is unsupported")
 	}
 	command := runtimeType
 	args := []string{}
@@ -339,11 +344,11 @@ func runtimeGrant(provider, preset string) resolvedrun.BrokerGrant {
 }
 
 func repositoryGrant(provider, preset string, repositories []string) resolvedrun.BrokerGrant {
-	host := "github.com:443"
+	hosts := []string{"github.com:443", "api.github.com:443"}
 	if preset == "azure-devops-pat" {
-		host = "dev.azure.com:443"
+		hosts = []string{"dev.azure.com:443"}
 	}
-	grant := resolvedrun.BrokerGrant{Provider: provider, Repositories: repositories, Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: []string{host}, Git: true}
+	grant := resolvedrun.BrokerGrant{Provider: provider, Repositories: repositories, Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: hosts, Git: true}
 	if preset == "github-app" {
 		grant.Preparations = []string{"identity"}
 		grant.Permissions = map[string]string{"contents": "write"}
@@ -388,16 +393,16 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 				}
 				allowed := brokerRepositoriesFor(compiled, named.Name, owner)
 				providers = append(providers, map[string]any{"name": provider, "plugin": "github-app", "config": map[string]any{
-					"app-id": appID, "installation-id": installationID, "private-key-file": plancontract.PrivateTarget(account.PrivateKeySecret), "injection-hosts": []string{"github.com"},
+					"app-id": appID, "installation-id": installationID, "private-key-file": plancontract.PrivateTarget(account.PrivateKeySecret), "injection-hosts": []string{"github.com", "api.github.com"},
 				}, "allow": map[string]any{"repositories": allowed, "permissions": map[string]string{"contents": "write", "pull_requests": "write", "workflows": "write"}, "methods": []string{"GET", "POST", "PUT", "PATCH", "DELETE"}}})
 			}
 		case "github-pat", "azure-devops-pat":
-			host, mode := "github.com", "github"
+			hosts, mode := []string{"github.com", "api.github.com"}, "github"
 			if account.Preset == "azure-devops-pat" {
-				host, mode = "dev.azure.com", "literal"
+				hosts, mode = []string{"dev.azure.com"}, "literal"
 			}
 			providers = append(providers, map[string]any{"name": named.Name, "plugin": "token", "config": map[string]any{
-				"token-file": plancontract.PrivateTarget(account.TokenSecret), "injection-hosts": []string{host}, "injection-git": true, "injection-basic-username": "git", "target-mode": mode,
+				"token-file": plancontract.PrivateTarget(account.TokenSecret), "injection-hosts": hosts, "injection-git": true, "injection-basic-username": "git", "target-mode": mode,
 			}, "allow": map[string]any{"repositories": brokerRepositoriesFor(compiled, named.Name, "")}})
 		default:
 			return nil, errors.New("compiled broker account preset is invalid")

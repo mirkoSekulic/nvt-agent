@@ -31,6 +31,12 @@ runtime account. The projection duplicates preset identities and exact grants,
 allowing local preset packaging to render the existing resolved-run profile
 without consulting the broker-owned section.
 
+Runtime autonomy is either `trusted-local`, which renders the provider-native
+local bypass flags, or `approval-required`, which renders the native
+interactive policy. `read-only` is not accepted because the unchanged runtime
+contract has no enforceable read-only boundary for a root agent with workspace
+and nested-Docker access; silently weakening it to interactive is forbidden.
+
 Each repository supplies an HTTPS URL, exact checkout target, optional checkout
 path and upstream, broker repository identity, and optional credential account.
 `github: owner/repository` is shorthand expanded into those exact fields. A

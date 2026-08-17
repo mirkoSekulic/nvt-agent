@@ -41,7 +41,7 @@ func validStateCompiled() manifest.Compiled {
 		Broker:  manifest.BrokerIntent{Owner: "broker"},
 		Controller: manifest.ControllerIntent{
 			Owner:        "local-controller",
-			Profiles:     []manifest.ControllerProfileIntent{{Name: "profile", Profile: manifest.Profile{Runtime: manifest.Runtime{Preset: "shell", Autonomy: "read-only"}}}},
+			Profiles:     []manifest.ControllerProfileIntent{{Name: "profile", Profile: manifest.Profile{Runtime: manifest.Runtime{Preset: "shell", Autonomy: "approval-required"}}}},
 			Repositories: []manifest.ControllerRepositoryIntent{{Name: "repository", URL: "https://github.com/example/repository.git", CheckoutTarget: "github.com/example/repository"}},
 			Workflows:    []manifest.NamedWorkflow{{Name: "workflow", Workflow: manifest.Workflow{Profile: "profile", Repository: "repository", Retention: "disposable"}}},
 			Workstations: []manifest.Workstation{{Name: "workstation", Profile: "profile"}},
@@ -450,7 +450,7 @@ func TestManagerRejectsExpandedGeneratedFileBeforeVolumeCreation(t *testing.T) {
 	for index := 0; index < manifest.MaxItems; index++ {
 		name := fmt.Sprintf("profile-%03d", index)
 		document.Profiles[name] = manifest.Profile{
-			Runtime:      manifest.Runtime{Preset: "shell", Autonomy: "read-only"},
+			Runtime:      manifest.Runtime{Preset: "shell", Autonomy: "approval-required"},
 			Instructions: &manifest.FileRef{File: instructionPath},
 		}
 	}

@@ -326,7 +326,9 @@ func TestGitInjectionAPIPathUsesBearerDialect(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(gitIdentities(nil))
 
-	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", gitInjectionRequest("GET", "/repos/my-user/my-repo/pulls/123"))
+	request := gitInjectionRequest("GET", "/repos/my-user/my-repo/pulls/123")
+	request["host"] = "api.github.com"
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request)
 	if status != http.StatusOK || body["ok"] != true {
 		t.Fatalf("API path injection denied: status=%d body=%v", status, body)
 	}
@@ -464,7 +466,7 @@ func TestGitInjectionRoutingAdvertisesGit(t *testing.T) {
 		t.Fatalf("git-capable provider routing must set git: true, got %v", body)
 	}
 	hosts, _ := body["hosts"].([]any)
-	if len(hosts) != 1 || hosts[0] != "github.com" {
+	if len(hosts) != 2 || hosts[0] != "github.com" || hosts[1] != "api.github.com" {
 		t.Fatalf("unexpected routing hosts %v", body["hosts"])
 	}
 
@@ -532,6 +534,7 @@ func TestStaticPATInjectionEnforcesRepositoryScope(t *testing.T) {
 	if status != http.StatusOK || body["ok"] != true {
 		t.Fatalf("scoped GitHub PAT fetch was denied: status=%d body=%v", status, body)
 	}
+	githubRequest["host"] = "api.github.com"
 	for _, operation := range []struct {
 		method string
 		path   string
