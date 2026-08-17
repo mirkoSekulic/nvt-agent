@@ -320,6 +320,24 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 	names := namesFor(backend.config, desired.Resolved.RunID, desired.SnapshotDigest)
 	operationContext, cancel := context.WithTimeout(ctx, backend.config.OperationTimeout)
 	defer cancel()
+	if desired.Resolved.Egress.Mode == "mediated" {
+		check, checkErr := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "run", "--rm", "-e", "NVT_EGRESS_CA_CHECK_ONLY=1", "ca-init")
+		if checkErr != nil {
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
+		}
+		if strings.Contains(string(check), "renewal-required") {
+			if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "stop", "agent", "egressd"); err != nil {
+				return controller.BackendObservation{}, controller.ErrBackendRetryable
+			}
+			if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "run", "--rm", "ca-init"); err != nil {
+				return controller.BackendObservation{}, controller.ErrBackendRetryable
+			}
+			if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d", "--force-recreate", "egressd", "agent"); err != nil {
+				return controller.BackendObservation{}, controller.ErrBackendRetryable
+			}
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
+		}
+	}
 	output, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "ps", "--all", "-q", "agent")
 	if err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable

@@ -41,6 +41,7 @@ type fakeDocker struct {
 	gatewayStatus   string
 	gatewayHealth   string
 	failComposeUp   int
+	caRenewal       bool
 	failRemove      string
 	lifecycleEvents []string
 	lifecycleCursor string
@@ -165,6 +166,18 @@ func labelsMatchFilters(labels map[string]string, arguments []string) bool {
 }
 
 func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
+	if contains(arguments, "run") && contains(arguments, "ca-init") {
+		if contains(arguments, "NVT_EGRESS_CA_CHECK_ONLY=1") && docker.caRenewal {
+			return []byte("renewal-required\n"), nil
+		}
+		if !contains(arguments, "NVT_EGRESS_CA_CHECK_ONLY=1") {
+			docker.caRenewal = false
+		}
+		return nil, nil
+	}
+	if contains(arguments, "stop") {
+		return nil, nil
+	}
 	if contains(arguments, "up") {
 		if docker.failComposeUp > 0 {
 			docker.failComposeUp--
@@ -674,6 +687,36 @@ func TestDockerBackendInspectionClassifiesLifecycleWithoutDiagnostics(t *testing
 				t.Fatalf("lifecycle observation = %#v, %v", observation, err)
 			}
 		})
+	}
+}
+
+func TestDockerBackendInspectionCoordinatesCARotation(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64)}
+	if _, err := backend.Ensure(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	docker.commands = nil
+	docker.caRenewal = true
+	if _, err := backend.Inspect(context.Background(), desired); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("rotation inspection error = %v", err)
+	}
+	joined := make([]string, 0, len(docker.commands))
+	for _, command := range docker.commands {
+		joined = append(joined, strings.Join(command, " "))
+	}
+	want := []string{"NVT_EGRESS_CA_CHECK_ONLY=1", " stop agent egressd", " run --rm ca-init", "--force-recreate egressd agent"}
+	position := 0
+	for _, command := range joined {
+		if position < len(want) && strings.Contains(command, want[position]) {
+			position++
+		}
+	}
+	if position != len(want) {
+		t.Fatalf("rotation was not ordered check/stop/rotate/recreate: %v", joined)
+	}
+	if docker.caRenewal {
+		t.Fatal("rotation did not clear renewal state")
 	}
 }
 

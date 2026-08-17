@@ -47,6 +47,104 @@ func TestInitializeAgentRunStatusSetsPendingForEmptyPhase(t *testing.T) {
 	}
 }
 
+func TestValidateCAKeyPairValidityWindows(t *testing.T) {
+	base := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	data, err := generateEgressCASecretDataAt([]string{"run-egressd"}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		now     time.Time
+		wantErr bool
+	}{
+		{name: "valid", now: base},
+		{name: "near expiry", now: base.Add(egressCAValidity - egressCARenewalMargin), wantErr: true},
+		{name: "expired", now: base.Add(egressCAValidity + time.Second), wantErr: true},
+		{name: "not yet valid", now: base.Add(-6 * time.Minute), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := validateCAKeyPairPEMAt(data[egressCACertKey], data[egressCAKeyKey], tc.now)
+			if (got != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr %v", got, tc.wantErr)
+			}
+		})
+	}
+	if err := validateCAKeyPairPEMAt(data[egressCACertKey], []byte("malformed"), base); err == nil {
+		t.Fatal("malformed key accepted")
+	}
+}
+
+func TestReconcileRotatesEgressCAWithoutMixedPodGenerations(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	run := enforcedAgentRun()
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(run, testBrokerAgentsConfigMap(run.Namespace)).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, Now: func() metav1.Time { return metav1.NewTime(now) }}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	markPodReady(ctx, t, k8sClient, run.Namespace, EgressdPodName(run.Name))
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	var oldSecret corev1.Secret
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: EgressCASecretName(run.Name)}, &oldSecret); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(egressCAValidity - egressCARenewalMargin)
+	for i := 0; i < 3; i++ {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{AgentPodName(run.Name), EgressdPodName(run.Name)} {
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: name}, &corev1.Pod{}); !errors.IsNotFound(err) {
+			t.Fatalf("stale consumer Pod %s survived rotation: %v", name, err)
+		}
+	}
+	var rotated corev1.Secret
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: EgressCASecretName(run.Name)}, &rotated); err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Annotations[egressCAGenerationAnnotation] != "2" || rotated.Annotations[egressCADigestAnnotation] == oldSecret.Annotations[egressCADigestAnnotation] {
+		t.Fatalf("CA generation did not advance: %#v", rotated.Annotations)
+	}
+	if strings.Contains(string(rotated.Data[egressCACertKey]), "PRIVATE KEY") {
+		t.Fatal("public CA contains private key")
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	var egressd corev1.Pod
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: EgressdPodName(run.Name)}, &egressd); err != nil {
+		t.Fatal(err)
+	}
+	if egressd.Annotations[egressCAGenerationAnnotation] != "2" {
+		t.Fatalf("egressd generation = %#v", egressd.Annotations)
+	}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: AgentPodName(run.Name)}, &corev1.Pod{}); !errors.IsNotFound(err) {
+		t.Fatal("agent was created before replacement CA publication")
+	}
+	markPodReady(ctx, t, k8sClient, run.Namespace, EgressdPodName(run.Name))
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	var agent corev1.Pod
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: AgentPodName(run.Name)}, &agent); err != nil {
+		t.Fatal(err)
+	}
+	if agent.Annotations[egressCAGenerationAnnotation] != "2" {
+		t.Fatalf("agent generation = %#v", agent.Annotations)
+	}
+}
+
 func TestInitializeAgentRunStatusKeepsExistingPhase(t *testing.T) {
 	agentRun := &nvtv1alpha1.AgentRun{
 		Status: nvtv1alpha1.AgentRunStatus{Phase: nvtv1alpha1.AgentRunPhaseRunning},

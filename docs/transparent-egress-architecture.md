@@ -15,6 +15,28 @@ This is narrower than "every packet traverses egressd." Loopback, cluster DNS,
 and explicitly approved control-plane traffic are excluded. UDP is not
 currently proxied.
 
+## Egress CA lifecycle
+
+Per-run egress CAs are valid for 30 days and renew seven days before expiry.
+The certificate digest and a monotonically increasing generation identify the
+trust anchor; private keys remain only in the local private volume or the
+operator-owned Secret and are never projected into an agent.
+
+Local Compose starts a one-shot initializer before egressd and the agent. It
+rotates a near-expiry durable keypair in the named private/public volumes and
+uses a non-secret marker to recover an interruption between file replacements.
+Named volumes ensure the keypair paths are regular files rather than bind-mount
+directories. Workspace and home volumes are independent and remain intact.
+
+For Kubernetes, the controller schedules reconciliation at the renewal
+boundary. It deletes both old-generation Pods before atomically replacing the
+Secret, then starts egressd with the new generation, publishes the matching
+public certificate ConfigMap, and only then recreates the agent Pod. Generation
+and digest annotations make the sequence level-triggered after controller or
+Pod restarts. `EgressCAPublished=False` with reason `EgressCARotating` exposes
+the temporary state. Persistent workspace, home, and Docker PVCs are not
+deleted during this rollout. Malformed or unconstrained keypairs fail closed.
+
 ## Trust Boundaries
 
 ```mermaid
