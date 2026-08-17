@@ -208,9 +208,12 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			)
 			continue
 		}
-		issueComments, err := p.GitHub.ListIssueComments(ctx, repo, issueNumber)
-		if err != nil {
-			return fmt.Errorf("list issue comments %s#%d: %w", key, issueNumber, err)
+		var issueComments []GitHubIssueComment
+		if !isCooperativeIntent(command.Intent) {
+			issueComments, err = p.GitHub.ListIssueComments(ctx, repo, issueNumber)
+			if err != nil {
+				return fmt.Errorf("list issue comments %s#%d: %w", key, issueNumber, err)
+			}
 		}
 		result, err := p.Submitter.submitWithOutcome(ctx, repo, issue, issueComments, comment, command)
 		created := result.Created
@@ -235,6 +238,8 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			reason := "schedule-admission-rejected"
 			if errors.Is(err, errCommandDisabled) {
 				reason = "command-disabled"
+			} else if errors.Is(err, errCommandPromptTooLarge) {
+				reason = "command-prompt-too-large"
 			}
 			p.Logger.Info(
 				"processed definitive schedule admission rejection",

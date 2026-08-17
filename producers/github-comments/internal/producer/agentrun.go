@@ -175,6 +175,9 @@ func (s AgentRunSubmitter) submitDirect(
 
 const githubPrincipalIssuer = "https://github.com"
 const maxScheduleAdmissionResponseBytes = 64 * 1024
+const maxResolvedRunPromptBytes = 64 * 1024
+
+var errCommandPromptTooLarge = errors.New("command prompt exceeds 65536-byte resolved-run admission limit")
 
 type legacyScheduleAdmissionRequest struct {
 	Work     scheduleAdmissionWork `json:"work"`
@@ -238,6 +241,9 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 ) (submissionResult, error) {
 	payload, token, err := s.scheduleAdmissionPayload(repo, issue, comments, commandComment, command, identity)
 	if err != nil {
+		if errors.Is(err, errCommandPromptTooLarge) {
+			return submissionResult{Outcome: schedulingOutcomeRejected}, err
+		}
 		return submissionResult{}, err
 	}
 	body, err := json.Marshal(payload)
@@ -431,6 +437,10 @@ func (s AgentRunSubmitter) scheduleAdmissionPayload(
 		if workflowErr != nil {
 			return nil, "", workflowErr
 		}
+		prompt := buildPrompt(repo, issue, comments, commandComment, command)
+		if isCooperativeIntent(command.Intent) && len([]byte(prompt)) > maxResolvedRunPromptBytes {
+			return nil, "", errCommandPromptTooLarge
+		}
 		return profiledScheduleAdmissionRequest{
 			Workflow: workflow,
 			Work: profiledScheduleAdmissionWork{
@@ -446,7 +456,7 @@ func (s AgentRunSubmitter) scheduleAdmissionPayload(
 				},
 			},
 			Input: profiledScheduleAdmissionInput{
-				Prompt: buildPrompt(repo, issue, comments, commandComment, command),
+				Prompt: prompt,
 			},
 		}, token, nil
 	}
@@ -624,6 +634,7 @@ func buildPrompt(
 	}
 	return BuildPrompt(PromptInput{
 		Intent:        command.Intent,
+		IsPullRequest: issue.PullRequest != nil,
 		CommandPrefix: command.Prefix,
 		Owner:         repo.Owner,
 		Repo:          repo.Name,
