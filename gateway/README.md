@@ -9,6 +9,46 @@ defaults to deny whenever authentication is enabled.
 `auth.mode=none` remains the default and preserves unrestricted access to all
 routable AgentRuns, including legacy runs.
 
+## Optional local runs
+
+The local Compose control plane enables the gateway as the only public route
+for controller-owned local runs. The gateway consumes bounded
+[`nvt.local-routes/v1`](../protocol/local-routes.md) metadata over the private
+control-plane network. The trusted local controller exact-label verifies the
+fixed gateway container and attaches it to each exact-owned run network. Route
+metadata supplies only a bounded internal DNS target and port; it never accepts
+an upstream URL, credential, provider, or browser-selected proxy target.
+
+Stable session routes are available at `/agents/<run-id>/` and
+`<run-id>.agent.localhost`; named application exposures use
+`<name>.<run-id>.agent.localhost` without base-path rewriting. Session paths
+preserve WebSocket upgrades and strip only the stable run prefix. Public host
+and path routes terminate at the gateway. Run agents do not join the shared
+proxy bridge or sibling run networks, and no private Traefik entrypoint is
+reachable from them; the gateway owner check therefore remains the only route
+to another run. When authentication is enabled, listing and routing use the
+same exact issuer+immutable-subject owner policy as Kubernetes AgentRuns.
+The local Compose router also forwards the gateway-owned `/oauth2` endpoints;
+repository and run traffic cannot register or override those routes.
+
+Local route support is opt-in through `NVT_GATEWAY_LOCAL_RUNS_ENABLED`; the
+controller origin, base domain, path prefix, and complete request timeout are
+startup-validated. `NVT_GATEWAY_LOCAL_RUNS_TOKEN_FILE` names the private,
+read-only route-audience bearer; the gateway sends it only to the configured
+controller origin and cannot use it for scheduling or raw run management.
+`NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES`
+is valid only with local runs and is used by the Compose-local gateway. With
+local support omitted, Kubernetes discovery, dashboards, authorization, and
+proxying are unchanged.
+
+## Optional credential portal link
+
+`NVT_GATEWAY_CREDENTIAL_PORTAL_URL` (or `--credential-portal-url`) adds one
+dashboard link with the label from `NVT_GATEWAY_CREDENTIAL_PORTAL_LABEL`. The
+URL must be canonical root-relative or absolute HTTPS. When unset, dashboard
+output is unchanged. This is link-only: the gateway does not proxy portal APIs,
+share sessions, inspect credential state, or depend on portal availability.
+
 The gateway embeds its default public logo assets. Deployments may set
 `NVT_GATEWAY_BRANDING_DIR` (or `--branding-dir`) to an absolute directory
 containing the documented fixed branding files; assets are validated and
@@ -222,8 +262,19 @@ are rejected, and only the selected non-sensitive JSON value is retained under
 a new safe top-level claim. Source failures, missing/ambiguous values, output
 collisions, malformed or oversized responses, and timeouts fail login closed.
 Access tokens and raw responses are never stored in sessions or cookies.
+The gateway policy and enrichment implementation are shared with the credential
+portal. Enrichment may select a bounded top-level array with `valuePath: $`, and
+an explicitly paginated source can combine bounded array pages before policy
+evaluation. Pagination is disabled when omitted. It follows only a validated
+RFC 8288 `rel=next` on the exact original HTTPS origin, effective port, and
+path; only the query may vary. One timeout and cumulative response limits cover
+the complete operation. Unsafe links, redirects, loops, partial results, and
+overflow fail closed. The bearer and raw pages are never retained. The
+`where.array/all` requires all conditions on one selected object. The complete
+provider-neutral contract, limits, failure behavior, and compatibility rules are
+documented in [generic OAuth2/OIDC eligibility](../docs/oauth-eligibility.md).
 
-This provider-neutral configuration expresses GitHub organization membership
+This provider-neutral configuration expresses GitHub team membership
 entirely as operator configuration:
 
 ```yaml
@@ -239,7 +290,7 @@ gateway:
       issuer: https://github.com
       authorizationURL: https://github.com/login/oauth/authorize
       tokenURL: https://github.com/login/oauth/access_token
-      scopes: []
+      scopes: [read:org]
       clientAuthMethod: client_secret_post
       identity:
         endpoint: https://api.github.com/user
@@ -249,17 +300,29 @@ gateway:
     claimEnrichment:
       allowedHosts:
         - api.github.com
+      limits:
+        maxResponseBytes: 262144
+        maxArrayItems: 60
+        maxTotalNodes: 4096
       sources:
-        - endpoint: https://api.github.com/user/memberships/orgs/Altinn
-          outputClaim: organization_membership
-          valuePath: state
+        - endpoint: https://api.github.com/user/teams
+          outputClaim: teams
+          valuePath: $
+          pagination:
+            mode: link
+            maxPages: 2
     admission:
       default: deny
       rules:
-        - id: allowed-organization
+        - id: allowed-team
           effect: allow
-          claimPath: organization_membership
-          values: [active]
+          where:
+            array: teams[]
+            all:
+              - claimPath: organization.login
+                values: [Altinn]
+              - claimPath: slug
+                values: [allowed-team]
     authorization:
       default: deny
       rules:
@@ -268,15 +331,21 @@ gateway:
           owner: true
 ```
 
-For this GitHub example, configure the GitHub App with organization
-**Members: read** permission and have an Altinn organization owner install and
-approve the app for that organization. Each user must also authorize the app.
-GitHub then returns `state: active` only for an active member; pending membership
-does not match, while an unaffiliated user or blocked/unapproved app produces a
-failed source request and login is denied. No repository permission is needed.
-Other providers have their own permission/approval requirements. Claim sources
-cannot add arbitrary headers, disable TLS verification, follow redirects, or
-derive their endpoint from a browser request.
+The shown client is a GitHub OAuth App: request `read:org`; it needs no App
+installation, although organization policy and SAML SSO may still affect
+authorization or visibility. A GitHub App is an equally supported alternative:
+set `scopes: []` and have each user authorize it. Its user access token needs no
+repository or organization permission for this endpoint, and authorization
+does not require App installation. Applicable organization policy and SAML SSO
+can still affect authorization or visible teams. The same-array rule requires
+both `organization.login` and `slug` on one team object. The 256 KiB, 60-item,
+4,096-node, two-page limits form one coherent bound for at most two default
+30-item pages of full team responses; more pages or any cumulative overflow
+deny login. The application has no GitHub branch. Other providers use the same
+generic contract with their own configured endpoints, permissions, predicates,
+and bounds. Claim sources cannot add arbitrary headers, disable TLS
+verification, follow redirects, or derive their endpoint from a browser
+request.
 
 Enriched admission claims are a login-time snapshot. They are stored in the
 server-side session and are not re-fetched on each dashboard or AgentRun
@@ -295,12 +364,15 @@ identity endpoint used to obtain one immutable subject; unlike OIDC, OAuth2
 alone does not cryptographically establish an issuer/ID-token identity
 contract. Prefer OIDC when the provider supports it.
 
-For GitHub, create a dedicated GitHub App for human login. Configure its
-callback URL as `https://<gateway-host>/oauth2/callback`; it needs no repository
-permissions, repository scopes, or webhook subscriptions for profile identity
-lookup. A membership claim source does require the organization permission and
-installation/approval described above. Store both credentials in a Kubernetes
-Secret:
+For the GitHub App deployment choice, create a dedicated App for human login.
+Configure its callback URL as `https://<gateway-host>/oauth2/callback`, use
+`scopes: []`, and have each user authorize it. `GET /user/teams` needs no
+repository or organization permission on its user access token, and user
+authorization does not require App installation. No repository scopes or
+webhook subscriptions are needed. The OAuth App alternative uses the same
+callback and client Secret shape and requests `read:org`. Applicable
+organization policy and SAML SSO can still affect either choice's authorization
+or visibility. Store the selected client's credentials in a Kubernetes Secret:
 
 ```sh
 kubectl -n nvt create secret generic nvt-gateway-github \

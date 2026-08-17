@@ -54,12 +54,214 @@ Returns:
 
 ### GET /ready
 
-Returns HTTP 200 only when every configured provider has accepted its local
-configured state. Embedded providers own format validation and must not contact
-upstreams or refresh credentials from this probe; executable providers must
-have a successfully initialized live generation. Failures return a generic
-HTTP 503 without provider names, configuration, or credential diagnostics.
+Returns HTTP 200 only when every statically configured provider has accepted
+its local configured state. Embedded providers own format validation and must
+not contact upstreams or refresh credentials from this probe; executable
+providers must have a successfully initialized live generation. Failures return
+a generic HTTP 503 without provider names, configuration, or credential
+diagnostics.
 Seed replacement uses this stricter endpoint before discarding recovery state.
+When dynamic principal accounts are enabled, `/ready` additionally validates
+the shared registry, storage, and single-writer boundary. Dynamic credential
+and provider health is account-local: an unavailable generation or failed
+provider initialization makes only that principal's authenticated readiness
+and resolution fail closed. Other dynamic accounts and static providers remain
+available, and the affected owner can still reconnect or revoke. Registry-wide
+corruption, collision, unknown templates, unsafe storage, or writer uncertainty
+still makes broker readiness fail closed.
+
+### Dynamic principal account endpoints
+
+Dynamic principal accounts are an optional broker-owned registry. They are
+absent unless `dynamic-accounts.enabled: true`; without that configuration all
+static provider loading, lookup, readiness, credential paths, and endpoint
+behavior are unchanged. This contract is provider-neutral. Administrator-owned
+credential templates select an administrator-owned provider template and a
+trusted enrollment-adapter name. API callers can select only a credential
+template on first enrollment. They cannot submit an adapter, plugin, command,
+path, Secret, provider instance id, provider config, grant, capability, profile,
+runtime option, or egress policy.
+
+Each request uses a short-lived assertion from a trusted identity frontend:
+
+```text
+Authorization: NVT-Principal-v1 <base64url(payload)>.<base64url(HMAC-SHA256)>
+```
+
+The duplicate-free JSON payload has `version: 1`, audience
+`nvt.broker.principal-accounts/v1`, canonical `issuer`, immutable `subject`, and
+an integer `expires_at`. Assertions minted by the eligibility frontend may also
+carry an integer `eligibility_expires_at`; operator resolution assertions omit
+it. The broker bounds this renewable evidence to
+`authentication.max-eligibility-lease-seconds` (3600 seconds by default) and
+persists only its expiry, never OAuth claims or tokens. The configured HMAC key never appears in broker config;
+`authentication.hmac-key-env` names a Secret-sourced environment variable of at
+least 32 bytes. The frontend remains responsible for authenticating the
+identity before minting this assertion. Assertions are bounded to at most the
+configured 1–900 second window (300 seconds by default). Invalid encoding,
+signature, shape, identity, audience, expiry, or future window is
+`unauthorized`. Deployments must use TLS.
+
+The broker derives `p_` plus a domain-separated SHA-256 encoding of the exact
+length-prefixed issuer and subject. This deterministic opaque principal id is
+the storage/audit key; display names are never ownership. Every operation is
+self-only, so there is no principal id request parameter. A different principal
+receives the same `account-not-found` response as a principal with no account.
+
+| Endpoint | Exact request body | Non-secret result |
+| --- | --- | --- |
+| `POST /v1/principal-accounts/complete-enrollment` | `template`, `operation_id`, `credential_base64` | state, template, generation |
+| `POST /v1/principal-accounts/reconnect` | `operation_id`, `credential_base64` | state, template, generation |
+| `POST /v1/principal-accounts/revoke` | `operation_id` | revoked state |
+| `POST /v1/principal-accounts/readiness` | empty object | own `ready`, `unready`, or `revoked` state plus committed template and generation |
+| `POST /v1/principal-accounts/resolve` | empty object | own template, opaque provider instance id, generation |
+| `POST /v1/principal-accounts/renew-eligibility` | empty object | acknowledgement only |
+| `POST /v1/principal-accounts/revoke-eligibility` | empty object | acknowledgement only |
+| `POST /v1/principal-accounts/request-template-switch` | `operation_id` | opaque target-free request id, or already-authorized state |
+
+Enrollment and reconnect require a currently valid signed eligibility expiry.
+The portal renews an existing account after each successful current policy
+evaluation and revokes the lease when a verified identity is denied. Renewal
+for a principal without an account is deliberately indistinguishable from a
+successful no-op; first enrollment commits that same signed lease atomically
+with the account. Expired or revoked evidence makes readiness and resolution
+return only `principal-not-eligible`. Existing provider handles remain usable
+by already admitted AgentRuns; the lease gates new resolution rather than
+rewriting or interrupting frozen runs.
+
+Bodies are at most 1,028 KiB, credential documents at most 768 KiB, and JSON is
+strict UTF-8 with duplicate and unknown fields rejected. The bounded 4 KiB
+envelope allowance makes the documented maximum credential representable after
+base64 encoding. The enrollment
+frontend passes a credential document already accepted by its configured
+trusted adapter. Before commit the broker also instantiates the approved
+provider template through the existing
+[`nvt.broker-provider/v1`](broker-provider.md) boundary and requires that
+provider to accept its local state. A provider error is sanitized to
+`provider-initialization-failed`; no diagnostic may echo input.
+
+Exactly one template may be committed for a principal. Reconnect always uses
+that template and provider instance id, and is permitted regardless of the
+current credential expiry or account-local provider readiness. Authenticated
+readiness returns the committed template and generation even when that account
+is unready or revoked, so an enrollment frontend can reject a mismatched
+adapter before execution. Revoke is an emergency access-removal operation, not
+authorization to switch templates: its durable tombstone retains the committed
+template. The same template may be enrolled again. A different template stays
+`template-switch-not-authorized` until the optional operator coordination below
+commits a target-free authorization after proving there are no active owned
+AgentRuns. The last 32
+mutation operation ids and their non-secret results are retained for bounded
+response-loss replay; callers must use a new id for a new mutation. Revoke is
+durable and idempotent.
+
+#### Operator-only template-switch coordination
+
+`dynamic-accounts.template-switching.enabled` is independently opt-in. Its
+`operator-hmac-key-env` must name a key distinct from the principal assertion
+key and is mounted only into the broker and trusted operator. The portal can
+only create a random, bounded, expiring switch request for its exact
+authenticated principal; that request contains no target template, and its id
+never reaches the browser. Possessing the id is not authorization: the trusted
+operator must acquire the broker reservation, inspect its own AgentRun state,
+and explicitly commit or abort.
+
+Operator mutations use verified broker TLS and a separate assertion:
+
+```text
+Authorization: NVT-Principal-Coordination-v1 <base64url(payload)>.<base64url(HMAC-SHA256)>
+```
+
+The strict payload fixes version 1, audience
+`nvt.broker.principal-account-coordination/v1`, operation, expiry, and the
+SHA-256 of the exact duplicate-free JSON body. Assertions expire in 1–300
+seconds. The body can carry only an opaque operation/request id and, where the
+operator already knows it, canonical issuer plus immutable subject. It cannot
+name a template, provider, profile, grant, capability, runtime, or egress
+setting.
+
+| Endpoint | Exact request body | Non-secret result |
+| --- | --- | --- |
+| `POST /v1/principal-account-coordination/begin-admission` | `operation_id`, `issuer`, `subject` | reserved plus broker expiry |
+| `POST /v1/principal-account-coordination/end-admission` | same exact fields | released |
+| `POST /v1/principal-account-coordination/begin-template-switch` | `operation_id`, `request_id` | exact request owner issuer + subject and broker expiry |
+| `POST /v1/principal-account-coordination/commit-template-switch` | `operation_id`, `issuer`, `subject` | authorized |
+| `POST /v1/principal-account-coordination/abort-template-switch` | same exact fields | released |
+
+Admission and switch proof reserve the same exact principal. Dynamic schedule
+admission holds `begin-admission` from before readiness/resolve through
+AgentRun creation. A switch proof cannot begin during that window. Conversely,
+admission cannot begin while the operator lists exact-principal AgentRuns under
+a switch reservation. The operator commits only when every matching run is
+terminal or absent; otherwise it aborts. The Kubernetes read is direct rather
+than cache-backed and bounded to 1,000 AgentRuns; pagination or malformed
+dynamic ownership provenance is uncertainty and fails closed. A committed unlock applies only to the
+existing revoked tombstone and is consumed by the next successful enrollment.
+Since revoked accounts cannot resolve, no new run can enter between commit and
+replacement.
+
+Reservations and target-free requests are bounded and durably stored with the
+private account metadata. Reusing the same operation id is idempotent. A broker
+or operator restart preserves an unexpired reservation; abandoned reservations
+expire before later work proceeds. Expired, mismatched, replayed,
+cross-principal, malformed, or storage-uncertain coordination fails closed.
+The operator bounds its resolve/create or list/commit context to the
+broker-returned reservation expiry, so an old operation cannot continue into a
+later unlock window.
+None of these records contains credential bytes or provider configuration.
+The coordinated chart requires one operator replica; horizontal admission
+replicas need a future distributed run-state reader before this feature can be
+enabled.
+
+Provider instance ids use the reserved `dpa_` shape plus 192 random bits and
+are checked against static and loaded dynamic ids; enabling the feature rejects
+a static provider in that namespace. Resolution never guesses or falls back: an unavailable
+dynamic registry, missing account, unknown template, unavailable credential,
+or failed provider returns a stable failure. Static providers remain separately
+addressable, but are never substituted for a failed dynamic resolution.
+
+The configured state directory has a mode-`0700` per-principal directory.
+Credential generations and `metadata.json` are mode `0600`. Credential bytes
+exist only in the authenticated request, broker-owned credential file, and
+provider process protocol; they never enter metadata, operation results, HTTP
+responses, audit, errors, events, command arguments, or Kubernetes objects.
+Metadata contains only the exact ownership identity, opaque ids, approved
+template, generation, timestamps, non-secret eligibility/coordination expiry,
+state, active credential filename, and bounded idempotency/coordination records.
+
+Replacement writes and fsyncs a new unique credential generation, initializes
+the provider against it, then atomically replaces and fsyncs the metadata
+manifest. The opaque provider id is a stable leased handle: replacement
+publishes the new adapter, waits for operations already leased to the previous
+adapter, and only then closes it. Revoke closes the handle to new calls and
+waits for existing leases. The old provider and generation are removed only
+after the metadata commit and safe provider retirement.
+After interruption, the manifest therefore selects either the complete old or
+complete new generation. Creation and removal of a principal directory also
+fsync the parent account directory. Startup removes recognized orphan
+generations and never-committed first-enrollment directories. Unexpected files,
+symlinks, invalid modes, malformed metadata, unknown templates, collisions, or
+storage uncertainty latch the dynamic registry unavailable. A missing
+credential generation, invalid credential document, or provider initialization
+failure retains valid ownership metadata but publishes no provider handle for
+that account; authenticated readiness reports `unready` with its committed
+template and generation, its owner can reconnect or revoke, and all resolution
+through that account fails closed. Revoke commits a template-preserving
+tombstone before closing the provider and deleting its credential, so restart
+completes cleanup without restoring access or enabling an uncoordinated
+template switch.
+
+This broker contract deliberately contains no Kubernetes, portal UI, AgentRun,
+profile, grant, or egress knowledge. The optional dynamic credential portal
+calls completion, reconnect, revoke, and readiness after its tokenless runner
+returns a validated document; it never exposes or consumes the resolved opaque
+provider id. The separately enabled operator client calls authenticated
+readiness and resolution for an exact issuer plus immutable subject and freezes
+the consistent template, provider instance, and generation into an AgentRun;
+the broker remains unaware of schedules and profiles. Its optional coordination
+API supplies only the durable exact-principal reservation and target-free unlock
+decision described above; the operator alone interprets AgentRun state. No
+implicit switch or fallback is performed.
 
 ### POST /v1/http/request
 
@@ -613,6 +815,19 @@ agent grant intersection as GitHub App providers. By default they use the same
 GitHub target mode as `github-app`: host-prefixed targets such as
 `github.com/owner/repo` are accepted at the endpoint boundary and normalized to
 `owner/repo`.
+
+When `config.injection-git` is enabled, header injection accepts only Git
+smart-HTTP `info/refs`, `git-upload-pack`, and `git-receive-pack` request
+shapes with their required methods. The repository is derived from the trusted
+injection host and request path, normalized using `target-mode`, and checked
+against both the provider `allow.repositories` ceiling and the authenticated
+agent grant before the static credential is injected. Repository-scoped REST
+injection also accepts `GET`, `POST`, and `PATCH` on `api.github.com` (and the
+Git smart-HTTP host `github.com`) for GitHub `/repos/{owner}/{repository}/...`
+and on Azure DevOps for
+`/{organization}/{project}/_apis/git/repositories/{repository}/...`; those
+forms normalize to the same provider repository identities used by Git. Other
+paths and methods fail closed.
 
 For self-hosted Git providers, set `config.target-mode: literal`. Literal mode
 normalizes URL, SSH, and plain targets to their full host/path repository id:

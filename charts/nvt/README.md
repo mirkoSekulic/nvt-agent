@@ -623,6 +623,34 @@ for trust boundaries and traffic behavior.
 
 ## Gateway
 
+### Optional credential portal
+
+The disabled-by-default `credentialPortal` Deployment provides authenticated,
+owner-bound Connect/Reconnect flows. Provider CLIs run in a separate tokenless
+sidecar; only the portal container receives its narrowly scoped Kubernetes API
+token. Static-slot mode patches an exact pre-created broker seed Secret key,
+while raw recovery upload is a separate administrator opt-in.
+
+Dynamic mode (`credentialPortal.dynamic.enabled`) sends validated credentials
+over verified TLS directly to the broker's principal-account API. Broker CA and
+assertion keys come from existing Secret file mounts visible only to the portal,
+never Helm values or runner environment. Public template/adapter mappings must
+match enabled broker credential templates. Dynamic mode is mutually exclusive
+with static slots and renders no Secret-patch Role or ServiceAccount token.
+
+The browser cannot choose provider plugins, commands, paths, provider IDs,
+Secrets, profiles, grants, capabilities, runtime, or egress policy. A template
+switch remains locked unless separately enabled operator coordination proves
+the exact principal has no active AgentRun. Rotate the external assertion key
+together with `broker.dynamicAccountAssertionRotationEpoch` so broker, portal,
+and operator roll as one fail-closed generation.
+
+`gateway.credentialPortal.url` adds only a validated dashboard link. The
+gateway does not proxy portal APIs, share sessions, inspect credential state,
+or depend on portal availability. See
+[`docs/credential-portal.md`](../../docs/credential-portal.md) for the complete
+security and migration contract.
+
 Enable the optional gateway to list and route browser sessions:
 
 ```yaml

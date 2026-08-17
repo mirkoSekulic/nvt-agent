@@ -217,6 +217,7 @@ KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=mediated-egress make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=profile-auth make operator-kind-smoke
+KIND_SMOKE_MODE=render KIND_SMOKE_CASE=dynamic-credentials make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=broker-seed make operator-kind-smoke
 ```
 
