@@ -323,6 +323,36 @@ func TestSubmitProfiledScheduleAdmissionSendsOnlyWorkPrincipalAndPrompt(t *testi
 	}
 }
 
+func TestSubmitProfiledScheduleAdmissionRejectsOversizedCooperativeInstructions(t *testing.T) {
+	tokenFile := writeTestAdmissionToken(t, testAdmissionToken("b3ZlcnNpemVk"))
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"scheduled":true}`))
+	}))
+	defer server.Close()
+
+	for _, intent := range []CommandIntent{CommandIntentReview, CommandIntentRun, CommandIntentPRContinue} {
+		submitter := profiledAdmissionSubmitter(server.Client(), server.URL, tokenFile)
+		submitter.config.Submission.CommandWorkflows = map[CommandIntent]string{intent: "cooperative-work"}
+		result, err := submitter.submitWithOutcome(
+			context.Background(),
+			Repository{Owner: "acme", Name: "widget"},
+			GitHubIssue{Number: 7, Title: "Request", HTMLURL: "https://github.test/acme/widget/pull/7", PullRequest: &GitHubPullRequest{}},
+			nil,
+			GitHubIssueComment{ID: 101, User: GitHubUser{Login: "alice", ID: 424242}},
+			Command{Prefix: "/nvtagent", Intent: intent, AdditionalInstructions: strings.Repeat("x", maxResolvedRunPromptBytes)},
+		)
+		if !errors.Is(err, errCommandPromptTooLarge) || result.Outcome != schedulingOutcomeRejected {
+			t.Fatalf("%s oversized result = %#v, %v", intent, result, err)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("oversized prompts reached admission endpoint %d times", requests)
+	}
+}
+
 func TestSubmitProfiledScheduleAdmissionEmitsOnlyConfiguredWorkflowName(t *testing.T) {
 	tokenFile := writeTestAdmissionToken(t, testAdmissionToken("d29ya2Zsb3c"))
 	var got map[string]any

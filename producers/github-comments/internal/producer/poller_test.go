@@ -879,8 +879,8 @@ func TestPollerConsumesUnmappedCommandAndProcessesFollowingWork(t *testing.T) {
 	if err := poller.PollOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if github.listIssueCommentsCalls != 3 {
-		t.Fatalf("comment fetches = %d, want both commands processed", github.listIssueCommentsCalls)
+	if github.listIssueCommentsCalls != 1 {
+		t.Fatalf("comment fetches = %d, want only pr create history fetched", github.listIssueCommentsCalls)
 	}
 	if requestCount != 1 {
 		t.Fatalf("admission requests = %d, want only following valid work", requestCount)
