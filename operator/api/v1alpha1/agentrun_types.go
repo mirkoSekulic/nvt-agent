@@ -14,6 +14,16 @@ type AgentRunEgressMode string
 type AgentRunEgressTransport string
 type AgentRunGrantMaterialization string
 
+// AgentRunLegacyExecution is retained only so upgrades can detect and fail
+// closed for AgentRuns created by the removed external execution stack.
+// New AgentRuns must leave spec.execution unset.
+type AgentRunLegacyExecution struct {
+	Kind          string               `json:"kind,omitempty"`
+	Driver        string               `json:"driver,omitempty"`
+	ClassRef      string               `json:"classRef,omitempty"`
+	Configuration apiextensionsv1.JSON `json:"configuration,omitempty"`
+}
+
 const (
 	// AgentRunPhasePending means the run has been accepted but no worker pod has started.
 	AgentRunPhasePending AgentRunPhase = "Pending"
@@ -70,10 +80,13 @@ type AgentRun struct {
 //
 //nolint:govet // Field order follows the CRD schema for readability.
 type AgentRunSpec struct {
-	Runtime          AgentRunRuntime      `json:"runtime"`
-	RuntimeAuth      *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
-	Image            string               `json:"image"`
-	RuntimeClassName *string              `json:"runtimeClassName,omitempty"`
+	// Execution is a deprecated migration tombstone for pre-0.8.70 resources.
+	// The controller never executes it and fails closed when it is present.
+	Execution        *AgentRunLegacyExecution `json:"execution,omitempty"`
+	Runtime          AgentRunRuntime          `json:"runtime"`
+	RuntimeAuth      *AgentRunRuntimeAuth     `json:"runtimeAuth,omitempty"`
+	Image            string                   `json:"image"`
+	RuntimeClassName *string                  `json:"runtimeClassName,omitempty"`
 	// Resources controls the agent container. For VM-backed runtimes such as
 	// Kata, its limits also determine the Pod VM CPU and memory allocation.
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
@@ -380,6 +393,12 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 
 	out := new(AgentRunSpec)
 	*out = *in
+	if in.Execution != nil {
+		out.Execution = &AgentRunLegacyExecution{
+			Kind: in.Execution.Kind, Driver: in.Execution.Driver, ClassRef: in.Execution.ClassRef,
+			Configuration: *in.Execution.Configuration.DeepCopy(),
+		}
+	}
 	out.Runtime = *in.Runtime.DeepCopy()
 	if in.RuntimeClassName != nil {
 		out.RuntimeClassName = new(string)

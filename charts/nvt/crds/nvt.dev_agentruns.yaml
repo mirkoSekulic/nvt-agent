@@ -50,6 +50,19 @@ spec:
                 - rule: "has(self.egressTransport) == has(oldSelf.egressTransport) && (!has(self.egressTransport) || self.egressTransport == oldSelf.egressTransport)"
                   message: spec.egressTransport is immutable
               properties:
+                execution:
+                  description: Deprecated tombstone used only to fail closed for AgentRuns created by the removed external execution stack.
+                  type: object
+                  properties:
+                    kind:
+                      type: string
+                    driver:
+                      type: string
+                    classRef:
+                      type: string
+                    configuration:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                 runtime:
                   type: object
                   x-kubernetes-validations:

@@ -132,29 +132,32 @@ const (
 	egressdConfigName      = "egressd-config"
 	egressdReadyRequeue    = 2 * time.Second
 
-	brokerAgentsConfigMapName        = "nvt-broker-agents"
-	brokerAgentsConfigKey            = "agents.yaml"
-	brokerTokenKey                   = "NVT_BROKER_TOKEN"
-	egressTokenKey                   = "NVT_EGRESS_BROKER_TOKEN"
-	defaultEgressdImage              = "nvt-egressd:latest"
-	defaultCapturedImage             = "nvt-captured:latest"
-	defaultDindImage                 = "nvt-dind:latest"
-	minimumDockerPVCSizeBytes  int64 = 1024 * 1024 * 1024
-	defaultDockerPVCSizeBytes  int64 = 20 * 1024 * 1024 * 1024
-	maximumDockerPVCSizeBytes  int64 = 1024 * 1024 * 1024 * 1024
-	dindImageCapacityPercent         = 90
-	dindStartupBudgetSeconds         = 15 * 60
-	capturedTransparentPort          = 15001
-	capturedExplicitPort             = 15002
-	capturedUID                int64 = 65532
-	callbackTokenKey                 = "NVT_OPERATOR_CALLBACK_TOKEN"
-	agentRunFinalizer                = "nvt.dev/agentrun-broker-policy"
-	completedLifecycleReason         = "Completed by lifecycle event "
-	failedLifecycleReason            = "Failed by lifecycle event "
-	activeDeadlineReason             = "Active deadline exceeded"
-	unexpectedAgentExitReason        = "Agent container terminated unexpectedly"
-	generatedTokenByteLength         = 32
-	defaultRunRetentionSeconds       = 30 * 24 * 60 * 60
+	brokerAgentsConfigMapName              = "nvt-broker-agents"
+	brokerAgentsConfigKey                  = "agents.yaml"
+	brokerTokenKey                         = "NVT_BROKER_TOKEN"
+	egressTokenKey                         = "NVT_EGRESS_BROKER_TOKEN"
+	defaultEgressdImage                    = "nvt-egressd:latest"
+	defaultCapturedImage                   = "nvt-captured:latest"
+	defaultDindImage                       = "nvt-dind:latest"
+	minimumDockerPVCSizeBytes        int64 = 1024 * 1024 * 1024
+	defaultDockerPVCSizeBytes        int64 = 20 * 1024 * 1024 * 1024
+	maximumDockerPVCSizeBytes        int64 = 1024 * 1024 * 1024 * 1024
+	dindImageCapacityPercent               = 90
+	dindStartupBudgetSeconds               = 15 * 60
+	capturedTransparentPort                = 15001
+	capturedExplicitPort                   = 15002
+	capturedUID                      int64 = 65532
+	callbackTokenKey                       = "NVT_OPERATOR_CALLBACK_TOKEN"
+	agentRunFinalizer                      = "nvt.dev/agentrun-broker-policy"
+	legacyExternalExecutionFinalizer       = "nvt.dev/agentrun-external-execution"
+	legacyGuestEnrollmentFinalizer         = "nvt.dev/agentrun-guest-enrollment"
+	legacyExternalExecutionReason          = "spec.execution belongs to the removed external execution stack; delete and recreate this AgentRun"
+	completedLifecycleReason               = "Completed by lifecycle event "
+	failedLifecycleReason                  = "Failed by lifecycle event "
+	activeDeadlineReason                   = "Active deadline exceeded"
+	unexpectedAgentExitReason              = "Agent container terminated unexpectedly"
+	generatedTokenByteLength               = 32
+	defaultRunRetentionSeconds             = 30 * 24 * 60 * 60
 )
 
 var defaultExternalTCPPorts = []int{80, 443}
@@ -309,6 +312,15 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("get AgentRun: %w", err)
+	}
+	if agentRun.Spec.Execution != nil || hasLegacyExternalFinalizer(&agentRun) {
+		if !agentRun.DeletionTimestamp.IsZero() {
+			return ctrl.Result{}, r.finalizeLegacyExternalAgentRun(ctx, &agentRun)
+		}
+		if err := r.setAgentRunFailed(ctx, &agentRun, legacyExternalExecutionReason); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	if !agentRun.DeletionTimestamp.IsZero() {
@@ -531,6 +543,28 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return deadlineResult, err
 	}
 	return earliestRequeue(deadlineResult, workspaceResult), nil
+}
+
+func hasLegacyExternalFinalizer(agentRun *nvtv1alpha1.AgentRun) bool {
+	return controllerutil.ContainsFinalizer(agentRun, legacyExternalExecutionFinalizer) ||
+		controllerutil.ContainsFinalizer(agentRun, legacyGuestEnrollmentFinalizer)
+}
+
+// finalizeLegacyExternalAgentRun only removes finalizers owned by components
+// that no longer exist. It deliberately does not attempt remote cleanup.
+func (r *AgentRunReconciler) finalizeLegacyExternalAgentRun(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	if controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
+		if err := r.removeBrokerAgentsPolicyEntry(ctx, agentRun); err != nil {
+			return err
+		}
+		controllerutil.RemoveFinalizer(agentRun, agentRunFinalizer)
+	}
+	controllerutil.RemoveFinalizer(agentRun, legacyExternalExecutionFinalizer)
+	controllerutil.RemoveFinalizer(agentRun, legacyGuestEnrollmentFinalizer)
+	if err := r.Update(ctx, agentRun); err != nil {
+		return fmt.Errorf("remove legacy external AgentRun finalizers: %w", err)
+	}
+	return nil
 }
 
 func earliestRequeue(first, second ctrl.Result) ctrl.Result {

@@ -89,6 +89,62 @@ func TestReconcileSetsPendingForEmptyPhase(t *testing.T) {
 	}
 }
 
+func TestReconcileLegacyExternalAgentRunFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Execution = &nvtv1alpha1.AgentRunLegacyExecution{Kind: "vm", Driver: "qemu"}
+	agentRun.Finalizers = []string{legacyExternalExecutionFinalizer}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile legacy AgentRun: %v", err)
+	}
+	var updated nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updated); err != nil {
+		t.Fatalf("get updated AgentRun: %v", err)
+	}
+	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed || updated.Status.Reason != legacyExternalExecutionReason {
+		t.Fatalf("expected fail-closed status, got %#v", updated.Status)
+	}
+	var pods corev1.PodList
+	if err := k8sClient.List(ctx, &pods, client.InNamespace(agentRun.Namespace)); err != nil {
+		t.Fatalf("list Pods: %v", err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("legacy external AgentRun created Pods: %#v", pods.Items)
+	}
+}
+
+func TestReconcileDeletingLegacyExternalAgentRunRemovesObsoleteFinalizers(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	now := metav1.Now()
+	agentRun.DeletionTimestamp = &now
+	agentRun.Finalizers = []string{legacyExternalExecutionFinalizer, legacyGuestEnrollmentFinalizer, agentRunFinalizer}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile deleting legacy AgentRun: %v", err)
+	}
+	var updated nvtv1alpha1.AgentRun
+	err := k8sClient.Get(ctx, clientKey(agentRun), &updated)
+	if err != nil && !errors.IsNotFound(err) {
+		t.Fatalf("get deleting AgentRun: %v", err)
+	}
+	if err == nil && len(updated.Finalizers) != 0 {
+		t.Fatalf("AgentRun finalizers remain: %#v", updated.Finalizers)
+	}
+}
+
 func TestReconcileCreatesAgentConfigMap(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
