@@ -588,7 +588,7 @@ assert_qemu_provider_absent() {
   pod="$(qemu_driver_pod)"
   kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- sh -eu -c \
     'test ! -e "$1/executions/$2"; test -z "$(find "$1/executions" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"; \
-     for status in /proc/[0-9]*/status; do name="$(sed -n "s/^Name:[[:space:]]*//p" "$status")"; state="$(sed -n "s/^State:[[:space:]]*//p" "$status")"; \
+     for status in /proc/[0-9]*/status; do snapshot="$(cat "$status" 2>/dev/null)" || continue; name="$(printf "%s\n" "$snapshot" | sed -n "s/^Name:[[:space:]]*//p")"; state="$(printf "%s\n" "$snapshot" | sed -n "s/^State:[[:space:]]*//p")"; \
        case "$name" in qemu-system-*|busybox|tini) case "$state" in Z*) exit 1;; esac;; esac; done; \
      ! ps | grep -q "[q]emu-system-x86_64"' \
     sh /var/lib/nvt-execution-driver "${QEMU_STATE_KEY}"
@@ -600,8 +600,9 @@ assert_qemu_process_tree_clean() {
   kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- sh -eu -c '
     active=0
     for status in /proc/[0-9]*/status; do
-      name="$(sed -n "s/^Name:[[:space:]]*//p" "$status")"
-      state="$(sed -n "s/^State:[[:space:]]*//p" "$status")"
+      snapshot="$(cat "$status" 2>/dev/null)" || continue
+      name="$(printf "%s\n" "$snapshot" | sed -n "s/^Name:[[:space:]]*//p")"
+      state="$(printf "%s\n" "$snapshot" | sed -n "s/^State:[[:space:]]*//p")"
       case "$name" in
         qemu-system-*) case "$state" in Z*) exit 1;; *) active=$((active + 1));; esac ;;
         busybox) case "$state" in Z*) exit 1;; esac ;;

@@ -18,6 +18,7 @@ import (
 const (
 	scheduleLabel            = "nvt.dev/schedule"
 	workIDAnnotation         = "nvt.dev/work-id"
+	workGroupAnnotation      = "nvt.dev/work-group"
 	workURLAnnotation        = "nvt.dev/work-url"
 	workRepositoryAnnotation = "nvt.dev/work-repository"
 	accessKeyAnnotation      = "nvt.dev/access-key"
@@ -30,6 +31,7 @@ const (
 
 type scheduleAdmissionWorkMetadata struct {
 	ID         string
+	Group      string
 	Title      string
 	URL        string
 	Repository string
@@ -158,6 +160,11 @@ func PrepareScheduledAgentRun(
 		run.Annotations = map[string]string{}
 	}
 	run.Annotations[workIDAnnotation] = work.ID
+	if work.Group != "" {
+		run.Annotations[workGroupAnnotation] = work.Group
+	} else {
+		delete(run.Annotations, workGroupAnnotation)
+	}
 	if work.URL != "" {
 		run.Annotations[workURLAnnotation] = work.URL
 	} else {
@@ -216,6 +223,20 @@ func retainedWorkExists(runs *nvtv1alpha1.AgentRunList, workID string) bool {
 	for i := range runs.Items {
 		run := &runs.Items[i]
 		if run.Annotations[workIDAnnotation] == workID {
+			return true
+		}
+	}
+	return false
+}
+
+func activeWorkGroupExists(runs *nvtv1alpha1.AgentRunList, group string) bool {
+	if group == "" {
+		return false
+	}
+	for i := range runs.Items {
+		run := &runs.Items[i]
+		if IsActiveScheduledRun(run) &&
+			(run.Annotations[workGroupAnnotation] == group || run.Annotations[workIDAnnotation] == group) {
 			return true
 		}
 	}

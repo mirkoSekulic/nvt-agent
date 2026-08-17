@@ -15,13 +15,27 @@ func TestConfigValidatesCommandWorkflowMapping(t *testing.T) {
 	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
 		t.Fatal(err)
 	}
-	for command, workflow := range map[CommandIntent]string{"help": "review-pr", CommandIntentReview: "Bad_Name"} {
+	for command, workflow := range map[CommandIntent]string{
+		CommandIntentHelp:       "review-pr",
+		CommandIntentReview:     "Bad_Name",
+		CommandIntentPRContinue: "Bad_Name",
+	} {
 		invalid := validTestConfig()
 		invalid.Submission = cfg.Submission
 		invalid.Submission.CommandWorkflows = map[CommandIntent]string{command: workflow}
 		if err := invalid.ApplyDefaultsAndValidate(); err == nil {
 			t.Fatalf("accepted mapping %q: %q", command, workflow)
 		}
+	}
+	valid := validTestConfig()
+	valid.Submission = cfg.Submission
+	valid.Submission.CommandWorkflows = map[CommandIntent]string{
+		CommandIntentReview:     "review-pr",
+		CommandIntentRun:        "generic-run",
+		CommandIntentPRContinue: "continue-pr",
+	}
+	if err := valid.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
 	}
 }
 

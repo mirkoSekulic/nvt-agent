@@ -3,11 +3,32 @@
 This producer polls GitHub issue comments with GitHub App installation authentication and submits `AgentRun` work to the nvt operator schedule admission endpoint for supported commands:
 
 ```text
-<configured-prefix> <pr create|review|run> [-- inline prompt]
+<configured-prefix> <pr create|review|pr continue|run> [-- inline prompt]
 [multiline prompt]
+<configured-prefix> --help
 ```
 
 The default prefix is `/nvtagent`, but it is configuration only. GitHub-specific trigger logic lives in this producer, not in the operator or runtime image.
+
+`/nvtagent --help` posts a formal command reference to the originating issue or
+pull request. Its usage section is:
+
+```text
+/nvtagent --help
+/nvtagent pr create [-- <instructions>]
+/nvtagent review [-- <instructions>]
+/nvtagent pr continue [-- <optional instructions>]
+/nvtagent run -- <instructions>
+```
+
+Help delivery is restart-safe and idempotent. The producer persists a pending
+response with an unguessable stable marker before posting, reconciles that
+marker from later thread comments after an ambiguous POST or restart, records
+delivery, and removes delivered state only after the repository cursor advances.
+The marker is an invisible HTML comment and does not change the displayed help.
+
+`pr create` keeps multiline instructions and also supports inline syntax via
+`/nvtagent pr create -- <instructions>`.
 
 ## Build
 
@@ -232,6 +253,17 @@ Producer-created AgentRuns complete on either `plugin.github.pr.merged` or
 `plugin.github.pr.closed`. Closed/unmerged PRs are treated as valid terminal
 outcomes for this workflow, not AgentRun failures.
 
+`pr continue` is the long-lived PR-maintenance form. Its workflow stays alive on
+the PR thread and is expected to continue responding to new activity.
+Because it does not emit bounded work-completion events, it should use only
+`plugin.github.pr.merged` / `plugin.github.pr.closed` terminal completion and no
+work-control work-complete/fail lifecycle hooks.
+Each command comment has a distinct admission work ID. The producer also sends
+a stable, non-secret work group for that repository pull request. Both the
+operator and local controller reject a second active member of the group as an
+accepted duplicate before applying schedule capacity. Once the prior member is
+terminal, a later command comment can start a replacement maintenance session.
+
 Workflow selection only chooses administrator-authored workflow instructions;
 it does not enable plugins or lifecycle events. Cooperative `review` and `run`
 deployments must explicitly enable the builtin `work-control` plugin and add
@@ -362,12 +394,16 @@ Implement the issue and open a PR.
 
 /nvtagent run
 Investigate the failing deployment and report the result here.
+
+/nvtagent pr continue
+Address actionable PR review comments and keep working until merge or close.
 ```
 
 `pr create` is valid only on ordinary issues, `review` only on pull requests,
-and `run` on either. `run` requires instructions. Bare trailing text, unknown
-options, and malformed separators are rejected. Command prefixes remain
-configuration-driven. Help-command behavior is intentionally not defined yet.
+`pr continue` is valid only on pull requests, and `run` on either. `run` and
+`pr continue` accept multiline instructions; inline instructions must follow `--`.
+Bare trailing text, unknown options, and malformed separators are rejected.
+Command prefixes remain configuration-driven.
 
 Profiled admission routes commands only through administrator-authored workflow
 names:
@@ -378,10 +414,11 @@ submission:
     pr-create: implement-pr
     review: review-pr
     run: generic-run
+    pr-continue: continue-pr
 ```
 
 Existing `submission.workflow` remains the fallback for `pr create` only.
-`review` and `run` fail closed when their exact mapping is absent.
+`review`, `run`, and `pr continue` fail closed when their exact mapping is absent.
 
 A complete profiled configuration routes commands and independently installs
 the provider-neutral completion tool and lifecycle contract:
@@ -408,9 +445,16 @@ agentSchedule:
       workspaceInstructions: Review the pull request and report findings.
     - name: generic-run
       workspaceInstructions: Perform the requested task and report the result.
+    - name: continue-pr
+      workspaceInstructions: Inspect PR maintenance state and address actionable items.
+      lifecycle:
+        completeOn:
+          - plugin.github.pr.merged
+          - plugin.github.pr.closed
+        failOn: []
   producerPolicies:
     - identity: system:serviceaccount:nvt:nvt-github-comments-producer
-      workflows: [implement-pr, review-pr, generic-run]
+      workflows: [implement-pr, review-pr, generic-run, continue-pr]
       defaultWorkflow: implement-pr
 
 producer:
@@ -421,6 +465,7 @@ producer:
       pr-create: implement-pr
       review: review-pr
       run: generic-run
+      pr-continue: continue-pr
 ```
 
 The operator injects the per-run lifecycle event webhook for a profiled

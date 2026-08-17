@@ -59,6 +59,7 @@ type GitHubClient interface {
 	ListUpdatedIssueComments(ctx context.Context, repo Repository, since *time.Time) ([]GitHubIssueComment, error)
 	GetIssue(ctx context.Context, repo Repository, number int) (GitHubIssue, error)
 	ListIssueComments(ctx context.Context, repo Repository, number int) ([]GitHubIssueComment, error)
+	CreateIssueComment(ctx context.Context, repo Repository, number int, body string) error
 	CreateIssueCommentReaction(ctx context.Context, repo Repository, commentID int64, reaction string) error
 }
 
@@ -231,6 +232,65 @@ func (c *GitHubAPIClient) ListIssueComments(
 }
 
 const maxGitHubReactionResponseBytes = 64 * 1024
+
+const maxGitHubIssueCommentResponseBytes = 1024 * 1024
+
+func (c *GitHubAPIClient) CreateIssueComment(
+	ctx context.Context,
+	repo Repository,
+	number int,
+	body string,
+) error {
+	if number <= 0 || strings.TrimSpace(body) == "" {
+		return errors.New("github-comment-invalid-input")
+	}
+	token, err := c.tokenSource.Token(ctx)
+	if err != nil {
+		return errors.New("github-comment-token-unavailable")
+	}
+	payload := struct {
+		Body string `json:"body"`
+	}{Body: body}
+	bodyData, err := json.Marshal(payload)
+	if err != nil {
+		return errors.New("github-comment-request-invalid")
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", url.PathEscape(repo.Owner), url.PathEscape(repo.Name), number)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(bodyData))
+	if err != nil {
+		return errors.New("github-comment-request-invalid")
+	}
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Github-Api-Version", "2022-11-28")
+	if c.userAgent != "" {
+		request.Header.Set("User-Agent", c.userAgent)
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return errors.New("github-comment-request-failed")
+	}
+	defer closeBody(response.Body)
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxGitHubIssueCommentResponseBytes+1))
+	if err != nil || len(responseBody) > maxGitHubIssueCommentResponseBytes {
+		return errors.New("github-comment-response-invalid")
+	}
+	if response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("github-comment-http-%d", response.StatusCode)
+	}
+	var decoded struct {
+		ID int64 `json:"id"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	if err := decoder.Decode(&decoded); err != nil || decoded.ID <= 0 {
+		return errors.New("github-comment-response-invalid")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("github-comment-response-invalid")
+	}
+	return nil
+}
 
 func (c *GitHubAPIClient) CreateIssueCommentReaction(
 	ctx context.Context,

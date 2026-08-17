@@ -35,6 +35,17 @@ func TestCommentIntentIdentitySeparatesCommands(t *testing.T) {
 	}
 }
 
+func TestPRContinueUsesDistinctWorkAndStableGroupKeys(t *testing.T) {
+	work := CommentIntentIdempotencyKey("owner", "repo", 42, 9001, CommandIntentPRContinue)
+	if work != "github:owner/repo:issue:42:comment:9001:intent:pr-continue" {
+		t.Fatalf("work key = %q", work)
+	}
+	group := IssueIntentIdempotencyKey("owner", "repo", 42, CommandIntentPRContinue)
+	if group != "github:owner/repo:issue:42:intent:pr-continue" {
+		t.Fatalf("group key = %q", group)
+	}
+}
+
 func TestIssueScopeAgentRunNameCompatibility(t *testing.T) {
 	got := AgentRunName("owner", "repo", 42)
 	want := "gh-owner-repo-42-pr-create-7354cbc76a"

@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 type StoreOptions struct {
 	MaxActiveRuns int
@@ -36,6 +36,7 @@ type storedRun struct {
 	snapshot        []byte
 	requestDigest   string
 	idempotencyKey  string
+	activeGroup     string
 	deletedAt       *time.Time
 	lifecycleCursor string
 }
@@ -174,6 +175,13 @@ PRAGMA user_version = 3;`); err != nil {
 PRAGMA user_version = 4;`); err != nil {
 			return ErrStoreUnavailable
 		}
+		version = 4
+	}
+	if version == 4 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE local_runs ADD COLUMN active_group TEXT NOT NULL DEFAULT '';
+PRAGMA user_version = 5;`); err != nil {
+			return ErrStoreUnavailable
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return ErrStoreUnavailable
@@ -212,7 +220,7 @@ func (store *Store) validate(ctx context.Context) error {
 	return nil
 }
 
-const selectRuns = `SELECT run_id, idempotency_key, request_digest, snapshot, snapshot_digest,
+const selectRuns = `SELECT run_id, idempotency_key, active_group, request_digest, snapshot, snapshot_digest,
 state, revision, created_at, updated_at, deadline_at, terminal_expires_at,
 reconcile_owner, reconcile_until, delete_requested, deleted_at, last_reason, terminal_target, lifecycle_cursor FROM local_runs`
 
@@ -226,7 +234,7 @@ func scanStoredRun(row scanner) (storedRun, error) {
 	var deadlineAt, terminalExpiresAt, reconcileOwner, reconcileUntil, deletedAt sql.NullString
 	var deleteRequested int
 	err := row.Scan(
-		&record.view.RunID, &record.idempotencyKey, &record.requestDigest, &record.snapshot, &record.view.SnapshotDigest,
+		&record.view.RunID, &record.idempotencyKey, &record.activeGroup, &record.requestDigest, &record.snapshot, &record.view.SnapshotDigest,
 		&state, &record.view.Revision, &createdAt, &updatedAt, &deadlineAt, &terminalExpiresAt,
 		&reconcileOwner, &reconcileUntil, &deleteRequested, &deletedAt, &record.view.LastReason, &record.view.TerminalTarget, &record.lifecycleCursor,
 	)
@@ -263,7 +271,8 @@ func scanStoredRun(row scanner) (storedRun, error) {
 
 func validateStoredRun(record *storedRun) error {
 	if !validRunID(record.view.RunID) || !record.view.State.valid() || record.view.Revision < 1 ||
-		!validIdempotencyKey(record.idempotencyKey) || !validReason(record.view.LastReason) || !validLifecycleCursor(record.lifecycleCursor) ||
+		!validIdempotencyKey(record.idempotencyKey) || record.activeGroup != "" && !validIdempotencyKey(record.activeGroup) ||
+		!validReason(record.view.LastReason) || !validLifecycleCursor(record.lifecycleCursor) ||
 		len(record.snapshot) == 0 || len(record.snapshot) > resolvedrun.MaxDocumentBytes ||
 		len(record.requestDigest) != 64 || len(record.view.SnapshotDigest) != 64 ||
 		record.view.CreatedAt.After(record.view.UpdatedAt) ||
@@ -359,8 +368,9 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 	prepared := make([]preparedCreate, 0, len(inputs))
 	seenKeys := make(map[string]struct{}, len(inputs))
 	seenRunIDs := make(map[string]struct{}, len(inputs))
+	seenGroups := make(map[string]struct{}, len(inputs))
 	for _, input := range inputs {
-		if !validIdempotencyKey(input.IdempotencyKey) {
+		if !validIdempotencyKey(input.IdempotencyKey) || input.ActiveGroup != "" && !validIdempotencyKey(input.ActiveGroup) {
 			return nil, ErrInvalidRequest
 		}
 		snapshot, resolved, digest, err := canonicalSnapshot(input.ResolvedRun)
@@ -372,6 +382,12 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 		}
 		if _, duplicate := seenRunIDs[resolved.RunID]; duplicate {
 			return nil, ErrConflict
+		}
+		if input.ActiveGroup != "" {
+			if _, duplicate := seenGroups[input.ActiveGroup]; duplicate {
+				return nil, ErrActiveGroup
+			}
+			seenGroups[input.ActiveGroup] = struct{}{}
 		}
 		seenKeys[input.IdempotencyKey] = struct{}{}
 		seenRunIDs[resolved.RunID] = struct{}{}
@@ -408,6 +424,21 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 		}
 		results[index] = CreateResult{Run: existing.view, Created: false}
 	}
+	for _, index := range newIndexes {
+		group := prepared[index].input.ActiveGroup
+		if group == "" {
+			continue
+		}
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM local_runs
+WHERE deleted_at IS NULL AND (active_group = ? OR idempotency_key = ?)
+AND state IN ('pending','preparing','running','stopping')`, group, group).Scan(&count); err != nil {
+			return nil, ErrStoreUnavailable
+		}
+		if count > 0 {
+			return nil, ErrActiveGroup
+		}
+	}
 	var active int
 	activeStates := "('pending','preparing','running','stopping')"
 	if reclaimCleanupCapacity {
@@ -426,9 +457,10 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 		candidate := prepared[index]
 		deadline := optionalDeadline(now, candidate.resolved.TTL.ActiveSeconds)
 		_, err = tx.ExecContext(ctx, `INSERT INTO local_runs (
-run_id,idempotency_key,request_digest,snapshot,snapshot_digest,state,revision,created_at,updated_at,deadline_at,last_reason
-) VALUES (?,?,?,?,?,'pending',1,?,?,?,'')`,
-			candidate.resolved.RunID, candidate.input.IdempotencyKey, candidate.digest, candidate.snapshot, candidate.digest,
+run_id,idempotency_key,active_group,request_digest,snapshot,snapshot_digest,state,revision,created_at,updated_at,deadline_at,last_reason
+) VALUES (?,?,?,?,?,?,'pending',1,?,?,?,'')`,
+			candidate.resolved.RunID, candidate.input.IdempotencyKey, candidate.input.ActiveGroup,
+			candidate.digest, candidate.snapshot, candidate.digest,
 			formatTimestamp(now), formatTimestamp(now), formatOptionalTimestamp(deadline),
 		)
 		if err != nil {

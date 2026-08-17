@@ -25,6 +25,7 @@ type IssueComment struct {
 
 type PromptInput struct {
 	Intent                 CommandIntent
+	CommandPrefix          string
 	Owner                  string
 	Repo                   string
 	Issue                  Issue
@@ -41,7 +42,14 @@ func BuildPrompt(input PromptInput) string {
 	switch input.Intent {
 	case CommandIntentReview:
 		fmt.Fprint(&b, strings.Join([]string{
-			"Inspect the current pull request and report findings first, ordered by severity and with file and line references where possible.",
+			"Inspect the current pull request and report blocking findings first, ordered by severity and with file and line references where possible.",
+			"`No findings` is a valid result.",
+			"Report as findings only actionable correctness, security, or regression defects against a documented contract, requirement, or stated threat-model boundary.",
+			"For every finding, identify the violated invariant or requirement and provide concrete evidence; do not promote speculative hardening to P1 or P2.",
+			"Treat host root, the Docker daemon, and Docker administrators as trusted unless the reviewed contract explicitly states otherwise.",
+			"Separate blocking findings from optional hardening or follow-up suggestions.",
+			"On re-review, verify prior fixes first and report only remaining defects or regressions introduced by those fixes; do not manufacture a new concern merely because another review was requested.",
+			"Before reviewing, resolve the current pull request head SHA and review that exact revision; include `Reviewed head: <full SHA>` in the posted result so the review is clearly stale after a push.",
 			"Make no product-code changes. Do not approve the pull request or request changes.",
 			"Post the review findings as a comment on this pull request using the existing mediated GitHub tooling.",
 			"Only after that comment succeeds, invoke `nvt-work complete`.",
@@ -51,6 +59,21 @@ func BuildPrompt(input PromptInput) string {
 			"Perform the exact user instructions above in the context of this source issue or pull request.",
 			"Post a final result to the same source thread using the existing mediated GitHub tooling.",
 			"Only after that final comment succeeds, invoke `nvt-work complete`.",
+		}, " "))
+	case CommandIntentPRContinue:
+		prefix := firstNonEmpty(input.CommandPrefix, "/nvtagent")
+		repository := input.Owner + "/" + input.Repo
+		fmt.Fprint(&b, strings.Join([]string{
+			"Check out the PR branch and inspect the PR body, all existing PR comments, review threads, and checks.",
+			"Address current actionable issues and continue iterating until the issue is fully resolved.",
+			"After each maintenance pass, post a concise comment on the PR summarizing changes or explaining why no change was needed.",
+			"Do not use `gh-auth auth status` to test access; mediated grants may intentionally deny account identity probes.",
+			fmt.Sprintf("Run each required `gh-auth` repository command with an explicit `--repo %s`.", repository),
+			"Register `github-watch` for ongoing PR activity using:",
+			fmt.Sprintf("  github-watch register --repo %s --number %d --label work", repository, input.Issue.Number),
+			"Keep the workflow alive until the pull request is merged or closed.",
+			"Do not invoke `nvt-work complete` or `nvt-work fail`; maintenance ends only when the PR is merged or closed.",
+			fmt.Sprintf("Ignore control comments in this PR thread (commands like `%s ...`) when handling watcher activity.", prefix),
 		}, " "))
 	default:
 		fmt.Fprint(&b, strings.Join([]string{
@@ -69,6 +92,8 @@ func writePromptContext(b *strings.Builder, input PromptInput) {
 	title, sourceKind := "GitHub issue PR creation request", "Issue"
 	if input.Intent == CommandIntentReview {
 		title, sourceKind = "GitHub pull request review request", "Pull request"
+	} else if input.Intent == CommandIntentPRContinue {
+		title, sourceKind = "GitHub pull request maintenance request", "Pull request"
 	} else if input.Intent == CommandIntentRun {
 		title, sourceKind = "GitHub cooperative work request", "Source"
 	}

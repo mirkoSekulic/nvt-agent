@@ -287,6 +287,7 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	for command, workflow := range c.Submission.CommandWorkflows {
 		switch command {
 		case CommandIntentPRCreate, CommandIntentReview, CommandIntentRun:
+		case CommandIntentPRContinue:
 		default:
 			return fmt.Errorf("submission.commandWorkflows contains unsupported command %q", command)
 		}
