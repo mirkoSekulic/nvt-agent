@@ -121,7 +121,10 @@ def git_plugin_root(plugin):
 
 
 def builtin_manifest(name):
-    return load_yaml(BUILTIN_PLUGIN_DIR / name / "plugin.yaml")
+    path = BUILTIN_PLUGIN_DIR / name / "plugin.yaml"
+    if not path.is_file():
+        fail(f"builtin plugin {name} manifest is missing: {path}")
+    return load_yaml(path)
 
 
 def plugin_manifest(plugin):

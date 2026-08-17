@@ -26,6 +26,13 @@ exports:
   tools: []
 ```
 
+A configured builtin must have this installed manifest. If `plugin.yaml` is
+absent (for example, because the runtime image predates the resolved agent
+configuration), startup, tool export, plugin execution, and `doctor` fail with
+the missing plugin name. A manifest may intentionally omit `command`; that is a
+valid commandless or tool-only plugin, and its process is recorded as
+skipped/ready after any declared tool exports are processed successfully.
+
 The runner reads `plugins:` from `agent.yaml`, writes each plugin's `config:`
 section to a runtime file, writes minimal plugin lifecycle state, and runs the
 plugin command with:

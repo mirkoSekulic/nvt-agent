@@ -19,6 +19,9 @@ func TestWorkControlPublishesOnlyFixedEvents(t *testing.T) {
 	if !strings.Contains(string(manifest), "name: nvt-work") || !strings.Contains(string(manifest), "nvt-work.py") {
 		t.Fatalf("work-control does not export nvt-work:\n%s", manifest)
 	}
+	if strings.HasPrefix(string(manifest), "command:") || strings.Contains(string(manifest), "\ncommand:") {
+		t.Fatalf("work-control must remain a commandless tool-only builtin:\n%s", manifest)
+	}
 	bin := t.TempDir()
 	capture := filepath.Join(t.TempDir(), "args.json")
 	stub := filepath.Join(bin, "agentdctl")

@@ -187,7 +187,16 @@ def plugin_name(plugin):
 
 
 def builtin_manifest(name):
-    return load_yaml(BUILTIN_PLUGIN_DIR / name / "plugin.yaml")
+    path = BUILTIN_PLUGIN_DIR / name / "plugin.yaml"
+    if not path.is_file():
+        raise ValueError(f"builtin plugin {name} manifest is missing: {path}")
+    return load_yaml(path)
+
+
+def validate_builtin_manifests(plugins):
+    for plugin in plugins:
+        if plugin_source(plugin) == "builtin":
+            builtin_manifest(plugin_name(plugin))
 
 
 def git_plugin_root(plugin):
@@ -203,19 +212,22 @@ def nested_command(value):
 
 
 def plugin_doctor_command(plugin):
+    source = plugin_source(plugin)
+    name = plugin_name(plugin)
+    if source == "builtin":
+        manifest = builtin_manifest(name)
+
     override = nested_command(plugin.get("doctor"))
     if override:
-        if plugin_source(plugin) == "git":
+        if source == "git":
             try:
                 return str(resolve_executable(git_plugin_root(plugin), override))
             except GitSourceError as error:
                 raise ValueError(f"plugin {plugin_name(plugin)} doctor command is invalid: {error}") from error
         return override
 
-    source = plugin_source(plugin)
-    name = plugin_name(plugin)
     if source == "builtin":
-        return nested_command(builtin_manifest(name).get("doctor"))
+        return nested_command(manifest.get("doctor"))
     if source == "custom":
         return None
     if source == "git":
@@ -273,6 +285,7 @@ def plugin_checks(selected_plugin=None):
     try:
         _path, config = load_agent_config()
         plugins = plugin_entries(config)
+        validate_builtin_manifests(plugins)
     except (OSError, yaml.YAMLError, ValueError) as error:
         return [fail("plugins", str(error))]
 
