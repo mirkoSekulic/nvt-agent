@@ -475,7 +475,7 @@ func repositoryGrant(provider, preset string, repositories []string) resolvedrun
 	grant := resolvedrun.BrokerGrant{Provider: provider, Repositories: repositories, Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: hosts, Git: true}
 	if preset == "github-app" {
 		grant.Preparations = []string{"identity"}
-		grant.Permissions = map[string]string{"contents": "write"}
+		grant.Permissions = map[string]string{"contents": "write", "workflows": "write"}
 	}
 	return grant
 }
