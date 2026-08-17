@@ -157,6 +157,10 @@ producer:
     appID: 123456
     installationID: 12345678
     existingSecret: nvt-github-app
+  schedulingReactions:
+    enabled: true
+    accepted: "+1"
+    rejected: "-1"
   submission:
     mode: scheduleAdmission
     admissionMode: profiled
@@ -175,6 +179,13 @@ use the typed `agentSchedule.producerPolicies` field shown below.
 The chart projects only a rotating `nvt-operator` audience token. The default
 producer AgentRun runtime image is the coordinated `runtime.image`; set
 `producer.agentRun.runtimeImage` only for an intentional override.
+
+Scheduling reactions default to enabled and are derived only from the
+operator's schedule-admission response. Confirmed scheduling and
+`duplicate-work` receive the accepted reaction; recognized definitive denials
+receive the rejected reaction. Deferred or uncertain outcomes receive none.
+Posting is bounded and best-effort and never changes scheduling or cursor
+behavior. The GitHub App needs **Issues: write** permission.
 
 Legacy/direct producer payloads can opt into AgentRun-scoped persistence:
 
@@ -213,6 +224,41 @@ broker:
     secretName: nvt-broker-tls
     existingSecret: ""
 ```
+
+Dynamic principal-owned accounts are a separate opt-in use of broker state.
+They require broker TLS, persistence, and a pre-created Secret referenced by
+`broker.envSecretName`; enrolled credentials never enter Helm values,
+ConfigMaps, Kubernetes Secrets, annotations, or events:
+
+```yaml
+broker:
+  envSecretName: nvt-broker-dynamic-account-auth
+  tls: {enabled: true}
+  persistence: {enabled: true}
+  config:
+    providers: []
+    dynamic-accounts:
+      enabled: true
+      state-dir: /state/principal-accounts
+      authentication:
+        hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+        max-eligibility-lease-seconds: 3600
+      provider-templates:
+        - name: approved-provider
+          plugin: company-oauth
+          credential-config-key: credentials-file
+          config: {}
+      credential-templates:
+        - name: member
+          label: Member
+          enrollment-adapter: company-oauth-file
+          provider-template: approved-provider
+```
+
+The HMAC value must be at least 32 bytes. Dynamic accounts remain absent unless
+explicitly enabled. Registry/storage corruption makes the broker unready, but
+one degraded account fails only its authenticated readiness and resolution;
+other dynamic accounts and static providers remain routable.
 
 Without `existingSecret`, Helm creates and preserves a self-signed CA and
 serving certificate across normal upgrades. The broker Deployment checksum
@@ -317,12 +363,38 @@ CRD default, which is direct.
 
 ## Execution profiles
 
-`agentSchedule.template`, `profiles`, `profileSelection`, and either the legacy
+`agentSchedule.template`, `profiles`, `profileSelection` (or explicitly enabled
+`principalCredentialSelection`), and either the legacy
 `allowedProducers` list or typed workflow `producerPolicies` configure profiled
 admission. Empty values
 preserve legacy full-`AgentRun` admission. Profiled admission requires a
 projected ServiceAccount token with audience `nvt-operator`; see the
 [AgentSchedule contract](../../operator/docs/agentschedule.md).
+
+`agentSchedule.maxParallelism` is the schedule-wide ceiling. Optional
+`agentSchedule.principalParallelism` adds a positive default per exact issuer
+and immutable subject plus up to 256 exact-principal overrides. Display names,
+provider usernames, profiles, and producers never form the capacity key. The
+operator remains single-replica with `Recreate` because admission locking is
+process-local.
+
+Dynamic principal resolution is disabled by default. Enable
+`operator.principalAccounts`, allow exact canonical issuers in producer
+policies, and map public broker credential templates only to complete mediated
+profiles. The operator replaces the reserved exact `$principal-account`
+placeholder with the broker's opaque provider instance; producers cannot choose
+the template, provider, generation, profile, grants, runtime, or egress policy.
+The broker URL must use verified TLS, and readiness/resolution disagreement or
+an expired eligibility lease fails closed without static fallback. Broker CA
+and assertion keys are mounted only into the operator, never producers or
+AgentRun Pods.
+
+Safe credential-template switching is separately opt-in. Broker and operator
+coordinate on an exact-principal reservation while the operator proves that no
+matching non-terminal AgentRun exists. The portal supplies only an opaque,
+target-free request ID. Active runs, pagination, or ambiguous provenance deny
+the switch before the credential runner starts. Disabling the layer restores
+locked-tombstone behavior without affecting static schedules.
 
 Scheduling fields in the shared template are passed to the generated agent Pod:
 

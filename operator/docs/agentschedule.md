@@ -7,7 +7,7 @@ The operator core remains producer-agnostic.
 ## Profiled schedules
 
 A profiled schedule owns a typed common template, named execution profiles,
-static principal selection, optional workflow profiles, and the exact
+static or explicitly enabled dynamic principal selection, optional workflow profiles, and the exact
 Kubernetes producer identities that may submit work. See
 [`operator/examples/agentschedule-profiled.yaml`](../examples/agentschedule-profiled.yaml)
 for a complete resource.
@@ -62,6 +62,18 @@ Producer work, workflow selection, prompts, and agent input cannot add or
 override it. See the AgentRun documentation for the container-only portability
 and security limits.
 
+Profiles may optionally pin the runtime model and reasoning effort. These
+administrator-owned values are snapshotted into each AgentRun; producer input
+cannot supply or override them:
+
+```yaml
+profiles:
+  - name: codex-high
+    runtime: {type: codex, autonomy: trusted-local, model: gpt-5.6-sol, effort: high}
+  - name: claude-high
+    runtime: {type: claude, autonomy: trusted-local, model: opus, effort: high}
+```
+
 Forward-proxy and transparent execution profiles may set the generic
 `egressMaxConcurrentTunnels` bound from 1 through 4096. It is snapshotted into
 the AgentRun with the other profile-owned egress settings. Omission uses
@@ -103,9 +115,15 @@ workflowProfiles:
   - name: implement-pr
     workspaceInstructions: |
       Implement the change and create a pull request.
+    lifecycle:
+      completeOn: [plugin.github.pr.merged, plugin.github.pr.closed]
+      failOn: [plugin.work.failed]
   - name: review-pr
     workspaceInstructions: |
       Review the pull request and report findings first.
+    lifecycle:
+      completeOn: [plugin.work.completed]
+      failOn: [plugin.work.failed]
 producerPolicies:
   - identity: system:serviceaccount:nvt:nvt-github-comments-producer
     workflows: [implement-pr, review-pr]
@@ -118,11 +136,64 @@ policy's optional default is used. Workflow selection is independent of
 principal-based execution-profile selection and cannot change runtime, auth,
 provider, broker, or egress configuration.
 
+When a workflow profile defines `lifecycle`, it completely replaces the
+template lifecycle in the immutable AgentRun snapshot; event lists are not
+merged. Omission preserves the template lifecycle exactly. Lifecycle is
+administrator-owned workflow policy and is never accepted from producer input.
+
 `profileSelection.rules` match exact `issuer` plus immutable `subject` values.
 `displayName` is stored for audit/display only and never participates in
 selection. Duplicate selectors/profile names, missing references, invalid
 `onNoMatch`, and unusable selection paths fail closed. There are no
 producer-selectable profile names, candidates, or fallbacks.
+
+### Dynamic principal-owned credentials
+
+`principalCredentialSelection` is a disabled-by-default alternative to static
+`profileSelection`. For the exact canonical issuer and immutable subject from
+an authenticated producer, the operator resolves a ready broker-owned account
+and maps its public credential template to an administrator-owned profile:
+
+```yaml
+principalCredentialSelection:
+  enabled: true
+  onNoMatch: deny
+  templateProfiles:
+    - template: approved-work
+      profile: mediated-work
+producerPolicies:
+  - identity: system:serviceaccount:nvt:producer
+    workflows: [implement]
+    allowedPrincipalIssuers: [https://identity.example/tenant]
+profiles:
+  - name: mediated-work
+    runtime: {type: generic-agent, autonomy: trusted-local}
+    agentRuntimeConfig:
+      command: agent
+      proxy: {provider: $principal-account}
+    egress: mediated
+    egressEnforcement: true
+    egressTransport: forward-proxy
+    broker:
+      grants:
+        - provider: $principal-account
+          materialization: header-inject
+          repositories: [example/*]
+          egressHosts: [provider.example]
+```
+
+The producer policy permits only exact canonical principal issuers. Current
+eligibility is a bounded broker lease, not a display name or login. The
+operator authenticates to the broker over verified TLS, requires readiness and
+resolution to agree, and substitutes only the exact `$principal-account`
+placeholder. Dynamic profiles must use mediated egress and cannot use
+file-bundle materialization for the principal-owned grant. Resolution failures
+never fall back to a static provider.
+
+The resolved principal, public template, opaque provider instance, credential
+generation, profile, and schedule provenance are frozen in the AgentRun.
+Duplicate work retries do not re-resolve. Producers cannot choose templates,
+providers, generations, profiles, grants, runtime settings, or egress policy.
 
 Profiled requests contain only an optional workflow name, work metadata, and
 prompt input:
@@ -132,6 +203,7 @@ prompt input:
   "workflow": "review-pr",
   "work": {
     "id": "github:example/repo:issue:123",
+    "group": "github:example/repo:issue:123:intent:pr-continue",
     "title": "Fix the failing test",
     "url": "https://github.com/example/repo/issues/123",
     "repository": "example/repo",
@@ -144,6 +216,11 @@ prompt input:
   "input": {"prompt": "Investigate and open a PR"}
 }
 ```
+
+`work.group` is optional bounded, non-secret concurrency metadata. Admission is
+an accepted duplicate while another member of the group is active; terminal
+members release the group. Exact work-ID deduplication still applies across
+retained terminal runs. The local-controller backend uses the same contract.
 
 The principal may be absent when `onNoMatch: useDefault` names a valid default.
 Unknown and missing principals follow `onNoMatch` exactly. Any top-level field
@@ -235,9 +312,26 @@ Kubernetes producer workload identity, not an end-user identity.
 
 ## Generic admission controls
 
-Both modes enforce suspend, max parallelism, and retained work-ID
-deduplication. The parallelism default is `1`. Admissions are serialized per
-schedule within the active operator process. The operator forces namespace and
+Both modes enforce suspend, global max parallelism, retained work-ID
+deduplication, and optional active work-group exclusion. Exact work and active
+group checks happen before capacity. The global default is `1`. Profiled
+schedules may additionally set a positive per-principal default and exact
+immutable-principal overrides:
+
+```yaml
+maxParallelism: 20
+principalParallelism:
+  defaultMaxParallelism: 2
+  overrides:
+    - issuer: https://identity.example/tenant
+      subject: immutable-user-42
+      maxParallelism: 5
+```
+
+The global limit remains the ceiling. Display names, profiles, providers, and
+producer identities do not affect the principal capacity key; terminal runs
+release both limits. Admissions are serialized per schedule within the active
+operator process. The operator forces namespace and
 ownership and records work/gateway metadata; `work.repository` is stored in
 `nvt.dev/work-repository` when present.
 
@@ -246,5 +340,12 @@ capacity, `401` for failed profiled authentication, `403` for unauthorized
 producer/profile denial, `400` for malformed or invalid requests/config, and
 `404` for a missing schedule.
 
-There is no external resolver, producer-selectable profile choice, repository
-templating, or gateway creator-only authorization in this version.
+When dynamic principal selection is absent, no broker resolver is contacted
+and static/legacy behavior is unchanged. No mode permits producer-selectable
+profiles, repository templating, or gateway creator-only authorization.
+
+Optional dynamic template switching uses the same exact-principal broker
+reservation as admission. The operator commits an opaque, target-free unlock
+only after a bounded uncached Kubernetes read proves that every matching run is
+terminal or absent. Active work returns a stable denial; pagination or
+ambiguous provenance fails closed.

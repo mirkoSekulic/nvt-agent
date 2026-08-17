@@ -93,6 +93,8 @@ workflow name is recorded separately in immutable `profileProvenance`.
 runtime:
   type: codex          # codex | claude
   autonomy: trusted-local
+  model: gpt-5.6-sol   # optional opaque runtime model identifier
+  effort: high         # optional runtime-supported effort
   user: root           # root | non-root
 ```
 
@@ -104,9 +106,16 @@ contract consumed by runtime bootstrap. `trusted-local` adds
 `--sandbox danger-full-access --ask-for-approval never` for Codex and
 `--dangerously-skip-permissions` for Claude; `interactive` adds no autonomy
 arguments. An explicitly configured `agent.config.runtime.args` list is a
-complete override and is preserved exactly, so the operator never appends
-potentially contradictory defaults. An explicit non-empty
+complete autonomy override. When typed `model` or `effort` is selected, the
+operator appends its selector to fresh and resume arguments. Raw model or
+effort selectors in either argument list are rejected rather than resolved by
+CLI ordering. When both typed fields are omitted, explicit arguments remain
+unchanged. An explicit non-empty
 `agent.config.runtime.command` is likewise preserved.
+
+Model values are runtime-owned opaque strings. Codex efforts are `minimal`,
+`low`, `medium`, `high`, and `xhigh`; Claude efforts are `low`, `medium`,
+`high`, `xhigh`, and `max`. Omitting a selector leaves the runtime default.
 
 Optional `runtimeAuth` copies files from a same-namespace Secret into a
 writable runtime home:
@@ -394,6 +403,13 @@ schedule identity and generation, selected profile, and the immutable
 principal issuer/subject plus optional display name. The fully resolved
 runtime, agent runtime config, egress, and broker grants are stored directly in
 the same `AgentRun`; later schedule edits do not re-resolve existing runs.
+
+For dynamic principal-owned admission,
+`profileProvenance.principalCredential` additionally freezes the public
+credential template, opaque provider instance ID, and credential generation
+returned by the broker. These fields are audit provenance, not secret material;
+reconnect, revoke, broker outage, and later schedule edits cannot rewrite the
+accepted run.
 
 ## Lifecycle
 
