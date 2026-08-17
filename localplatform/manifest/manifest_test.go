@@ -343,7 +343,7 @@ func TestBrokerGrantsDoNotCrossProfilesSharingAnAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	decoded.Profiles["other"] = Profile{Runtime: Runtime{Preset: "shell", Autonomy: "approval-required"}, Accounts: []string{"github"}}
-	decoded.Repositories["other"] = Repository{GitHub: "mirkoSekulic/other", Account: "github"}
+	decoded.Repositories["other"] = Repository{GitHub: "mirkoSekulic/other", Account: "github", Access: &RepositoryAccess{Permissions: map[string]string{"contents": "write", "pull_requests": "write", "workflows": "write"}}}
 	decoded.Workflows["other"] = Workflow{Profile: "other", Repository: "other", Retention: "disposable"}
 	compiled, err := Compile(decoded)
 	if err != nil {
@@ -356,7 +356,13 @@ func TestBrokerGrantsDoNotCrossProfilesSharingAnAccount(t *testing.T) {
 	if len(grants["other"]) != 1 || strings.Join(grants["other"][0].Repositories, ",") != "mirkoSekulic/other" {
 		t.Fatalf("other profile grants = %#v", grants["other"])
 	}
+	if grants["other"][0].Permissions["workflows"] != "write" {
+		t.Fatalf("opted-in profile omitted workflow authority: %#v", grants["other"])
+	}
 	for _, grant := range grants["development"] {
+		if grant.Purpose == "repository" && grant.Permissions["workflows"] != "" {
+			t.Fatalf("default profile inherited workflow authority: %#v", grant)
+		}
 		for _, repository := range grant.Repositories {
 			if repository == "mirkoSekulic/other" {
 				t.Fatal("repository grant crossed profile boundary")

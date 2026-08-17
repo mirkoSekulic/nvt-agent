@@ -259,8 +259,10 @@ class Broker:
             raise ProviderError("headers-invalid")
         paginate = bool(payload.get("paginate", False))
         provider = self.provider(provider_name)
-        effective_repositories = self.agents.effective_repositories(agent, provider_name)
-        result, repo = provider.http_request(method, url, headers, paginate, effective_repositories)
+        grants = self.agents.grants(agent, provider_name)
+        if not grants:
+            raise ProviderError("provider-not-granted")
+        result, repo = provider.http_request(method, url, headers, paginate, grants)
         self.audit.write(
             request_id=request_id,
             agent=agent["id"],

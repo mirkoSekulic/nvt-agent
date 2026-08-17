@@ -161,14 +161,14 @@ class ExecutableProviderAdapter(ProviderAdapter):
             raise ProviderError("provider-protocol-error", "provider returned an invalid target", 502)
         return repo.audit_target
 
-    def http_request(self, method, url, headers, paginate, effective_repositories):
+    def http_request(self, method, url, headers, paginate, grants):
         self._ensure_capability("http.request")
         result = self._request("http.request", {
             "method": method,
             "url": url,
             "headers": headers,
             "paginate": paginate,
-            "effective_repositories": effective_repositories,
+            "grants": grants,
         })
         result = self._object(result, "http.request result")
         audit_target = self._audit_target(result.pop("audit_target", None))

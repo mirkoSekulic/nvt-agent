@@ -54,8 +54,8 @@ class InProcessProviderAdapter(ProviderAdapter):
             return bool(self.injection_hosts) and callable(getattr(self._provider, "injection_headers", None))
         return False
 
-    def http_request(self, method, url, headers, paginate, effective_repositories):
-        return self._provider.http_request(method, url, headers, paginate, effective_repositories)
+    def http_request(self, method, url, headers, paginate, grants):
+        return self._provider.http_request(method, url, headers, paginate, grants)
 
     def normalize_target(self, target):
         return self._provider.normalize_target(target)

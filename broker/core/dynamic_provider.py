@@ -83,8 +83,8 @@ class DynamicProviderAdapter(ProviderAdapter):
     def supports(self, capability):
         return self._invoke("supports", capability)
 
-    def http_request(self, method, url, headers, paginate, effective_repositories):
-        return self._invoke("http_request", method, url, headers, paginate, effective_repositories)
+    def http_request(self, method, url, headers, paginate, grants):
+        return self._invoke("http_request", method, url, headers, paginate, grants)
 
     def normalize_target(self, target):
         return self._invoke("normalize_target", target)
