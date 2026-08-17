@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -24,10 +25,18 @@ import (
 const CACertFileName = "ca.crt"
 
 const (
-	caValidity       = 30 * 24 * time.Hour
+	caValidity = 30 * 24 * time.Hour
+	// CARenewalMargin leaves enough time to coordinate replacement of every
+	// consumer before the old trust anchor expires.
+	CARenewalMargin  = 7 * 24 * time.Hour
 	leafValidity     = 6 * time.Hour
 	leafRemintMargin = time.Hour
 )
+
+// ErrCARenewalRequired identifies an otherwise parseable durable CA that is
+// not currently safe to use. Callers may rotate only for this error; malformed
+// or unconstrained keypairs must continue to fail closed.
+var ErrCARenewalRequired = errors.New("egress CA renewal required")
 
 // localLeafName is the only DNS name leafs are ever minted for. Together
 // with the loopback IP SANs it defines the local redirect-name boundary.
@@ -158,6 +167,10 @@ func LoadCA(certFile, keyFile string, leafDNSNames ...string) (*CA, error) {
 // constraints, so leaf signing for those names fails verification at handshake
 // time — the durable Secret must be regenerated when the allowlist changes.
 func LoadCAWithUpstreams(certFile, keyFile string, leafDNSNames, upstreamLeafNames []string) (*CA, error) {
+	return loadCAWithUpstreamsAt(certFile, keyFile, leafDNSNames, upstreamLeafNames, time.Now())
+}
+
+func loadCAWithUpstreamsAt(certFile, keyFile string, leafDNSNames, upstreamLeafNames []string, now time.Time) (*CA, error) {
 	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
 		return nil, fmt.Errorf("read CA certificate: %w", err)
@@ -206,6 +219,12 @@ func LoadCAWithUpstreams(certFile, keyFile string, leafDNSNames, upstreamLeafNam
 	// only as a confusing runtime handshake error instead of loudly at boot.
 	if err := ca.verifyDurableConstraints(); err != nil {
 		return nil, err
+	}
+	if now.Before(cert.NotBefore) {
+		return nil, fmt.Errorf("%w: certificate is not valid before %s", ErrCARenewalRequired, cert.NotBefore.UTC().Format(time.RFC3339))
+	}
+	if !now.Add(CARenewalMargin).Before(cert.NotAfter) {
+		return nil, fmt.Errorf("%w: certificate expires at %s (required remaining validity %s)", ErrCARenewalRequired, cert.NotAfter.UTC().Format(time.RFC3339), CARenewalMargin)
 	}
 	return ca, nil
 }
@@ -267,6 +286,13 @@ trimRight:
 // CertPEM returns the CA certificate (public material only).
 func (ca *CA) CertPEM() []byte {
 	return append([]byte(nil), ca.certPEM...)
+}
+
+// RenewAfter is the first instant at which this CA enters its bounded renewal
+// window. It contains no secret material and is safe to persist as scheduling
+// metadata.
+func (ca *CA) RenewAfter() time.Time {
+	return ca.cert.NotAfter.Add(-CARenewalMargin)
 }
 
 // WriteKeyPair writes the durable CA certificate and private key. This is for

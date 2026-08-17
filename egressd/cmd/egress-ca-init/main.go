@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/egressd/internal/egress"
 )
@@ -44,12 +46,28 @@ func run(args []string) error {
 	}
 	certExists := fileExists(*certFile)
 	keyExists := fileExists(*keyFile)
+	rotationMarker := *keyFile + ".rotation"
+	if fileExists(rotationMarker) {
+		if os.Getenv("NVT_EGRESS_CA_CHECK_ONLY") == "1" {
+			fmt.Fprintln(os.Stdout, "renewal-required")
+			return nil
+		}
+		return rotateCA(*certFile, *keyFile, rotationMarker, []string(leafDNSNames), []string(upstreamLeafNames), "recover interrupted rotation")
+	}
 	if certExists || keyExists {
 		if !certExists || !keyExists {
 			return fmt.Errorf("durable CA is incomplete; remove both files and retry")
 		}
-		if _, err := egress.LoadCAWithUpstreams(*certFile, *keyFile, []string(leafDNSNames), []string(upstreamLeafNames)); err != nil {
+		if ca, err := egress.LoadCAWithUpstreams(*certFile, *keyFile, []string(leafDNSNames), []string(upstreamLeafNames)); errors.Is(err, egress.ErrCARenewalRequired) {
+			if os.Getenv("NVT_EGRESS_CA_CHECK_ONLY") == "1" {
+				fmt.Fprintln(os.Stdout, "renewal-required")
+				return nil
+			}
+			return rotateCA(*certFile, *keyFile, rotationMarker, []string(leafDNSNames), []string(upstreamLeafNames), fmt.Sprintf("certificate entered the %s renewal window", egress.CARenewalMargin))
+		} else if err != nil {
 			return fmt.Errorf("existing durable CA does not match configured names; delete the egress-ca directory to rotate it: %w", err)
+		} else if os.Getenv("NVT_EGRESS_CA_CHECK_ONLY") == "1" {
+			fmt.Fprintf(os.Stdout, "renew-after=%s\n", ca.RenewAfter().UTC().Format(time.RFC3339))
 		}
 		return nil
 	}
@@ -60,6 +78,24 @@ func run(args []string) error {
 	if err := ca.WriteKeyPair(*certFile, *keyFile); err != nil {
 		return fmt.Errorf("write CA: %w", err)
 	}
+	return nil
+}
+
+func rotateCA(certFile, keyFile, marker string, leafDNSNames, upstreamLeafNames []string, reason string) error {
+	if err := os.WriteFile(marker, []byte("rotation-in-progress\n"), 0o600); err != nil {
+		return fmt.Errorf("write CA rotation marker: %w", err)
+	}
+	ca, err := egress.NewCAWithUpstreams(leafDNSNames, upstreamLeafNames)
+	if err != nil {
+		return fmt.Errorf("generate replacement CA: %w", err)
+	}
+	if err := ca.WriteKeyPair(certFile, keyFile); err != nil {
+		return fmt.Errorf("write replacement CA: %w", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		return fmt.Errorf("complete CA rotation: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "egress-ca-init: rotated durable CA (%s)\n", reason)
 	return nil
 }
 

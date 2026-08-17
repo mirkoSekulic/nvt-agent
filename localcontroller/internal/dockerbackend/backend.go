@@ -360,13 +360,28 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 		if target != "" {
 			return controller.BackendObservation{TerminalTarget: target, LifecycleCursor: cursor}, nil
 		}
-		if state.Health == nil || state.Health.Status == "healthy" {
-			return controller.BackendObservation{Ready: true, LifecycleCursor: cursor}, nil
+		if state.Health != nil && state.Health.Status != "healthy" && state.Health.Status != "starting" {
+			return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: cursor}, nil
 		}
-		if state.Health.Status == "starting" {
-			return controller.BackendObservation{LifecycleCursor: cursor}, nil
+		if desired.Resolved.Egress.Mode == "mediated" {
+			rotated, err := backend.reconcileComposeCARotation(operationContext, names, true)
+			if err != nil || rotated {
+				return controller.BackendObservation{}, controller.ErrBackendRetryable
+			}
 		}
-		return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: cursor}, nil
+		return controller.BackendObservation{Ready: state.Health == nil || state.Health.Status == "healthy", LifecycleCursor: cursor}, nil
+	}
+	if desired.Resolved.Egress.Mode == "mediated" {
+		rollout, rolloutErr := readComposeCARollout(names)
+		if rolloutErr != nil {
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
+		}
+		if rollout.Phase != "" {
+			if _, err := backend.reconcileComposeCARotation(operationContext, names, false); err != nil {
+				return controller.BackendObservation{}, controller.ErrBackendRetryable
+			}
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
+		}
 	}
 	cursor, target, lifecycleErr := backend.observeStoppedLifecycle(operationContext, desired, names, labels)
 	if lifecycleErr != nil {
@@ -379,6 +394,109 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 		return controller.BackendObservation{TerminalTarget: controller.StateCompleted, LifecycleCursor: cursor}, nil
 	}
 	return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: cursor}, nil
+}
+
+type composeCARollout struct {
+	Phase     string    `json:"phase,omitempty"`
+	NextCheck time.Time `json:"next_check,omitempty"`
+}
+
+func composeCARolloutPath(names resourceNames) string {
+	return filepath.Join(filepath.Dir(names.composeFile), "egress-ca-rollout.json")
+}
+
+func composeCARolloutExists(names resourceNames) bool {
+	state, err := readComposeCARollout(names)
+	return err == nil && state.Phase != ""
+}
+
+func readComposeCARollout(names resourceNames) (composeCARollout, error) {
+	encoded, err := os.ReadFile(composeCARolloutPath(names))
+	if errors.Is(err, os.ErrNotExist) {
+		return composeCARollout{}, nil
+	}
+	if err != nil {
+		return composeCARollout{}, err
+	}
+	var state composeCARollout
+	if json.Unmarshal(encoded, &state) != nil {
+		return composeCARollout{}, errors.New("invalid Compose CA rollout state")
+	}
+	return state, nil
+}
+
+func writeComposeCARollout(names resourceNames, state composeCARollout) error {
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(composeCARolloutPath(names), append(encoded, '\n'), 0o600)
+}
+
+func (backend *Backend) reconcileComposeCARotation(ctx context.Context, names resourceNames, agentRunning bool) (bool, error) {
+	state, err := readComposeCARollout(names)
+	if err != nil {
+		return false, err
+	}
+	if state.Phase == "" && !state.NextCheck.IsZero() && time.Now().Before(state.NextCheck) {
+		return false, nil
+	}
+	if state.Phase == "" {
+		check, err := backend.docker.Run(ctx, nil, "compose", "-p", names.project, "-f", names.composeFile, "run", "--rm", "-e", "NVT_EGRESS_CA_CHECK_ONLY=1", "ca-init")
+		if err != nil {
+			return false, err
+		}
+		if !strings.Contains(string(check), "renewal-required") {
+			value := ""
+			for _, line := range strings.Split(string(check), "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "renew-after=") {
+					value = strings.TrimPrefix(strings.TrimSpace(line), "renew-after=")
+				}
+			}
+			next, parseErr := time.Parse(time.RFC3339, value)
+			if parseErr != nil {
+				return false, errors.New("invalid egress CA renewal schedule")
+			}
+			return false, writeComposeCARollout(names, composeCARollout{NextCheck: next})
+		}
+		state = composeCARollout{Phase: "planned"}
+		if err := writeComposeCARollout(names, state); err != nil {
+			return false, err
+		}
+	}
+	if state.Phase == "planned" {
+		if agentRunning {
+			if _, err := backend.docker.Run(ctx, nil, "compose", "-p", names.project, "-f", names.composeFile, "stop", "agent", "egressd"); err != nil {
+				return false, err
+			}
+			agentRunning = false
+		}
+		state.Phase = "stopped"
+		if err := writeComposeCARollout(names, state); err != nil {
+			return false, err
+		}
+	}
+	if state.Phase == "stopped" {
+		if _, err := backend.docker.Run(ctx, nil, "compose", "-p", names.project, "-f", names.composeFile, "run", "--rm", "ca-init"); err != nil {
+			return false, err
+		}
+		state.Phase = "rotated"
+		if err := writeComposeCARollout(names, state); err != nil {
+			return false, err
+		}
+	}
+	if state.Phase != "rotated" {
+		return false, errors.New("invalid Compose CA rollout phase")
+	}
+	if !agentRunning {
+		if _, err := backend.docker.Run(ctx, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d", "--force-recreate", "egressd", "agent"); err != nil {
+			return false, err
+		}
+	}
+	if err := os.Remove(composeCARolloutPath(names)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return true, nil
 }
 
 func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRun) error {

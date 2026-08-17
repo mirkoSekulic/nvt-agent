@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -782,6 +783,32 @@ func TestLoadCAVerifiesDurableConstraints(t *testing.T) {
 	os.WriteFile(uk, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600)
 	if _, err := LoadCA(uc, uk); err == nil {
 		t.Fatal("LoadCA accepted a durable CA with no critical name constraints")
+	}
+}
+
+func TestLoadCARejectsUnsafeValidityWindows(t *testing.T) {
+	ca, err := NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile := writeCAFiles(t, ca)
+	cases := []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		{name: "valid", now: ca.cert.NotBefore.Add(time.Hour)},
+		{name: "near expiry", now: ca.cert.NotAfter.Add(-CARenewalMargin), want: true},
+		{name: "expired", now: ca.cert.NotAfter.Add(time.Second), want: true},
+		{name: "not yet valid", now: ca.cert.NotBefore.Add(-time.Second), want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, got := loadCAWithUpstreamsAt(certFile, keyFile, nil, nil, tc.now)
+			if tc.want != errors.Is(got, ErrCARenewalRequired) {
+				t.Fatalf("error = %v, renewal required = %v", got, tc.want)
+			}
+		})
 	}
 }
 

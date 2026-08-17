@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -120,17 +121,21 @@ const (
 	// in its own Pod behind a per-run Service. The operator owns a durable
 	// per-run CA Secret mounted only into egressd and publishes ca.crt only to
 	// the agent ConfigMap.
-	agentRunLabelKey       = "nvt.dev/agentrun"
-	roleLabelKey           = "nvt.dev/role"
-	roleLabelAgent         = "agent"
-	roleLabelEgressd       = "egressd"
-	egressCAPort           = 8470
-	egressRouteBasePort    = 8471
-	egressForwardProxyPort = 8473 // forward-proxy CONNECT listener (own-Pod)
-	egressCACertKey        = "ca.crt"
-	egressCAKeyKey         = "ca.key"
-	egressdConfigName      = "egressd-config"
-	egressdReadyRequeue    = 2 * time.Second
+	agentRunLabelKey             = "nvt.dev/agentrun"
+	roleLabelKey                 = "nvt.dev/role"
+	roleLabelAgent               = "agent"
+	roleLabelEgressd             = "egressd"
+	egressCAPort                 = 8470
+	egressRouteBasePort          = 8471
+	egressForwardProxyPort       = 8473 // forward-proxy CONNECT listener (own-Pod)
+	egressCACertKey              = "ca.crt"
+	egressCAKeyKey               = "ca.key"
+	egressCAGenerationAnnotation = "nvt.dev/egress-ca-generation"
+	egressCADigestAnnotation     = "nvt.dev/egress-ca-sha256"
+	egressCARenewalMargin        = 7 * 24 * time.Hour
+	egressCAValidity             = 30 * 24 * time.Hour
+	egressdConfigName            = "egressd-config"
+	egressdReadyRequeue          = 2 * time.Second
 
 	brokerAgentsConfigMapName              = "nvt-broker-agents"
 	brokerAgentsConfigKey                  = "agents.yaml"
@@ -159,6 +164,11 @@ const (
 	unexpectedAgentExitReason              = "Agent container terminated unexpectedly"
 	generatedTokenByteLength               = 32
 	defaultRunRetentionSeconds             = 30 * 24 * 60 * 60
+)
+
+var (
+	errEgressCARotationInProgress = fmt.Errorf("egress CA rotation in progress")
+	errEgressCAValidity           = fmt.Errorf("egress CA validity requires rotation")
 )
 
 var defaultExternalTCPPorts = []int{80, 443}
@@ -368,6 +378,22 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := r.ensureImmutablePodSecurityState(ctx, &agentRun, existingPod); err != nil {
 			return ctrl.Result{}, err
 		}
+		// Record a terminal workload before any maintenance path can replace its
+		// Pod. In particular, CA rotation must never erase the only durable
+		// lifecycle observation and re-execute a completed entrypoint.
+		rotationOwnsTermination := egressCARotationIntent(&agentRun) && !existingPod.DeletionTimestamp.IsZero()
+		if !rotationOwnsTermination {
+			observed := agentRun
+			SyncAgentRunLifecycleFromPodTermination(&observed, existingPod, r.now())
+			SyncAgentRunStatusFromPod(&observed, existingPod, r.now())
+			if IsTerminalAgentRunPhase(observed.Status.Phase) {
+				agentRun.Status = observed.Status
+				if err := r.Status().Update(ctx, &agentRun); err != nil {
+					return ctrl.Result{}, fmt.Errorf("record terminal AgentRun Pod before maintenance: %w", err)
+				}
+				return r.reconcileTerminalResourceCleanup(ctx, &agentRun)
+			}
+		}
 	}
 	conditionsChanged := false
 	if existingPod == nil {
@@ -461,6 +487,14 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// injectable material lazily and fail-closed on the first proxied
 		// request, and CA generation needs no broker at all.
 		if err := r.reconcileEgressCASecret(ctx, &agentRun); err != nil {
+			if err == errEgressCARotationInProgress {
+				if r.setRunCondition(&agentRun, ConditionEgressCAPublished, metav1.ConditionFalse, "EgressCARotating", "rotating egress CA and recreating trust consumers") {
+					if statusErr := r.Status().Update(ctx, &agentRun); statusErr != nil {
+						return ctrl.Result{}, statusErr
+					}
+				}
+				return ctrl.Result{RequeueAfter: egressdReadyRequeue}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		if err := r.reconcileNetworkPolicies(ctx, &agentRun); err != nil {
@@ -549,7 +583,15 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if deadlineExceeded || err != nil {
 		return deadlineResult, err
 	}
-	return earliestRequeue(deadlineResult, workspaceResult), nil
+	result := earliestRequeue(deadlineResult, workspaceResult)
+	if enforced {
+		caResult, caErr := r.egressCARenewalRequeue(ctx, &agentRun)
+		if caErr != nil {
+			return ctrl.Result{}, caErr
+		}
+		result = earliestRequeue(result, caResult)
+	}
+	return result, nil
 }
 
 func hasLegacyExternalFinalizer(agentRun *nvtv1alpha1.AgentRun) bool {
@@ -578,6 +620,22 @@ func earliestRequeue(first, second ctrl.Result) ctrl.Result {
 		first.RequeueAfter = second.RequeueAfter
 	}
 	return first
+}
+
+func (r *AgentRunReconciler) egressCARenewalRequeue(ctx context.Context, run *nvtv1alpha1.AgentRun) (ctrl.Result, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: EgressCASecretName(run.Name)}, secret); err != nil {
+		return ctrl.Result{}, fmt.Errorf("get egress CA renewal deadline: %w", err)
+	}
+	certs, err := parseCACertificatesPEM(secret.Data[egressCACertKey])
+	if err != nil || len(certs) == 0 {
+		return ctrl.Result{}, fmt.Errorf("read egress CA renewal deadline: %w", err)
+	}
+	delay := certs[0].NotAfter.Add(-egressCARenewalMargin).Sub(r.now().Time)
+	if delay <= 0 {
+		delay = time.Second
+	}
+	return ctrl.Result{RequeueAfter: delay}, nil
 }
 
 // SetupWithManager registers the AgentRun controller with the manager.
@@ -1799,6 +1857,11 @@ func (r *AgentRunReconciler) createAgentPod(ctx context.Context, agentRun *nvtv1
 	if err != nil {
 		return nil, err
 	}
+	if AgentRunEgressEnforced(agentRun) {
+		if err := r.applyEgressCAGeneration(ctx, agentRun, desired); err != nil {
+			return nil, err
+		}
+	}
 	if createErr := r.Create(ctx, desired); createErr != nil {
 		return nil, fmt.Errorf("create AgentRun Pod: %w", createErr)
 	}
@@ -2084,6 +2147,11 @@ func enforcementAgentPodGatesHold(agentRun *nvtv1alpha1.AgentRun) bool {
 		meta.IsStatusConditionTrue(agentRun.Status.Conditions, ConditionEgressCAPublished)
 }
 
+func egressCARotationIntent(agentRun *nvtv1alpha1.AgentRun) bool {
+	condition := meta.FindStatusCondition(agentRun.Status.Conditions, ConditionEgressCAPublished)
+	return condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == "EgressCARotating"
+}
+
 // reconcileEnforcementGates advances the own-Pod machine past egressd
 // creation: wait for egressd Ready, then publish the validated Secret-backed
 // CA. Returns proceed=true only when the agent Pod may be created this pass.
@@ -2134,7 +2202,7 @@ func (r *AgentRunReconciler) publishEgressCAConfigMap(ctx context.Context, agent
 		return false, fmt.Errorf("egress CA Secret %s/%s exists but is not controlled by AgentRun %s", secret.Namespace, secret.Name, agentRun.Name)
 	}
 	certPEM := secret.Data[egressCACertKey]
-	if err := validateCAKeyPairPEM(certPEM, secret.Data[egressCAKeyKey]); err != nil {
+	if err := validateCAKeyPairPEMAt(certPEM, secret.Data[egressCAKeyKey], r.now().Time); err != nil {
 		return false, fmt.Errorf("egress CA Secret contains invalid keypair: %w", err)
 	}
 	configMap := &corev1.ConfigMap{}
@@ -2144,11 +2212,14 @@ func (r *AgentRunReconciler) publishEgressCAConfigMap(ctx context.Context, agent
 		if !metav1.IsControlledBy(configMap, agentRun) {
 			return false, fmt.Errorf("egress CA ConfigMap %s/%s exists but is not controlled by AgentRun %s", key.Namespace, key.Name, agentRun.Name)
 		}
+		desiredAnnotations := caGenerationAnnotations(certPEM, secret.Annotations[egressCAGenerationAnnotation])
 		if configMap.Data[egressCACertKey] == string(certPEM) &&
-			reflect.DeepEqual(configMap.Labels, agentRunLabels(agentRun.Name)) {
+			reflect.DeepEqual(configMap.Labels, agentRunLabels(agentRun.Name)) &&
+			reflect.DeepEqual(configMap.Annotations, desiredAnnotations) {
 			return true, nil
 		}
 		configMap.Labels = agentRunLabels(agentRun.Name)
+		configMap.Annotations = desiredAnnotations
 		configMap.Data = map[string]string{egressCACertKey: string(certPEM)}
 		if err := r.Update(ctx, configMap); err != nil {
 			return false, fmt.Errorf("update egress CA ConfigMap: %w", err)
@@ -2162,6 +2233,7 @@ func (r *AgentRunReconciler) publishEgressCAConfigMap(ctx context.Context, agent
 	if err != nil {
 		return false, err
 	}
+	desired.Annotations = caGenerationAnnotations(certPEM, secret.Annotations[egressCAGenerationAnnotation])
 	if err := r.Create(ctx, desired); err != nil {
 		return false, fmt.Errorf("create egress CA ConfigMap: %w", err)
 	}
@@ -2203,6 +2275,10 @@ func parseCACertificatesPEM(data []byte) ([]*x509.Certificate, error) {
 }
 
 func validateCAKeyPairPEM(certPEM, keyPEM []byte) error {
+	return validateCAKeyPairPEMAt(certPEM, keyPEM, time.Now())
+}
+
+func validateCAKeyPairPEMAt(certPEM, keyPEM []byte, now time.Time) error {
 	certs, err := parseCACertificatesPEM(certPEM)
 	if err != nil {
 		return err
@@ -2231,6 +2307,12 @@ func validateCAKeyPairPEM(certPEM, keyPEM []byte) error {
 	if certKey.Curve != key.Curve || certKey.X.Cmp(key.X) != 0 || certKey.Y.Cmp(key.Y) != 0 {
 		return fmt.Errorf("%s does not match %s", egressCAKeyKey, egressCACertKey)
 	}
+	if now.Before(certs[0].NotBefore) {
+		return fmt.Errorf("%w: certificate is not valid before %s", errEgressCAValidity, certs[0].NotBefore.UTC().Format(time.RFC3339))
+	}
+	if !now.Add(egressCARenewalMargin).Before(certs[0].NotAfter) {
+		return fmt.Errorf("%w: certificate expires at %s inside the %s renewal window", errEgressCAValidity, certs[0].NotAfter.UTC().Format(time.RFC3339), egressCARenewalMargin)
+	}
 	return nil
 }
 
@@ -2239,9 +2321,10 @@ func validateCAKeyPairPEM(certPEM, keyPEM []byte) error {
 func DesiredEgressCAConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme, certPEM []byte) (*corev1.ConfigMap, error) {
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      EgressCAConfigMapName(agentRun.Name),
-			Namespace: agentRun.Namespace,
-			Labels:    agentRunLabels(agentRun.Name),
+			Name:        EgressCAConfigMapName(agentRun.Name),
+			Namespace:   agentRun.Namespace,
+			Labels:      agentRunLabels(agentRun.Name),
+			Annotations: caGenerationAnnotations(certPEM, "1"),
 		},
 		Data: map[string]string{egressCACertKey: string(certPEM)},
 	}
@@ -2259,8 +2342,56 @@ func (r *AgentRunReconciler) reconcileEgressCASecret(ctx context.Context, agentR
 		if !metav1.IsControlledBy(secret, agentRun) {
 			return fmt.Errorf("egress CA Secret %s/%s exists but is not controlled by AgentRun %s", secret.Namespace, secret.Name, agentRun.Name)
 		}
-		if err := validateCAKeyPairPEM(secret.Data[egressCACertKey], secret.Data[egressCAKeyKey]); err != nil {
-			return fmt.Errorf("egress CA Secret %s/%s has invalid keypair: %w", secret.Namespace, secret.Name, err)
+		if err := validateCAKeyPairPEMAt(secret.Data[egressCACertKey], secret.Data[egressCAKeyKey], r.now().Time); err != nil {
+			if !stderrors.Is(err, errEgressCAValidity) {
+				return fmt.Errorf("egress CA Secret %s/%s has invalid keypair: %w", secret.Namespace, secret.Name, err)
+			}
+			if !egressCARotationIntent(agentRun) {
+				r.setRunCondition(agentRun, ConditionEgressCAPublished, metav1.ConditionFalse, "EgressCARotating", "rotating egress CA and recreating trust consumers")
+				if statusErr := r.Status().Update(ctx, agentRun); statusErr != nil {
+					return fmt.Errorf("persist egress CA rotation intent: %w", statusErr)
+				}
+				return errEgressCARotationInProgress
+			}
+			for _, podName := range []string{AgentPodName(agentRun.Name), EgressdPodName(agentRun.Name)} {
+				pod := &corev1.Pod{}
+				if getErr := r.Get(ctx, client.ObjectKey{Namespace: agentRun.Namespace, Name: podName}, pod); getErr == nil {
+					if !metav1.IsControlledBy(pod, agentRun) {
+						return fmt.Errorf("refusing CA rotation: Pod %s is not controlled by AgentRun", podName)
+					}
+					if !pod.DeletionTimestamp.IsZero() {
+						return errEgressCARotationInProgress
+					}
+					if deleteErr := r.Delete(ctx, pod); deleteErr != nil {
+						return fmt.Errorf("delete stale CA consumer Pod %s: %w", podName, deleteErr)
+					}
+					return errEgressCARotationInProgress
+				} else if !errors.IsNotFound(getErr) {
+					return getErr
+				}
+			}
+			generation, _ := strconv.ParseUint(secret.Annotations[egressCAGenerationAnnotation], 10, 64)
+			data, generateErr := generateEgressCASecretDataAt(append(egressdLeafDNSNames(agentRun), forwardProxyUpstreamHosts(agentRun)...), r.now().Time)
+			if generateErr != nil {
+				return generateErr
+			}
+			secret.Data = data
+			secret.Annotations = caGenerationAnnotations(data[egressCACertKey], strconv.FormatUint(generation+1, 10))
+			if updateErr := r.Update(ctx, secret); updateErr != nil {
+				return fmt.Errorf("rotate egress CA Secret: %w", updateErr)
+			}
+			return errEgressCARotationInProgress
+		}
+		generation := secret.Annotations[egressCAGenerationAnnotation]
+		if generation == "" {
+			generation = "1"
+		}
+		desiredAnnotations := caGenerationAnnotations(secret.Data[egressCACertKey], generation)
+		if !reflect.DeepEqual(secret.Annotations, desiredAnnotations) {
+			secret.Annotations = desiredAnnotations
+			if err := r.Update(ctx, secret); err != nil {
+				return fmt.Errorf("repair egress CA generation metadata: %w", err)
+			}
 		}
 		return nil
 	}
@@ -2271,15 +2402,16 @@ func (r *AgentRunReconciler) reconcileEgressCASecret(ctx context.Context, agentR
 	// hosts, or the agent's TLS verification of the minted upstream leaf fails
 	// the CA name constraint.
 	leafNames := append(egressdLeafDNSNames(agentRun), forwardProxyUpstreamHosts(agentRun)...)
-	data, err := generateEgressCASecretData(leafNames)
+	data, err := generateEgressCASecretDataAt(leafNames, r.now().Time)
 	if err != nil {
 		return err
 	}
 	desired := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      EgressCASecretName(agentRun.Name),
-			Namespace: agentRun.Namespace,
-			Labels:    agentRunLabels(agentRun.Name),
+			Name:        EgressCASecretName(agentRun.Name),
+			Namespace:   agentRun.Namespace,
+			Labels:      agentRunLabels(agentRun.Name),
+			Annotations: caGenerationAnnotations(data[egressCACertKey], "1"),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: data,
@@ -2294,6 +2426,10 @@ func (r *AgentRunReconciler) reconcileEgressCASecret(ctx context.Context, agentR
 }
 
 func generateEgressCASecretData(leafDNSNames []string) (map[string][]byte, error) {
+	return generateEgressCASecretDataAt(leafDNSNames, time.Now())
+}
+
+func generateEgressCASecretDataAt(leafDNSNames []string, now time.Time) (map[string][]byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate egress CA key: %w", err)
@@ -2306,8 +2442,8 @@ func generateEgressCASecretData(leafDNSNames []string) (map[string][]byte, error
 	template := &x509.Certificate{
 		SerialNumber:                serial,
 		Subject:                     pkix.Name{CommonName: "nvt-egressd per-run CA"},
-		NotBefore:                   time.Now().Add(-5 * time.Minute),
-		NotAfter:                    time.Now().Add(30 * 24 * time.Hour),
+		NotBefore:                   now.Add(-5 * time.Minute),
+		NotAfter:                    now.Add(egressCAValidity),
 		IsCA:                        true,
 		BasicConstraintsValid:       true,
 		MaxPathLenZero:              true,
@@ -2339,6 +2475,25 @@ func generateEgressCASecretData(leafDNSNames []string) (map[string][]byte, error
 	}, nil
 }
 
+func caGenerationAnnotations(certPEM []byte, generation string) map[string]string {
+	digest := sha256.Sum256(certPEM)
+	return map[string]string{egressCAGenerationAnnotation: generation, egressCADigestAnnotation: hex.EncodeToString(digest[:])}
+}
+
+func (r *AgentRunReconciler) applyEgressCAGeneration(ctx context.Context, run *nvtv1alpha1.AgentRun, pod *corev1.Pod) error {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: EgressCASecretName(run.Name)}, secret); err != nil {
+		return fmt.Errorf("get egress CA generation: %w", err)
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	for _, key := range []string{egressCAGenerationAnnotation, egressCADigestAnnotation} {
+		pod.Annotations[key] = secret.Annotations[key]
+	}
+	return nil
+}
+
 func (r *AgentRunReconciler) reconcileEgressdPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
 	pod := &corev1.Pod{}
 	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressdPodName(agentRun.Name)}
@@ -2355,6 +2510,9 @@ func (r *AgentRunReconciler) reconcileEgressdPod(ctx context.Context, agentRun *
 	}
 	desired, err := DesiredEgressdPod(agentRun, r.Scheme)
 	if err != nil {
+		return err
+	}
+	if err := r.applyEgressCAGeneration(ctx, agentRun, desired); err != nil {
 		return err
 	}
 	if err := r.Create(ctx, desired); err != nil {
