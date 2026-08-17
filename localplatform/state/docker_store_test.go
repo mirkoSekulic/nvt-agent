@@ -27,6 +27,12 @@ type fakeDocker struct {
 	imagePresent           bool
 	pullOutput             []byte
 	createOutput           []byte
+	outputLimit            int
+}
+
+func (docker *fakeDocker) RunWithOutputLimit(ctx context.Context, input io.Reader, maximum int, arguments ...string) ([]byte, error) {
+	docker.outputLimit = maximum
+	return docker.Run(ctx, input, arguments...)
 }
 
 func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...string) ([]byte, error) {
@@ -172,6 +178,10 @@ func TestDockerStoreCreatesAndAdoptsOnlyExactlyLabeledVolumes(t *testing.T) {
 	docker := &fakeDocker{volumes: map[string]map[string]string{}}
 	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("a", 64)}
 	volume := Volume{Name: "local-test-state", Role: "test-state", Owner: "broker", Consumers: []string{"broker"}, Labels: map[string]string{ownerLabel: "local-test", custodianLabel: "broker", roleLabel: "test-state", volumeLabel: "local-test-state", versionLabel: stateVersion}}
+	existing, err := store.ValidateVolumes(context.Background(), []Volume{volume})
+	if err != nil || len(existing) != 0 || len(docker.volumes) != 0 {
+		t.Fatalf("read-only validation = %v, %v", existing, err)
+	}
 	created, err := store.EnsureVolumes(context.Background(), []Volume{volume})
 	if err != nil || !created[volume.Name] {
 		t.Fatalf("create = %v, %v", created, err)
@@ -190,6 +200,34 @@ func TestDockerStoreCreatesAndAdoptsOnlyExactlyLabeledVolumes(t *testing.T) {
 		if len(command.arguments) > 1 && command.arguments[1] == "create" {
 			t.Fatal("ownership conflict triggered a create")
 		}
+	}
+}
+
+func TestDockerStoreReadsBoundedInventoryThroughReadOnlyHelper(t *testing.T) {
+	docker := &fakeDocker{volumes: map[string]map[string]string{}, imagePresent: true, runOutput: bytes.Repeat([]byte{'i'}, 70<<10)}
+	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("a", 64)}
+	volume := dockerTestVolume("local-test-generated-config", "generated-config")
+	output, err := store.ReadVolumeInventory(context.Background(), volume)
+	if err != nil || len(output) != 0 {
+		t.Fatalf("missing inventory read = %q, %v", output, err)
+	}
+	for _, command := range docker.commands {
+		if len(command.arguments) > 0 && command.arguments[0] == "create" {
+			t.Fatal("inventory preflight created the missing generated-config volume")
+		}
+	}
+	docker.volumes[volume.Name] = maps.Clone(volume.Labels)
+	output, err = store.ReadVolumeInventory(context.Background(), volume)
+	if err != nil || !bytes.Equal(output, docker.runOutput) {
+		t.Fatalf("inventory read = %q, %v", output, err)
+	}
+	if docker.outputLimit != maxStateFileBytes {
+		t.Fatalf("inventory transport limit = %d", docker.outputLimit)
+	}
+	command := lastDockerCommand(t, docker.commands, "create")
+	joined := strings.Join(command.arguments, "\n")
+	if !strings.Contains(joined, "readonly") || !strings.Contains(joined, "root=/state/current") || !strings.Contains(joined, "root=/state/current.old") || !strings.Contains(joined, "test ! -L") || !strings.Contains(joined, "stat -c '%s'") {
+		t.Fatalf("inventory reader is not bounded and read-only: %v", command.arguments)
 	}
 }
 
@@ -220,6 +258,9 @@ func TestDockerStoreKeepsPrivateBytesOnlyOnStdin(t *testing.T) {
 		if !containsArgument(createCommand.arguments, expected) {
 			t.Fatalf("helper omitted %q: %v", expected, createCommand.arguments)
 		}
+	}
+	if script := strings.Join(createCommand.arguments, "\n"); !strings.Contains(script, "mv /state/current.old /state/current") || strings.Index(script, "mv /state/current.old /state/current") > strings.Index(script, "rm -rf /state/.next /state/current.old") {
+		t.Fatal("config publication does not recover an interrupted current.old snapshot before cleanup")
 	}
 	if err := store.CopyPrivateFile(context.Background(), sourceVolume, destinationVolume, 65532, 65532, 32); err != nil {
 		t.Fatal(err)

@@ -1,7 +1,6 @@
 # Local manifest v1
 
-Status: design contract; behavior-inactive until the local-platform integration
-series is complete.
+Status: active for the local Docker backend.
 
 `nvt.dev/local/v1` is the single human-authored, non-secret local-platform
 manifest. The implementation lives in `localplatform/manifest`, with private
@@ -32,11 +31,22 @@ runtime account. The projection duplicates preset identities and exact grants,
 allowing local preset packaging to render the existing resolved-run profile
 without consulting the broker-owned section.
 
+Runtime autonomy is either `trusted-local`, which renders the provider-native
+local bypass flags, or `approval-required`, which renders the native
+interactive policy. `read-only` is not accepted because the unchanged runtime
+contract has no enforceable read-only boundary for a root agent with workspace
+and nested-Docker access; silently weakening it to interactive is forbidden.
+
 Each repository supplies an HTTPS URL, exact checkout target, optional checkout
 path and upstream, broker repository identity, and optional credential account.
 `github: owner/repository` is shorthand expanded into those exact fields. A
 workstation or workflow references repository names, so GitHub and Azure DevOps
 checkouts use the same selection contract and account choice is unambiguous.
+For explicit credentialed repositories, the broker identity is canonical and
+must match the URL: GitHub uses `owner/repository`, while Azure DevOps literal
+mode uses the complete `dev.azure.com/organization/project/_git/repository`
+target. GitHub App installation provider names are therefore derived from the
+same URL-validated owner in both broker and controller projections.
 
 ## Canonical compilation and ownership
 
@@ -63,6 +73,22 @@ example, receives resolved numeric App and installation IDs, repository
 coordinates, and its own private-key input reference; the broker independently
 owns its copy of that same logical key.
 
+Broker rendering validates the final provider namespace before publishing any
+managed state. This includes provider names derived for individual GitHub App
+installations: a derived name may not collide with another derived provider or
+with any user-authored account name.
+
+Reconciliation preflights the bounded union of the current volume plan and the
+validated historical ownership inventory before creating any missing volume.
+The generated-config inventory reader treats an absent volume as first
+initialization without creating it; an invalid, oversized, or over-capacity
+union therefore cannot leave exact-owned volumes outside the reset inventory.
+After validating all existing volume labels, reconciliation creates only the
+generated-config volume and durably publishes the complete union there before
+creating any other missing volume. Reset accepts an empty inventory only for
+the exact interrupted-first-publication form in which generated-config is the
+sole platform-owned volume; every other empty-inventory form fails closed.
+
 The controller projection also contains one producer admission binding per
 producer: stable producer identity, exactly one workflow, and a logical
 generated credential name. Each binding contains a non-empty bounded principal
@@ -87,7 +113,8 @@ rejected independently of the compiler's syntax checks.
 Instruction files may be organized anywhere below that root. A confined
 symlink is accepted, but `os.Root` prevents a link or concurrent rename from
 escaping the manifest root. The final object must be a stable regular UTF-8
-file no larger than 256 KiB. The resolver reads and compares two snapshots so
+file no larger than 64 KiB, matching the unchanged resolved-run instruction
+bound. The resolver reads and compares two snapshots so
 an in-place write cannot produce a mixed generated instruction.
 
 Secret files must be below `.nvt-local/secrets/`. Every path component and the
@@ -103,12 +130,20 @@ generated JSON, environment values, helper arguments, Docker labels, and
 command output. They reach persistent storage only as a bounded tar stream on
 the trusted state helper's standard input.
 
+Before any managed volume is created, the generated local-controller document
+is validated against the unchanged resolved-run resolver plus the native limits
+of 128 workstations, 128 profiles, 128 workflows, and 64 schedules. Every
+rendered workstation and producer selection must resolve through that policy.
+The generated controller service sets its active-run capacity to the same 128
+workstation ceiling.
+
 ## Managed trusted-service state
 
 The redacted state plan creates a distinct labeled Docker volume for generated
 configuration, broker database/audit data, broker private and canonical
-credential state, local-controller database/audit data, and—when an OAuth
-account enables the portal—the portal seed handoff. Portal seed storage is
+credential state, the shared broker agent registry, local-controller
+database/audit data, and—when an OAuth account enables the portal—the portal
+seed handoff. Portal seed storage is
 writable only by the credential portal and read-only to the broker seed
 supervisor; broker canonical credentials remain in the broker-private volume.
 Before startup, the seed volume root is fixed to the packaged portal identity
@@ -152,15 +187,32 @@ service startup. The helper image itself must be pinned by SHA-256, runs
 without networking or a writable root filesystem, and receives no private
 value through Docker inspection surfaces.
 
+The generated-config volume also stores a bounded, sorted historical inventory
+of complete managed-volume label maps. Each successful reconciliation merges
+the current plan into that inventory instead of dropping retired entries, so
+`local-reset` can verify and remove exact-owned volumes left by manifest
+shrinkage. Missing, incomplete, conflicting, or extra labels still fail closed.
+If atomic configuration publication is interrupted after rotating `current`,
+the next reconciliation validates and recovers the inventory from
+`current.old` before publishing or cleaning that transaction snapshot.
+Reconciliation and reset use the same read-only fallback helper and the same
+finite inventory-sized Docker output bound; unrelated Docker commands retain
+the smaller generic output limit. Reset uses that aligned bound for both the
+historical inventory payload and exact-owned volume-name enumeration.
+Reset snapshots and validates that inventory before deletion, removes every
+other exact-owned volume first, and deletes generated-config as the final
+volume so an interrupted retry retains its ownership anchor. Verified
+exact-owned containers are removed with their anonymous volumes; explicitly
+named platform and run volumes remain governed by the ownership inventory.
+
 Credential-portal account projection is bounded to the portal contract's 128
 slots before volume creation. Slot and local destination names use a
 domain-separated full SHA-256 mapping of the logical account name; any duplicate
 mapping is rejected before state is written.
 
-Trusted-state preparation does not start a producer, workstation, workflow, or
-replacement Compose project. The producer renderer below consumes its redacted
-plan, while final lifecycle wiring remains behavior-inactive until the later
-integration slice.
+Trusted-state preparation does not itself start a producer, workstation, or
+workflow. The lifecycle renderer consumes its redacted plan and passes the
+complete generated Compose document to Docker Compose on standard input.
 
 ## Local producer rendering
 

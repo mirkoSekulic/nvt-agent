@@ -1,0 +1,42 @@
+apiVersion: nvt.dev/local/v1
+
+profiles:
+  development:
+    runtime:
+      preset: shell
+      autonomy: trusted-local
+    editor:
+      preset: code-server
+
+repositories:
+  nvt-agent:
+    github: mirkoSekulic/nvt-agent
+  studio:
+    github: Altinn/altinn-studio
+  infrastructure:
+    github: Altinn/altinn-platform
+
+workstations:
+  - name: nvt
+    profile: development
+    repositories: [nvt-agent]
+  - name: studio
+    profile: development
+    repositories: [studio]
+  - name: infra
+    profile: development
+    repositories: [infrastructure]
+
+workflows:
+  nvt-development:
+    profile: development
+    repository: nvt-agent
+    retention: disposable
+  studio-development:
+    profile: development
+    repository: studio
+    retention: disposable
+  infrastructure:
+    profile: development
+    repository: infrastructure
+    retention: retained

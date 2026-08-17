@@ -8,7 +8,7 @@ holds no real credential. See `docs/codex-auth.md`,
 
 All tokens/hashes below are placeholders — generate your own.
 
-## Broker provider (`.broker/broker.yaml`)
+## Broker provider configuration
 
 ```yaml
 providers:
@@ -30,7 +30,7 @@ providers:
             - chatgpt_account_id
 ```
 
-## Identities (`.broker/agents.yaml`)
+## Broker identities
 
 An agent with a `header-inject` grant and its paired egress identity. The
 egress identity is the only one that can fetch the credential; the agent

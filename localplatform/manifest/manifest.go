@@ -289,7 +289,7 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, profile := range m.Profiles {
-		if !validRunIDName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required", "read-only") {
+		if !validRunIDName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required") {
 			return fmt.Errorf("invalid profile %q", name)
 		}
 		if err := uniqueRefs(profile.Accounts, m.Accounts, "account"); err != nil {
@@ -326,8 +326,11 @@ func (m Manifest) Validate() error {
 		return errors.New("repositories are required")
 	}
 	for name, repository := range m.Repositories {
-		if !validName(name) || validateRepository(repository, m.Accounts) != nil {
+		if !validName(name) {
 			return fmt.Errorf("invalid repository %q", name)
+		}
+		if err := validateRepository(repository, m.Accounts); err != nil {
+			return fmt.Errorf("invalid repository %q: %w", name, err)
 		}
 	}
 	seenWorkstations := map[string]struct{}{}
@@ -533,8 +536,11 @@ func validateRepository(value Repository, accounts map[string]Account) error {
 			if !oneOf(accounts[value.Account].Preset, "github-app", "github-pat") {
 				return errors.New("github.com repository requires a GitHub account")
 			}
+			owner, repository, coordinatesOK := githubCoordinates(value)
+			if !coordinatesOK || value.BrokerRepository != owner+"/"+repository {
+				return errors.New("GitHub broker repository must match the URL coordinates")
+			}
 			if accounts[value.Account].Preset == "github-app" {
-				owner, _, _ := githubCoordinates(value)
 				if _, err := githubInstallationID(accounts[value.Account], owner); err != nil {
 					return errors.New("GitHub App repository owner has no installation")
 				}
@@ -542,6 +548,9 @@ func validateRepository(value Repository, accounts map[string]Account) error {
 		case "dev.azure.com":
 			if accounts[value.Account].Preset != "azure-devops-pat" {
 				return errors.New("dev.azure.com repository requires an Azure DevOps account")
+			}
+			if value.BrokerRepository != repositoryTarget(value.URL) {
+				return errors.New("Azure DevOps broker repository must match the normalized checkout target")
 			}
 		default:
 			return errors.New("credentialed custom repositories require a supported host preset")

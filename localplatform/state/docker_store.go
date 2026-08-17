@@ -25,41 +25,54 @@ type CommandBoundary interface {
 	Run(context.Context, io.Reader, ...string) ([]byte, error)
 }
 
+// OutputLimitedCommandBoundary is implemented by Docker command boundaries
+// that support a caller-selected finite output cap.
+type OutputLimitedCommandBoundary interface {
+	RunWithOutputLimit(context.Context, io.Reader, int, ...string) ([]byte, error)
+}
+
 type DockerStore struct {
 	Docker      CommandBoundary
 	HelperImage string
 }
 
-func (store DockerStore) EnsureVolumes(ctx context.Context, volumes []Volume) (map[string]bool, error) {
+func (store DockerStore) ValidateVolumes(ctx context.Context, volumes []Volume) (map[string]bool, error) {
+	_, existing, err := store.classifyVolumes(ctx, volumes)
+	return existing, err
+}
+
+func (store DockerStore) classifyVolumes(ctx context.Context, volumes []Volume) ([]Volume, map[string]bool, error) {
 	if store.Docker == nil || !validHelperImage(store.HelperImage) {
-		return nil, errors.New("docker state store configuration invalid")
+		return nil, nil, errors.New("docker state store configuration invalid")
 	}
 	ordered := append([]Volume(nil), volumes...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
 	missing := []Volume{}
+	existing := map[string]bool{}
 	for _, volume := range ordered {
 		if !validVolume(volume) {
-			return nil, errors.New("invalid managed volume")
+			return nil, nil, errors.New("invalid managed volume")
 		}
-		output, err := store.Docker.Run(ctx, nil, "volume", "ls", "--filter", "name=^"+volume.Name+"$", "--format", "{{.Name}}")
+		found, err := store.volumeExists(ctx, volume)
 		if err != nil {
-			return nil, errors.New("cannot list managed volumes")
-		}
-		found := false
-		for _, line := range strings.Fields(string(output)) {
-			if line == volume.Name {
-				found = true
-			} else {
-				return nil, errors.New("ambiguous managed volume lookup")
-			}
+			return nil, nil, err
 		}
 		if !found {
 			missing = append(missing, volume)
 			continue
 		}
 		if err := store.verifyVolume(ctx, volume); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		existing[volume.Name] = true
+	}
+	return missing, existing, nil
+}
+
+func (store DockerStore) EnsureVolumes(ctx context.Context, volumes []Volume) (map[string]bool, error) {
+	missing, _, err := store.classifyVolumes(ctx, volumes)
+	if err != nil {
+		return nil, err
 	}
 	created := map[string]bool{}
 	for _, volume := range missing {
@@ -84,6 +97,21 @@ func (store DockerStore) EnsureVolumes(ctx context.Context, volumes []Volume) (m
 	return created, nil
 }
 
+func (store DockerStore) volumeExists(ctx context.Context, volume Volume) (bool, error) {
+	output, err := store.Docker.Run(ctx, nil, "volume", "ls", "--filter", "name=^"+volume.Name+"$", "--format", "{{.Name}}")
+	if err != nil {
+		return false, errors.New("cannot list managed volumes")
+	}
+	found := false
+	for _, line := range strings.Fields(string(output)) {
+		if line != volume.Name {
+			return false, errors.New("ambiguous managed volume lookup")
+		}
+		found = true
+	}
+	return found, nil
+}
+
 func (store DockerStore) verifyVolume(ctx context.Context, volume Volume) error {
 	output, err := store.Docker.Run(ctx, nil, "volume", "inspect", "--format", "{{json .Labels}}", volume.Name)
 	if err != nil {
@@ -98,6 +126,38 @@ func (store DockerStore) verifyVolume(ctx context.Context, volume Volume) error 
 
 func (store DockerStore) ReplaceFiles(ctx context.Context, volume Volume, files []StateFile) error {
 	return store.writeFiles(ctx, volume, files, 0)
+}
+
+func (store DockerStore) ReadVolumeInventory(ctx context.Context, volume Volume) ([]byte, error) {
+	if store.Docker == nil || !validHelperImage(store.HelperImage) || !validVolume(volume) {
+		return nil, errors.New("invalid state read")
+	}
+	found, err := store.volumeExists(ctx, volume)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	if err := store.verifyVolume(ctx, volume); err != nil {
+		return nil, err
+	}
+	script := `set -eu
+test ! -L /state/current
+test ! -L /state/current.old
+root=/state/current
+if [ ! -e "$root" ]; then
+  if [ ! -e /state/current.old ]; then exit 0; fi
+  root=/state/current.old
+fi
+test -d "$root"
+target="$root/volume-inventory.json"
+test ! -L "$target"
+if [ ! -e "$target" ]; then exit 0; fi
+test -f "$target"
+test "$(stat -c '%s' "$target")" -le "$1"
+cat "$target"`
+	return store.runHelperWithOutputLimit(ctx, nil, []helperMount{{volume: volume, target: "/state", readOnly: true}}, script, maxStateFileBytes, strconv.Itoa(maxStateFileBytes))
 }
 
 func (store DockerStore) InitializePrivateSource(ctx context.Context, volume Volume, expectedSize int, files []StateFile) error {
@@ -156,6 +216,14 @@ func (store DockerStore) writeFiles(ctx context.Context, volume Volume, files []
 	defer clear(payload)
 	script := `set -eu
 umask 077
+test ! -L /state/current
+test ! -L /state/current.old
+test ! -L /state/.next
+if [ ! -e /state/current ] && [ -e /state/current.old ]; then
+  test -d /state/current.old
+  mv /state/current.old /state/current
+  sync
+fi
 rm -rf /state/.next /state/current.old
 mkdir /state/.next
 tar -xpf - -C /state/.next
@@ -306,7 +374,10 @@ sync`
 }
 
 const (
-	maxStateFileBytes = (1 << 20) + MaxInstructionBytes
+	// MaxVolumeInventoryBytes is the shared validated file and Docker transport
+	// bound for the redacted historical ownership inventory.
+	MaxVolumeInventoryBytes = (1 << 20) + MaxInstructionBytes
+	maxStateFileBytes       = MaxVolumeInventoryBytes
 	// One legal manifest may project MaxItems instruction files and MaxItems
 	// producer configurations plus the fixed owner documents.
 	maxStateFiles = 2*manifest.MaxItems + 16
@@ -407,8 +478,23 @@ test_publishing_private_source() {
 `
 
 func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts []helperMount, script string, values ...string) ([]byte, error) {
+	return store.runHelperWithOutputLimit(ctx, stdin, mounts, script, 0, values...)
+}
+
+func (store DockerStore) runHelperWithOutputLimit(ctx context.Context, stdin io.Reader, mounts []helperMount, script string, outputLimit int, values ...string) ([]byte, error) {
 	if len(mounts) == 0 {
 		return nil, errors.New("state helper has no managed volumes")
+	}
+	project := mounts[0].volume.Labels[ownerLabel]
+	seenTargets := map[string]struct{}{}
+	for _, mount := range mounts {
+		if !validVolume(mount.volume) || mount.volume.Labels[ownerLabel] != project || !safeContainerPath(mount.target) {
+			return nil, errors.New("invalid state helper mount")
+		}
+		if _, duplicate := seenTargets[mount.target]; duplicate {
+			return nil, errors.New("duplicate state helper mount")
+		}
+		seenTargets[mount.target] = struct{}{}
 	}
 	if err := store.ensureHelperImage(ctx); err != nil {
 		return nil, err
@@ -418,15 +504,8 @@ func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts 
 		return nil, err
 	}
 	arguments := []string{"create", "--name", container, "--pull", "never", "-i", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=65536,mode=0700", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--security-opt", "no-new-privileges"}
-	seenTargets := map[string]struct{}{}
+	arguments = append(arguments, "--label", ownerLabel+"="+project, "--label", versionLabel+"="+stateVersion, "--label", "nvt.dev/local-platform-state-helper=1")
 	for _, mount := range mounts {
-		if !validVolume(mount.volume) || !safeContainerPath(mount.target) {
-			return nil, errors.New("invalid state helper mount")
-		}
-		if _, duplicate := seenTargets[mount.target]; duplicate {
-			return nil, errors.New("duplicate state helper mount")
-		}
-		seenTargets[mount.target] = struct{}{}
 		option := "type=volume,src=" + mount.volume.Name + ",dst=" + mount.target
 		if mount.readOnly {
 			option += ",readonly"
@@ -445,6 +524,11 @@ func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts 
 	for _, mount := range mounts {
 		if err := store.verifyVolume(ctx, mount.volume); err != nil {
 			return nil, err
+		}
+	}
+	if outputLimit != 0 {
+		if bounded, ok := store.Docker.(OutputLimitedCommandBoundary); ok {
+			return bounded.RunWithOutputLimit(ctx, stdin, outputLimit, "start", "--attach", "--interactive", container)
 		}
 	}
 	return store.Docker.Run(ctx, stdin, "start", "--attach", "--interactive", container)
@@ -495,6 +579,10 @@ func safeContainerPath(value string) bool {
 func validGeneratedValueSize(value int) bool { return value == 32 || value == 43 }
 
 func validHelperImage(value string) bool {
+	if strings.HasPrefix(value, "sha256:") && len(value) == len("sha256:")+64 {
+		_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+		return err == nil
+	}
 	parsed, err := reference.ParseNamed(value)
 	if err != nil || parsed.String() != value {
 		return false

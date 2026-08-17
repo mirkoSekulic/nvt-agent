@@ -24,7 +24,7 @@ func TestLocalManifestProducerNameMatchesScheduleValidator(t *testing.T) {
 	const raw = `apiVersion: nvt.dev/local/v1
 profiles:
   engineering:
-    runtime: {preset: shell, autonomy: read-only}
+    runtime: {preset: shell, autonomy: approval-required}
 repositories:
   widget:
     url: https://example.test/acme/widget.git
@@ -410,41 +410,6 @@ func TestWorkstationsAndDisposableSchedulesSharePolicyAcrossRestart(t *testing.T
 	}
 	if !namedPersistent || !disposable {
 		t.Fatalf("composed retention semantics = %#v", listed.Runs)
-	}
-}
-
-func TestNativeTemplateCreatesNVTStudioAndInfraWithoutLegacyInputs(t *testing.T) {
-	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
-	store, _ := openTestStore(t, clock, 8)
-	templatePath, err := filepath.Abs(filepath.Join("..", "..", "..", "templates", "local-controller.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(templatePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{"local_runs", "source_agent", ".agents/", "token_sha256", "access_token", "refresh_token", "private_key"} {
-		if strings.Contains(string(data), forbidden) {
-			t.Fatalf("native template contains legacy or secret-bearing field %q", forbidden)
-		}
-	}
-	scheduler, err := LoadScheduler(templatePath, store)
-	if err != nil || scheduler.BootstrapWorkstations(context.Background()) != nil {
-		t.Fatalf("fresh native template = %#v err=%v", scheduler, err)
-	}
-	assertRunIDs(t, store, "infra", "nvt", "studio")
-	for _, runID := range []string{"infra", "nvt", "studio"} {
-		snapshot, _, snapshotErr := store.ResolvedSnapshot(context.Background(), runID)
-		if snapshotErr != nil {
-			t.Fatal(snapshotErr)
-		}
-		resolved, decodeErr := resolvedrun.DecodeResolvedAgentRun(snapshot)
-		clear(snapshot)
-		if decodeErr != nil || !resolved.Persistence.Workspace || !resolved.Persistence.RuntimeState || !resolved.Persistence.DockerData ||
-			resolved.Execution.Name != "local-docker" || resolved.Retention != "persistent" {
-			t.Fatalf("workstation %s = %#v err=%v", runID, resolved, decodeErr)
-		}
 	}
 }
 

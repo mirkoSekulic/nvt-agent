@@ -164,7 +164,7 @@ values files and the real Codex AgentRun flow, see
 ```sh
 make operator-codex-auth-secret
 make github-comments-producer-secret GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem
-make broker-env-secret BROKER_ENV_FILE=.broker/env
+make broker-env-secret BROKER_ENV_FILE=.nvt-local/secrets/broker-env
 ```
 
 These Secrets are separate on purpose:
@@ -177,7 +177,7 @@ These Secrets are separate on purpose:
   `charts/nvt` broker deployment through `broker.envSecretName`.
 
 The producer GitHub App Secret and broker env Secret may use different GitHub
-Apps later. Do not commit real private keys, `.broker/env`, or other secret
+Apps later. Do not commit real private keys, `.nvt-local/secrets/`, or other secret
 files.
 
 With local values prepared, build, load, and install the GitHub comments
@@ -204,7 +204,7 @@ Full local POC setup sequence:
 make operator-kind-setup CREATE_CLUSTER=1
 make operator-codex-auth-secret
 make github-comments-producer-secret GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem
-make broker-env-secret BROKER_ENV_FILE=.broker/env
+make broker-env-secret BROKER_ENV_FILE=.nvt-local/secrets/broker-env
 make producer-kind-setup PRODUCER_VALUES=values.nvt-local.yaml
 ```
 

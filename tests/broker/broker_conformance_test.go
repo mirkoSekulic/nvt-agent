@@ -533,6 +533,7 @@ providers:
       api-url: %[1]q
       injection-hosts:
         - github.com
+        - api.github.com
     allow:
       repositories:
 %[4]s      permissions:
@@ -573,9 +574,23 @@ providers:
         - dev.azure.com
       injection-basic-username: pat
       injection-git: true
+      target-mode: literal
     allow:
       repositories:
         - dev.azure.com/org/project/_git/repo
+        - dev.azure.com/org/project/_git/other
+  - name: github-pat-provider
+    plugin: token
+    config:
+      token-env: TEST_PAT_TOKEN
+      injection-hosts:
+        - github.com
+        - api.github.com
+      injection-basic-username: git
+      injection-git: true
+    allow:
+      repositories:
+        - my-user/my-repo
   - name: anthropic-main
     plugin: token
     config:

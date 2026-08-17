@@ -989,6 +989,19 @@ GitHub target mode as `github-app`: host-prefixed targets such as
 `github.com/owner/repo` are accepted at the endpoint boundary and normalized to
 `owner/repo`.
 
+When `config.injection-git` is enabled, header injection accepts only Git
+smart-HTTP `info/refs`, `git-upload-pack`, and `git-receive-pack` request
+shapes with their required methods. The repository is derived from the trusted
+injection host and request path, normalized using `target-mode`, and checked
+against both the provider `allow.repositories` ceiling and the authenticated
+agent grant before the static credential is injected. Repository-scoped REST
+injection also accepts `GET`, `POST`, and `PATCH` on `api.github.com` (and the
+Git smart-HTTP host `github.com`) for GitHub `/repos/{owner}/{repository}/...`
+and on Azure DevOps for
+`/{organization}/{project}/_apis/git/repositories/{repository}/...`; those
+forms normalize to the same provider repository identities used by Git. Other
+paths and methods fail closed.
+
 For self-hosted Git providers, set `config.target-mode: literal`. Literal mode
 normalizes URL, SSH, and plain targets to their full host/path repository id:
 

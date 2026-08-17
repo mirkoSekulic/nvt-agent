@@ -22,6 +22,8 @@ import (
 const (
 	composeProjectLabel           = "com.docker.compose.project"
 	composeServiceLabel           = "com.docker.compose.service"
+	seedHelperLabel               = "nvt.dev/local-controller-helper"
+	seedHelperValue               = "volume-seed-v1"
 	agentConfinementRevisionLabel = "io.nvt.local-controller.agent-confinement-revision"
 	agentConfinementRevision      = "1"
 )
@@ -495,7 +497,7 @@ func (backend *Backend) pruneStaleOwnedResources(ctx context.Context, run resolv
 		if err := verifyLabelMap(values, labels); err != nil {
 			return err
 		}
-		if _, err := backend.docker.Run(ctx, nil, "rm", "-f", container); err != nil {
+		if _, err := backend.docker.Run(ctx, nil, "rm", "--force", "--volumes", container); err != nil {
 			return err
 		}
 	}
@@ -543,7 +545,7 @@ func (backend *Backend) removeOutdatedConfinementAgent(ctx context.Context, proj
 		if values[agentConfinementRevisionLabel] == agentConfinementRevision {
 			continue
 		}
-		if _, err := backend.docker.Run(ctx, nil, "rm", "-f", container); err != nil {
+		if _, err := backend.docker.Run(ctx, nil, "rm", "--force", "--volumes", container); err != nil {
 			return err
 		}
 	}
@@ -563,7 +565,7 @@ func (backend *Backend) removeOwnedComposeService(ctx context.Context, project, 
 		if err := backend.verifyContainer(ctx, container, labels); err != nil {
 			return err
 		}
-		if _, err := backend.docker.Run(ctx, nil, "rm", "-f", container); err != nil {
+		if _, err := backend.docker.Run(ctx, nil, "rm", "--force", "--volumes", container); err != nil {
 			return err
 		}
 	}
@@ -609,6 +611,20 @@ func (backend *Backend) verifyContainer(ctx context.Context, name string, labels
 	return verifyLabelMap(values, labels)
 }
 
+func (backend *Backend) verifySeedHelperContainer(ctx context.Context, name string, labels ownedLabels) error {
+	values, err := backend.containerLabels(ctx, name)
+	if err != nil {
+		return err
+	}
+	if err := verifyLabelMap(values, labels); err != nil {
+		return err
+	}
+	if values[seedHelperLabel] != seedHelperValue || values[composeProjectLabel] != "" || values[composeServiceLabel] != "" {
+		return errOwnershipConflict
+	}
+	return nil
+}
+
 func (backend *Backend) containerLabels(ctx context.Context, name string) (map[string]string, error) {
 	output, err := backend.docker.Run(ctx, nil, "inspect", "--format", "{{json .Config.Labels}}", name)
 	if err != nil {
@@ -652,19 +668,20 @@ type seedFile struct {
 func (backend *Backend) seedVolume(ctx context.Context, volume string, files map[string]seedFile, labels ownedLabels) error {
 	arguments := []string{"create", "--entrypoint", "/bin/true", "-v", volume + ":/seed"}
 	arguments = append(arguments, labelArguments(labels)...)
+	arguments = append(arguments, "--label", seedHelperLabel+"="+seedHelperValue)
 	arguments = append(arguments, backend.config.SeedImage)
 	created, err := backend.docker.Run(ctx, nil, arguments...)
 	if err != nil {
 		return err
 	}
 	container := strings.TrimSpace(string(created))
-	if !validContainerID(container) || backend.verifyContainer(ctx, container, labels) != nil {
+	if !validContainerID(container) || backend.verifySeedHelperContainer(ctx, container, labels) != nil {
 		return errors.New("backend seed unavailable")
 	}
 	defer func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
-		_, _ = backend.docker.Run(cleanupContext, nil, "rm", "-f", container)
+		_, _ = backend.docker.Run(cleanupContext, nil, "rm", "--force", "--volumes", container)
 	}()
 	archive, err := seedArchive(files)
 	if err != nil {
@@ -726,7 +743,7 @@ func (backend *Backend) removeOwnedContainers(ctx context.Context, labels ownedL
 		if err := backend.verifyContainer(ctx, container, labels); err != nil {
 			return err
 		}
-		if _, err := backend.docker.Run(ctx, nil, "rm", "-f", container); err != nil {
+		if _, err := backend.docker.Run(ctx, nil, "rm", "--force", "--volumes", container); err != nil {
 			return err
 		}
 	}

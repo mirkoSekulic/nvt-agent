@@ -276,6 +276,23 @@ func TestRuntimeAccountIsExplicitWithMultipleCompatibleAccounts(t *testing.T) {
 	}
 }
 
+func TestReadOnlyAutonomyIsRejected(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := decoded.Profiles["development"]
+	profile.Runtime.Autonomy = "read-only"
+	decoded.Profiles["development"] = profile
+	if err := decoded.Validate(); err == nil {
+		t.Fatal("manifest accepted unsupported read-only autonomy")
+	}
+}
+
 func TestExplicitGitHubRepositoryRequiresAppInstallation(t *testing.T) {
 	raw, err := os.ReadFile("testdata/valid.yaml")
 	if err != nil {
@@ -291,6 +308,31 @@ func TestExplicitGitHubRepositoryRequiresAppInstallation(t *testing.T) {
 	}
 }
 
+func TestExplicitRepositoryBrokerIdentityMustMatchProviderTarget(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	github := decoded.Accounts["github"]
+	github.Installations["owner-one"] = "456"
+	decoded.Accounts["github"] = github
+	decoded.Repositories["explicit"] = Repository{URL: "https://github.com/owner-one/repo.git", CheckoutTarget: "github.com/owner-one/repo", BrokerRepository: "alias/repo", Account: "github"}
+	if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), "must match the URL coordinates") {
+		t.Fatalf("mismatched GitHub broker identity was accepted: %v", err)
+	}
+	azure := decoded.Repositories["infrastructure"]
+	azure.BrokerRepository = "example/platform/infrastructure"
+	decoded.Repositories["explicit"] = Repository{URL: "https://github.com/owner-one/repo.git", CheckoutTarget: "github.com/owner-one/repo", BrokerRepository: "owner-one/repo", Account: "github"}
+	decoded.Repositories["infrastructure"] = azure
+	if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), "must match the normalized checkout target") {
+		t.Fatalf("non-normalized Azure broker identity was accepted: %v", err)
+	}
+}
+
 func TestBrokerGrantsDoNotCrossProfilesSharingAnAccount(t *testing.T) {
 	raw, err := os.ReadFile("testdata/valid.yaml")
 	if err != nil {
@@ -300,7 +342,7 @@ func TestBrokerGrantsDoNotCrossProfilesSharingAnAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded.Profiles["other"] = Profile{Runtime: Runtime{Preset: "shell", Autonomy: "read-only"}, Accounts: []string{"github"}}
+	decoded.Profiles["other"] = Profile{Runtime: Runtime{Preset: "shell", Autonomy: "approval-required"}, Accounts: []string{"github"}}
 	decoded.Repositories["other"] = Repository{GitHub: "mirkoSekulic/other", Account: "github"}
 	decoded.Workflows["other"] = Workflow{Profile: "other", Repository: "other", Retention: "disposable"}
 	compiled, err := Compile(decoded)
@@ -379,11 +421,11 @@ func TestExternalProducerPublicConfigIsAnExplicitTrustBoundary(t *testing.T) {
 }
 
 func TestDecodeRejectsDepthAndNodeBounds(t *testing.T) {
-	deep := "apiVersion: nvt.dev/local/v1\nprofiles:\n  p:\n    runtime: {preset: shell, autonomy: read-only}\nworkflows:\n  w: {profile: p, repository: a/b, retention: disposable}\nproducers:\n  - name: p\n    image: ghcr.io/a/b@sha256:" + strings.Repeat("a", 64) + "\n    workflow: w\n    config:\n      value: " + strings.Repeat("[", MaxDocumentDepth+1) + "null" + strings.Repeat("]", MaxDocumentDepth+1) + "\n"
+	deep := "apiVersion: nvt.dev/local/v1\nprofiles:\n  p:\n    runtime: {preset: shell, autonomy: approval-required}\nworkflows:\n  w: {profile: p, repository: a/b, retention: disposable}\nproducers:\n  - name: p\n    image: ghcr.io/a/b@sha256:" + strings.Repeat("a", 64) + "\n    workflow: w\n    config:\n      value: " + strings.Repeat("[", MaxDocumentDepth+1) + "null" + strings.Repeat("]", MaxDocumentDepth+1) + "\n"
 	if _, err := Decode(strings.NewReader(deep)); err == nil {
 		t.Fatal("deep input accepted")
 	}
-	manyNodes := "apiVersion: nvt.dev/local/v1\nprofiles:\n  p:\n    runtime: {preset: shell, autonomy: read-only}\nworkflows:\n  w: {profile: p, repository: a/b, retention: disposable}\nproducers:\n  - name: p\n    image: ghcr.io/a/b@sha256:" + strings.Repeat("a", 64) + "\n    workflow: w\n    config:\n      values: [" + strings.Repeat("null,", MaxDocumentNodes) + "null]\n"
+	manyNodes := "apiVersion: nvt.dev/local/v1\nprofiles:\n  p:\n    runtime: {preset: shell, autonomy: approval-required}\nworkflows:\n  w: {profile: p, repository: a/b, retention: disposable}\nproducers:\n  - name: p\n    image: ghcr.io/a/b@sha256:" + strings.Repeat("a", 64) + "\n    workflow: w\n    config:\n      values: [" + strings.Repeat("null,", MaxDocumentNodes) + "null]\n"
 	if _, err := Decode(strings.NewReader(manyNodes)); err == nil {
 		t.Fatal("excessive node count accepted")
 	}

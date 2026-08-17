@@ -2,8 +2,6 @@ package state
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,7 +9,6 @@ import (
 	"io"
 	"regexp"
 	"sort"
-	"strings"
 
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
 	plancontract "github.com/mirkoSekulic/nvt-agent/localplatform/plan"
@@ -122,14 +119,18 @@ func preparePlan(project string, compiled manifest.Compiled, inputs *Inputs) (pr
 	}
 	brokerData := addVolume("broker-data", "broker-database-audit", "broker", "broker")
 	brokerPrivate := addVolume("broker-private", "broker-identities-canonical-credentials", "broker", "broker")
+	brokerRegistry := addVolume("broker-registry", "broker-agent-registry", "local-controller", "broker", "local-controller")
 	controllerData := addVolume("controller-data", "local-controller-database-audit", "local-controller", "local-controller")
 	result.directories = append(result.directories,
 		directoryPlan{volume: brokerData.Name, uid: 0, gid: 0, mode: 0o700},
 		directoryPlan{volume: brokerPrivate.Name, uid: 0, gid: 0, mode: 0o700},
+		directoryPlan{volume: brokerRegistry.Name, uid: 0, gid: 0, mode: 0o700},
 		directoryPlan{volume: controllerData.Name, uid: 0, gid: 0, mode: 0o700},
 	)
 	addDirectoryMount("broker", brokerData, "/var/lib/nvt/broker", false)
 	addDirectoryMount("broker", brokerPrivate, "/private", false)
+	addDirectoryMount("broker", brokerRegistry, "/registry", true)
+	addDirectoryMount("local-controller", brokerRegistry, "/registry", false)
 	addDirectoryMount("local-controller", controllerData, "/var/lib/nvt/local-controller", false)
 	if portalEnabled {
 		credentialSeeds := addVolume("credential-seeds", "credential-portal-seed", "credential-portal", "broker", "credential-portal")
@@ -361,7 +362,7 @@ func portalConfiguration(accounts []manifest.PortalAccountIntent) ([]byte, error
 		default:
 			return nil, fmt.Errorf("unsupported credential portal account %q", account.Name)
 		}
-		slotName := portalSlotName(account.Name)
+		slotName := plancontract.CredentialSlotName(account.Name)
 		dataKey := slotName + ".json"
 		if _, exists := seenNames[slotName]; exists {
 			return nil, errors.New("credential portal slot mapping collision")
@@ -380,10 +381,4 @@ func portalConfiguration(accounts []manifest.PortalAccountIntent) ([]byte, error
 		"maxUploadBytes": 65536, "recoveryUpload": map[string]bool{"enabled": true}, "persistence": map[string]any{"mode": "local", "local": map[string]string{"directory": "/seed"}},
 	}
 	return json.Marshal(document)
-}
-
-func portalSlotName(account string) string {
-	digest := sha256.Sum256([]byte("nvt.local-credential-slot/v1\x00" + account))
-	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:])
-	return "slot-" + strings.ToLower(encoded)
 }

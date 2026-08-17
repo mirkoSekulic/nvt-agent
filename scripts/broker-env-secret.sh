@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BROKER_ENV_FILE="${BROKER_ENV_FILE-.broker/env}"
+BROKER_ENV_FILE="${BROKER_ENV_FILE-.nvt-local/secrets/broker-env}"
 BROKER_ENV_SECRET="${BROKER_ENV_SECRET:-nvt-broker-env}"
 NAMESPACE="${NAMESPACE:-nvt}"
 CLUSTER="${CLUSTER:-nvt-smoke}"
@@ -10,7 +10,7 @@ KUBECTL="${KUBECTL:-kubectl}"
 
 if [[ -z "${BROKER_ENV_FILE}" ]]; then
   printf '[broker-env-secret] ERROR: BROKER_ENV_FILE is required\n' >&2
-  printf 'usage: make broker-env-secret BROKER_ENV_FILE=.broker/env [NAMESPACE=nvt] [CLUSTER=nvt-smoke]\n' >&2
+  printf 'usage: make broker-env-secret BROKER_ENV_FILE=.nvt-local/secrets/broker-env [NAMESPACE=nvt] [CLUSTER=nvt-smoke]\n' >&2
   exit 1
 fi
 

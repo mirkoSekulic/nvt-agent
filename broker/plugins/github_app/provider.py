@@ -105,8 +105,9 @@ class GithubAppProvider:
     def _private_key(self):
         private_key_env = self.config.get("private-key-env")
         private_key_base64_env = self.config.get("private-key-base64-env") or self.config.get("private-key-b64-env")
-        if private_key_env and private_key_base64_env:
-            fail(f"provider {self.name} cannot set both private-key-env and private-key-base64-env")
+        private_key_file = self.config.get("private-key-file")
+        if sum(bool(value) for value in (private_key_env, private_key_base64_env, private_key_file)) != 1:
+            fail(f"provider {self.name} requires exactly one private key source")
         if isinstance(private_key_env, str):
             return env_value(private_key_env)
         if isinstance(private_key_base64_env, str):
@@ -114,7 +115,19 @@ class GithubAppProvider:
                 return base64.b64decode(env_value(private_key_base64_env)).decode("utf-8")
             except Exception as error:
                 fail(f"could not decode {private_key_base64_env}: {error}")
-        fail(f"provider {self.name} requires private-key-env or private-key-base64-env")
+        if isinstance(private_key_file, str):
+            try:
+                path = Path(private_key_file)
+                status = path.stat()
+                if not path.is_file() or status.st_mode & 0o077:
+                    fail(f"provider {self.name} private-key-file is not private")
+                value = path.read_text(encoding="utf-8")
+                if not value:
+                    fail(f"provider {self.name} private-key-file is empty")
+                return value
+            except OSError as error:
+                fail(f"provider {self.name} private-key-file is unavailable: {error}")
+        fail(f"provider {self.name} private key source is invalid")
 
     def _b64url(self, data):
         return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
