@@ -320,24 +320,6 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 	names := namesFor(backend.config, desired.Resolved.RunID, desired.SnapshotDigest)
 	operationContext, cancel := context.WithTimeout(ctx, backend.config.OperationTimeout)
 	defer cancel()
-	if desired.Resolved.Egress.Mode == "mediated" {
-		check, checkErr := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "run", "--rm", "-e", "NVT_EGRESS_CA_CHECK_ONLY=1", "ca-init")
-		if checkErr != nil {
-			return controller.BackendObservation{}, controller.ErrBackendRetryable
-		}
-		if strings.Contains(string(check), "renewal-required") {
-			if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "stop", "agent", "egressd"); err != nil {
-				return controller.BackendObservation{}, controller.ErrBackendRetryable
-			}
-			if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "run", "--rm", "ca-init"); err != nil {
-				return controller.BackendObservation{}, controller.ErrBackendRetryable
-			}
-			if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d", "--force-recreate", "egressd", "agent"); err != nil {
-				return controller.BackendObservation{}, controller.ErrBackendRetryable
-			}
-			return controller.BackendObservation{}, controller.ErrBackendRetryable
-		}
-	}
 	output, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "ps", "--all", "-q", "agent")
 	if err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
@@ -378,13 +360,16 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 		if target != "" {
 			return controller.BackendObservation{TerminalTarget: target, LifecycleCursor: cursor}, nil
 		}
-		if state.Health == nil || state.Health.Status == "healthy" {
-			return controller.BackendObservation{Ready: true, LifecycleCursor: cursor}, nil
+		if state.Health != nil && state.Health.Status != "healthy" && state.Health.Status != "starting" {
+			return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: cursor}, nil
 		}
-		if state.Health.Status == "starting" {
-			return controller.BackendObservation{LifecycleCursor: cursor}, nil
+		if desired.Resolved.Egress.Mode == "mediated" {
+			rotated, err := backend.reconcileComposeCARotation(operationContext, names)
+			if err != nil || rotated {
+				return controller.BackendObservation{}, controller.ErrBackendRetryable
+			}
 		}
-		return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: cursor}, nil
+		return controller.BackendObservation{Ready: state.Health == nil || state.Health.Status == "healthy", LifecycleCursor: cursor}, nil
 	}
 	cursor, target, lifecycleErr := backend.observeStoppedLifecycle(operationContext, desired, names, labels)
 	if lifecycleErr != nil {
@@ -397,6 +382,26 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 		return controller.BackendObservation{TerminalTarget: controller.StateCompleted, LifecycleCursor: cursor}, nil
 	}
 	return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: cursor}, nil
+}
+
+func (backend *Backend) reconcileComposeCARotation(ctx context.Context, names resourceNames) (bool, error) {
+	check, err := backend.docker.Run(ctx, nil, "compose", "-p", names.project, "-f", names.composeFile, "run", "--rm", "-e", "NVT_EGRESS_CA_CHECK_ONLY=1", "ca-init")
+	if err != nil {
+		return false, err
+	}
+	if !strings.Contains(string(check), "renewal-required") {
+		return false, nil
+	}
+	if _, err := backend.docker.Run(ctx, nil, "compose", "-p", names.project, "-f", names.composeFile, "stop", "agent", "egressd"); err != nil {
+		return false, err
+	}
+	if _, err := backend.docker.Run(ctx, nil, "compose", "-p", names.project, "-f", names.composeFile, "run", "--rm", "ca-init"); err != nil {
+		return false, err
+	}
+	if _, err := backend.docker.Run(ctx, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d", "--force-recreate", "egressd", "agent"); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRun) error {

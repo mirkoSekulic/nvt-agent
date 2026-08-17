@@ -720,6 +720,30 @@ func TestDockerBackendInspectionCoordinatesCARotation(t *testing.T) {
 	}
 }
 
+func TestDockerBackendSkipsCARotationForCompletedAgent(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64)}
+	if _, err := backend.Ensure(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	docker.commands = nil
+	docker.caRenewal = true
+	docker.agentStatus = "stopped"
+	observation, err := backend.Inspect(context.Background(), desired)
+	if err != nil || observation.TerminalTarget != controller.StateCompleted {
+		t.Fatalf("completed observation = %#v, %v", observation, err)
+	}
+	for _, command := range docker.commands {
+		joined := strings.Join(command, " ")
+		if strings.Contains(joined, "NVT_EGRESS_CA_CHECK_ONLY") || strings.Contains(joined, "force-recreate") || strings.Contains(joined, " stop agent egressd") {
+			t.Fatalf("terminal agent triggered CA rollout: %q", joined)
+		}
+	}
+	if !docker.caRenewal {
+		t.Fatal("terminal inspection unexpectedly ran CA rotation")
+	}
+}
+
 func TestDockerBackendMatchesOnlyConfiguredLifecycleEvents(t *testing.T) {
 	backend, docker, run, _ := testBackend(t)
 	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64)}
