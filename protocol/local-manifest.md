@@ -66,7 +66,8 @@ names are `contents`, `pull_requests`, and `workflows`; supported levels are
 `read` and `write`. When `access` is omitted, the pre-1.0 least-privilege
 default is `contents: write` plus `pull_requests: write`. Workflow-file writes
 are never implicit: they require an explicit `workflows: write` declaration,
-which also requires `contents: write`. Empty access maps, unknown permissions,
+which also requires `contents: write`. Every explicit access declaration must
+include at least `contents: read` because checkout is mandatory. Empty access maps, unknown permissions,
 unknown levels, access on an uncredentialed or non-GitHub repository, and
 contradictory workflow-write declarations fail validation.
 

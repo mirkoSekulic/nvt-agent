@@ -163,12 +163,21 @@ class ExecutableProviderAdapter(ProviderAdapter):
 
     def http_request(self, method, url, headers, paginate, grants):
         self._ensure_capability("http.request")
+        if any(grant.get("permissions") for grant in grants):
+            raise ProviderError(
+                "permissions-not-supported",
+                "executable provider protocol v1 cannot enforce http.request grant permissions",
+                403,
+            )
+        effective_repositories = []
+        for grant in grants:
+            effective_repositories.extend(grant.get("repositories") or [])
         result = self._request("http.request", {
             "method": method,
             "url": url,
             "headers": headers,
             "paginate": paginate,
-            "grants": grants,
+            "effective_repositories": effective_repositories,
         })
         result = self._object(result, "http.request result")
         audit_target = self._audit_target(result.pop("audit_target", None))

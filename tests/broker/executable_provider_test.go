@@ -123,14 +123,22 @@ providers:
 }
 
 func (f *executableBrokerFixture) writeAgents() {
+	f.writeAgentsPermissions(false)
+}
+
+func (f *executableBrokerFixture) writeAgentsPermissions(withPermissions bool) {
 	f.t.Helper()
 	hash := func(value string) string { sum := sha256.Sum256([]byte(value)); return fmt.Sprintf("%x", sum[:]) }
+	permissions := ""
+	if withPermissions {
+		permissions = "\n        permissions: {contents: read}"
+	}
 	config := fmt.Sprintf(`agents:
   - id: fixture-agent
     token-sha256: sha256:%s
     grants:
       - provider: fixture-direct
-        repositories: ["*"]
+        repositories: ["*"]%s
       - provider: fixture-inject
         materialization: header-inject
         repositories: ["*"]
@@ -138,7 +146,7 @@ func (f *executableBrokerFixture) writeAgents() {
     role: egress
     paired-agent: fixture-agent
     token-sha256: sha256:%s
-`, hash(f.agent), hash(f.egress))
+`, hash(f.agent), permissions, hash(f.egress))
 	if err := os.WriteFile(f.agents, []byte(config), 0o600); err != nil {
 		f.t.Fatal(err)
 	}
@@ -240,6 +248,18 @@ func TestExecutableProviderRealBrokerEndpointsAndCoreEnforcement(t *testing.T) {
 	status, identity := f.post(f.agent, "/v1/identity", map[string]any{"provider": "fixture-direct"})
 	if status != 200 || identity["name"] != "Fixture Bot" || identity["email"] != "fixture@example.test" {
 		t.Fatalf("provider-scoped executable identity: status=%d body=%#v", status, identity)
+	}
+	status, requested := f.post(f.agent, "/v1/http/request", map[string]any{"provider": "fixture-direct", "method": "GET", "url": "https://api.example.test/repos/example/repo"})
+	if status != 200 || requested["status"] != float64(200) {
+		t.Fatalf("v1-compatible executable HTTP request: status=%d body=%#v", status, requested)
+	}
+	f.writeAgentsPermissions(true)
+	if err := os.Chtimes(f.agents, time.Now().Add(time.Second), time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	deniedStatus, deniedHTTP := f.post(f.agent, "/v1/http/request", map[string]any{"provider": "fixture-direct", "method": "GET", "url": "https://api.example.test/repos/example/repo"})
+	if deniedStatus != http.StatusForbidden || deniedHTTP["error"] != "permissions-not-supported" {
+		t.Fatalf("v1 executable provider accepted unrepresentable permissions: status=%d body=%#v", deniedStatus, deniedHTTP)
 	}
 
 	status, denied := f.post(f.agent, "/v1/files", map[string]any{"provider": "fixture-inject"})

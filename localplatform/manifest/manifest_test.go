@@ -391,9 +391,11 @@ func TestRepositoryAccessValidationAndCompilation(t *testing.T) {
 	}
 
 	for name, mutation := range map[string]string{
-		"unknown permission":           strings.Replace(withAccess, "workflows: write", "administration: write", 1),
-		"invalid level":                strings.Replace(withAccess, "workflows: write", "workflows: admin", 1),
-		"contradictory workflow write": strings.Replace(withAccess, "contents: write", "contents: read", 1),
+		"unknown permission":             strings.Replace(withAccess, "workflows: write", "administration: write", 1),
+		"invalid level":                  strings.Replace(withAccess, "workflows: write", "workflows: admin", 1),
+		"contradictory workflow write":   strings.Replace(withAccess, "contents: write", "contents: read", 1),
+		"pull requests without checkout": strings.Replace(base, "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        pull_requests: write\n  infrastructure:", 1),
+		"workflow read without checkout": strings.Replace(base, "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        workflows: read\n  infrastructure:", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Decode(strings.NewReader(mutation)); err == nil {

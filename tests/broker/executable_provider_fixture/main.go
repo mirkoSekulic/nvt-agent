@@ -167,6 +167,14 @@ func (s *server) handle(req request) {
 		raw = strings.TrimPrefix(raw, "github.com/")
 		s.success(req.ID, map[string]any{"target": raw, "audit_target": "audit/" + raw})
 	case "http.request":
+		if _, changed := req.Params["grants"]; changed {
+			s.failure(req.ID, "fixture-v1-shape-changed", 500, "v1 http.request unexpectedly received grants")
+			return
+		}
+		if _, compatible := req.Params["effective_repositories"].([]any); !compatible {
+			s.failure(req.ID, "fixture-v1-shape-changed", 500, "v1 http.request omitted effective_repositories")
+			return
+		}
 		s.success(req.ID, map[string]any{"status": 200, "headers": map[string]string{"x-fixture": "yes"}, "body": `{\"fixture\":true}`, "audit_target": "audit/http"})
 	case "token":
 		s.success(req.ID, map[string]any{"token": s.secret, "expires_at": nil})

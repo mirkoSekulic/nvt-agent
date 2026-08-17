@@ -617,6 +617,9 @@ func validateRepository(value Repository, accounts map[string]Account) error {
 				return errors.New("repository access has an unsupported permission or level")
 			}
 		}
+		if !oneOf(value.Access.Permissions["contents"], "read", "write") {
+			return errors.New("repository access requires contents read or write for checkout")
+		}
 		if value.Access.Permissions["workflows"] == "write" && value.Access.Permissions["contents"] != "write" {
 			return errors.New("workflow write access requires contents write access")
 		}

@@ -162,12 +162,12 @@ the sole audit writer; provider-generated audit records are not supported.
   normalized target is a non-empty JSON string; `audit_target` is a non-empty,
   sanitized string suitable for audit. Each is at most 8192 UTF-8 bytes.
   `audit_target` must not contain credentials or control characters.
-- `http.request`: `{method,url,headers,paginate,grants}` →
-  `{status,headers,body,audit_target}`. Each grant carries its exact
-  `repositories` and `permissions`; the provider must select exactly one grant
-  matching the request target and fail closed if the match is absent or
-  ambiguous. `audit_target` is the sanitized target core records for this
-  request.
+- `http.request`: `{method,url,headers,paginate,effective_repositories}` →
+  `{status,headers,body,audit_target}`. `audit_target` is the sanitized target
+  core records for this request. This v1 shape cannot represent per-grant
+  permissions, so the broker rejects permission-bearing HTTP grants before
+  invoking an executable provider. A future negotiated protocol version is
+  required to expose that additional authority context.
 - `token`: `{target,effective_repositories}` → `{token,expires_at}`.
 - `identity`: `{effective_repositories}` or
   `{target,effective_repositories}` → `{name,email}`. The target-less form is
