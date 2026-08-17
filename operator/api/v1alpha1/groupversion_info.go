@@ -1,4 +1,5 @@
 // Package v1alpha1 contains API schema definitions for nvt.dev resources.
+// +groupName=nvt.dev
 package v1alpha1
 
 import (

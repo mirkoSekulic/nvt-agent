@@ -30,8 +30,6 @@ func main() {
 	var authorizationRaw string
 	var admissionRaw string
 	var claimEnrichmentRaw string
-	var nativeSessionAuthenticationTimeoutSeconds int
-	var nativeSessionRevalidationIntervalSeconds int
 	var localRunTimeoutSeconds int
 	flag.StringVar(&cfg.BaseDomain, "base-domain", envString("NVT_GATEWAY_BASE_DOMAIN", "agents.localhost"), "base DNS domain for AgentRun access")
 	flag.StringVar(&cfg.PublicURL, "public-url", envString("NVT_GATEWAY_PUBLIC_URL", ""), "externally visible base URL for dashboard and OAuth callbacks")
@@ -75,21 +73,8 @@ func main() {
 	flag.StringVar(&authorizationRaw, "authorization", envString("NVT_GATEWAY_AUTHORIZATION", ""), "gateway authorization policy JSON")
 	flag.StringVar(&admissionRaw, "admission", envString("NVT_GATEWAY_ADMISSION", ""), "gateway login admission policy JSON")
 	flag.StringVar(&claimEnrichmentRaw, "claim-enrichment", envString("NVT_GATEWAY_CLAIM_ENRICHMENT", ""), "gateway OAuth claim enrichment JSON")
-	flag.BoolVar(&cfg.NativeSession.Enabled, "native-session-enabled", strictEnvBool("NVT_GATEWAY_NATIVE_SESSION_ENABLED", false), "enable the native guest session TLS listener")
-	flag.StringVar(&cfg.NativeSession.ListenAddr, "native-session-listen-addr", envString("NVT_GATEWAY_NATIVE_SESSION_LISTEN_ADDR", ":7443"), "native guest session TLS listen address")
-	flag.StringVar(&cfg.NativeSession.TLSCertificateFile, "native-session-tls-certificate-file", envString("NVT_GATEWAY_NATIVE_SESSION_TLS_CERTIFICATE_FILE", ""), "native guest session TLS certificate file")
-	flag.StringVar(&cfg.NativeSession.TLSKeyFile, "native-session-tls-key-file", envString("NVT_GATEWAY_NATIVE_SESSION_TLS_KEY_FILE", ""), "native guest session TLS key file")
-	flag.StringVar(&cfg.NativeSession.BrokerURL, "native-session-broker-url", envString("NVT_GATEWAY_NATIVE_SESSION_BROKER_URL", ""), "canonical HTTPS broker origin for native session authentication")
-	flag.StringVar(&cfg.NativeSession.BrokerServerName, "native-session-broker-server-name", envString("NVT_GATEWAY_NATIVE_SESSION_BROKER_SERVER_NAME", ""), "exact broker TLS DNS server name")
-	flag.StringVar(&cfg.NativeSession.BrokerCAFile, "native-session-broker-ca-file", envString("NVT_GATEWAY_NATIVE_SESSION_BROKER_CA_FILE", ""), "explicit broker CA file")
-	flag.IntVar(&nativeSessionAuthenticationTimeoutSeconds, "native-session-authentication-timeout-seconds", strictEnvInt("NVT_GATEWAY_NATIVE_SESSION_AUTHENTICATION_TIMEOUT_SECONDS", 5), "native session broker authentication timeout")
-	flag.IntVar(&nativeSessionRevalidationIntervalSeconds, "native-session-revalidation-interval-seconds", strictEnvInt("NVT_GATEWAY_NATIVE_SESSION_REVALIDATION_INTERVAL_SECONDS", 30), "maximum native session trust interval before broker reauthentication")
-	flag.BoolVar(&cfg.NativeWorkspace.Enabled, "native-workspace-enabled", strictEnvBool("NVT_GATEWAY_NATIVE_WORKSPACE_ENABLED", false), "enable the native workspace TLS/yamux listener")
-	flag.StringVar(&cfg.NativeWorkspace.ListenAddr, "native-workspace-listen-addr", envString("NVT_GATEWAY_NATIVE_WORKSPACE_LISTEN_ADDR", ":7444"), "native workspace TLS listen address")
 	flag.StringVar(&kubeconfig, "kubeconfig", envString("KUBECONFIG", ""), "path to kubeconfig, optional")
 	flag.Parse()
-	cfg.NativeSession.AuthenticationTimeout = time.Duration(nativeSessionAuthenticationTimeoutSeconds) * time.Second
-	cfg.NativeSession.RevalidationInterval = time.Duration(nativeSessionRevalidationIntervalSeconds) * time.Second
 	cfg.LocalRuns.Timeout = time.Duration(localRunTimeoutSeconds) * time.Second
 
 	cfg.Auth.OIDC.Scopes = gateway.SplitScopes(envString("NVT_GATEWAY_OIDC_SCOPES", ""))
@@ -127,55 +112,24 @@ func main() {
 			log.Fatalf("create kubernetes client: %v", err)
 		}
 	}
-	nativeSessionServer, err := gateway.NewNativeSessionServer(cfg.NativeSession)
-	if err != nil {
-		log.Fatalf("create native session listener: %v", err)
-	}
-	nativeWorkspaceServer, err := gateway.NewNativeWorkspaceServer(cfg.NativeWorkspace, cfg.NativeSession)
-	if err != nil {
-		log.Fatalf("create native workspace listener: %v", err)
-	}
-	var nativeWorkspaceResolver gateway.NativeWorkspaceResolver
-	if nativeSessionServer != nil && nativeWorkspaceServer != nil {
-		nativeWorkspaceResolver = gateway.NewNativeWorkspaceResolver(nativeSessionServer.Registry(), nativeWorkspaceServer.Registry())
-	}
-	server, err := gateway.NewServerWithNativeWorkspaceResolver(cfg, client, namespace, nativeWorkspaceResolver)
+	server, err := gateway.NewServer(cfg, client, namespace)
 	if err != nil {
 		log.Fatalf("create gateway server: %v", err)
 	}
-	if err := serve(cfg, namespace, server, nativeSessionServer, nativeWorkspaceServer); err != nil {
+	if err := serve(cfg, namespace, server); err != nil {
 		log.Fatalf("serve gateway: %v", err)
 	}
 }
 
-func serve(cfg gateway.Config, namespace string, handler http.Handler, nativeSessionServer *gateway.NativeSessionServer, nativeWorkspaceServer *gateway.NativeWorkspaceServer) error {
+func serve(cfg gateway.Config, namespace string, handler http.Handler) error {
 	lifetime, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	httpServer := &http.Server{Addr: cfg.ListenAddr, Handler: handler}
-	errorCount := 1
-	if nativeSessionServer != nil {
-		errorCount++
-	}
-	if nativeWorkspaceServer != nil {
-		errorCount++
-	}
-	errorsChannel := make(chan error, errorCount)
+	errorsChannel := make(chan error, 1)
 	go func() {
 		log.Printf("nvt-agent-gateway listening on %s with routing mode %s in namespace %s", cfg.ListenAddr, cfg.Routing.Mode, namespace)
 		errorsChannel <- httpServer.ListenAndServe()
 	}()
-	if nativeSessionServer != nil {
-		go func() {
-			log.Printf("nvt-agent-gateway native session listener enabled on %s", cfg.NativeSession.ListenAddr)
-			errorsChannel <- nativeSessionServer.ListenAndServe()
-		}()
-	}
-	if nativeWorkspaceServer != nil {
-		go func() {
-			log.Printf("nvt-agent-gateway native workspace listener enabled on %s", cfg.NativeWorkspace.ListenAddr)
-			errorsChannel <- nativeWorkspaceServer.ListenAndServe()
-		}()
-	}
 	var serveError error
 	select {
 	case <-lifetime.Done():
@@ -186,18 +140,9 @@ func serve(cfg gateway.Config, namespace string, handler http.Handler, nativeSes
 	}
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	shutdownErrors := make(chan error, 3)
-	shutdownCount := 1
+	shutdownErrors := make(chan error, 1)
 	go func() { shutdownErrors <- httpServer.Shutdown(shutdownContext) }()
-	if nativeSessionServer != nil {
-		shutdownCount++
-		go func() { shutdownErrors <- nativeSessionServer.Shutdown(shutdownContext) }()
-	}
-	if nativeWorkspaceServer != nil {
-		shutdownCount++
-		go func() { shutdownErrors <- nativeWorkspaceServer.Shutdown(shutdownContext) }()
-	}
-	for range shutdownCount {
+	for range 1 {
 		if err := <-shutdownErrors; err != nil && serveError == nil {
 			serveError = errors.New("gateway shutdown failed")
 		}

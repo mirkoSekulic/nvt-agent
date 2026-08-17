@@ -27,7 +27,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -52,8 +51,6 @@ import (
 	"sigs.k8s.io/yaml"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
-	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
-	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 const (
@@ -219,16 +216,9 @@ type brokerAgentQuota struct {
 type AgentRunReconciler struct {
 	client.Client
 
-	Scheme                 *runtime.Scheme
-	Now                    func() metav1.Time
-	BrokerHTTPClient       *http.Client
-	ExecutionDrivers       executionDriverClientRegistry
-	GuestEnrollment        guestEnrollmentIssuer
-	NativeEgressAttachment *executiondriver.NativeEgressAttachment
-	nativeEgressTargets    nativeEgressTargetPublication
-
-	externalExecutionCallsMu sync.Mutex
-	externalExecutionCalls   chan struct{}
+	Scheme           *runtime.Scheme
+	Now              func() metav1.Time
+	BrokerHTTPClient *http.Client
 }
 
 type preparedPlaceholderFile struct {
@@ -311,8 +301,7 @@ type podCredentialVolumeMountState struct {
 
 const defaultProjectedVolumeMode int32 = 420
 
-// Reconcile selects the exact operator-owned execution backend and delegates
-// the complete lifecycle without falling back to a different backend.
+// Reconcile renders the AgentRun config, creates the agent Pod, and syncs basic Pod-phase status.
 func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var agentRun nvtv1alpha1.AgentRun
 	if err := r.Get(ctx, req.NamespacedName, &agentRun); err != nil {
@@ -321,53 +310,13 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		return ctrl.Result{}, fmt.Errorf("get AgentRun: %w", err)
 	}
-	selection, err := effectiveAgentRunExecution(&agentRun)
-	if err != nil {
-		return r.recordExecutionSelectionFailure(ctx, &agentRun, executionSelectionInvalidReason, "resolved execution selection is invalid")
-	}
-	backend, available := r.executionBackendFor(selection)
-	if !available {
-		if selection.Driver != builtInKubernetesDriver {
-			if cleared, clearErr := r.clearNativeGuestBindingStatus(ctx, &agentRun); clearErr != nil || cleared {
-				return ctrl.Result{Requeue: cleared}, clearErr
-			}
-		}
-		if selection.Driver != builtInKubernetesDriver && controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) &&
-			(!agentRun.DeletionTimestamp.IsZero() || externalTerminalCleanupDue(&agentRun, r.now())) {
-			if result, complete, revokeErr := r.revokeGuestEnrollmentScope(ctx, &agentRun, selection.Driver); revokeErr != nil || !complete {
-				return result, revokeErr
-			}
-		}
-		// Once exact-driver cleanup has completed, the removed external
-		// finalizer is the durable proof that terminal CR retention or final
-		// AgentRun deletion no longer requires a live registration.
-		if selection.Driver != builtInKubernetesDriver &&
-			!controllerutil.ContainsFinalizer(&agentRun, externalExecutionFinalizer) &&
-			!controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) &&
-			!controllerutil.ContainsFinalizer(&agentRun, agentRunFinalizer) {
-			if !agentRun.DeletionTimestamp.IsZero() {
-				if err := r.finalizeAgentRun(ctx, &agentRun); err != nil {
-					return ctrl.Result{}, err
-				}
-				return ctrl.Result{}, nil
-			}
-			if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
-				return r.reconcileTerminalAgentRunRetention(ctx, &agentRun)
-			}
-		}
-		return r.recordExecutionSelectionFailure(ctx, &agentRun, executionDriverUnavailableReason, "selected execution driver is not available")
-	}
 
 	if !agentRun.DeletionTimestamp.IsZero() {
-		return backend.Delete(ctx, r, &agentRun)
+		if err := r.finalizeAgentRun(ctx, &agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
-	return backend.Reconcile(ctx, r, agentRun)
-}
-
-// reconcileKubernetesAgentRun is the behavior-preserving built-in Pod adapter.
-// Kubernetes-specific rendering and lifecycle helpers intentionally remain in
-// the operator rather than entering the portable execution-driver protocol.
-func (r *AgentRunReconciler) reconcileKubernetesAgentRun(ctx context.Context, agentRun nvtv1alpha1.AgentRun) (ctrl.Result, error) {
 	if !IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		if err := ValidateRemovedEgressForwardProxy(&agentRun); err != nil {
 			return ctrl.Result{}, err
@@ -654,7 +603,7 @@ func (r *AgentRunReconciler) reconcileTerminalResourceCleanup(ctx context.Contex
 		return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
 	}
 
-	remaining, shouldDelete := TerminalOperationalCleanupDelay(agentRun, r.now())
+	remaining, shouldDelete := TerminalPodCleanupDelay(agentRun, r.now())
 	if remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
@@ -1318,10 +1267,7 @@ func (r *AgentRunReconciler) ensureImmutablePodSecurityState(ctx context.Context
 }
 
 func agentRunMaxConcurrentReconciles() int {
-	// At most two external driver calls may run concurrently. The third worker
-	// remains available for the built-in Kubernetes backend and for quick
-	// fail-closed/requeue decisions when an external host stalls.
-	return externalExecutionMaxConcurrentCalls + 1
+	return 2
 }
 
 func podCredentialProjectionSignature(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod) (string, error) {
@@ -4911,19 +4857,32 @@ func InjectAgentRunRuntimeConfig(config map[string]any, agentRun *nvtv1alpha1.Ag
 }
 
 func injectRuntimeSelectionArgs(args []any, runtimeType, model, effort string) ([]any, error) {
-	stringArgs := make([]string, len(args))
 	for index, raw := range args {
-		stringArgs[index] = raw.(string)
+		arg := raw.(string)
+		if model != "" && (arg == "--model" || arg == "-m" || strings.HasPrefix(arg, "--model=")) {
+			return nil, fmt.Errorf("typed model conflicts with runtime args model selector")
+		}
+		if effort != "" {
+			conflict := arg == "--effort" || strings.HasPrefix(arg, "--effort=")
+			if runtimeType == "codex" {
+				conflict = strings.HasPrefix(arg, "--config=model_reasoning_effort=") || strings.HasPrefix(arg, "-cmodel_reasoning_effort=") ||
+					((arg == "--config" || arg == "-c") && index+1 < len(args) && strings.HasPrefix(args[index+1].(string), "model_reasoning_effort="))
+			}
+			if conflict {
+				return nil, fmt.Errorf("typed effort conflicts with runtime args effort selector")
+			}
+		}
 	}
-	updated, err := resolvedrun.ApplyRuntimeSelectionArguments(stringArgs, resolvedrun.Runtime{
-		Type: runtimeType, Model: model, Effort: effort,
-	})
-	if err != nil {
-		return nil, err
+	result := append([]any{}, args...)
+	if model != "" {
+		result = append(result, "--model", model)
 	}
-	result := make([]any, len(updated))
-	for index, arg := range updated {
-		result[index] = arg
+	if effort != "" {
+		if runtimeType == "codex" {
+			result = append(result, "--config", "model_reasoning_effort="+effort)
+		} else {
+			result = append(result, "--effort", effort)
+		}
 	}
 	return result, nil
 }
@@ -5157,9 +5116,8 @@ func IsTerminalAgentRunPhase(phase nvtv1alpha1.AgentRunPhase) bool {
 	}
 }
 
-// TerminalOperationalCleanupDelay returns the remaining resource TTL and
-// whether the selected backend's operational resources must be deleted now.
-func TerminalOperationalCleanupDelay(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) (time.Duration, bool) {
+// TerminalPodCleanupDelay returns the remaining TTL and whether the owned Pod should be deleted now.
+func TerminalPodCleanupDelay(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) (time.Duration, bool) {
 	if agentRun.Status.FinishedAt == nil || agentRun.Spec.TTL == nil {
 		return 0, false
 	}

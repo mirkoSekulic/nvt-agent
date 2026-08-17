@@ -615,24 +615,6 @@ func TestLegacyProducerCannotConfigureRuntimeContainerCapabilities(t *testing.T)
 	assertScheduledRunCount(t, k8sClient, fixture.schedule, 0)
 }
 
-func TestLegacyProducerCannotConfigureExecutionSelection(t *testing.T) {
-	fixture := scheduleAdmissionFixture(t, testAgentSchedule())
-	response, k8sClient := serveScheduleAdmission(t, fixture, scheduleAdmissionBody(t,
-		"legacy-execution", "", map[string]any{"spec": map[string]any{
-			"execution": map[string]any{
-				"kind": "vm", "driver": "example-vm", "classRef": "vm-standard",
-				"configuration": map[string]any{"credential": "producer-controlled"},
-			},
-		}}))
-	var decoded scheduleAdmissionResponse
-	decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
-	if decoded.Scheduled || !strings.Contains(decoded.Reason, "use an execution profile") ||
-		strings.Contains(decoded.Reason, "producer-controlled") {
-		t.Fatalf("legacy producer execution request was accepted or leaked: %#v", decoded)
-	}
-	assertScheduledRunCount(t, k8sClient, fixture.schedule, 0)
-}
-
 func TestLegacyProducerCannotConfigureRequiredDockerNetworks(t *testing.T) {
 	fixture := scheduleAdmissionFixture(t, testAgentSchedule())
 	response, k8sClient := serveScheduleAdmission(t, fixture, scheduleAdmissionBody(t,

@@ -3,7 +3,6 @@ FROM golang:1.25 AS build
 WORKDIR /src
 COPY operator ./operator
 COPY protocol/eligibility ./protocol/eligibility
-COPY protocol/guestenrollment ./protocol/guestenrollment
 COPY protocol/localroutes ./protocol/localroutes
 COPY hostbundle ./hostbundle
 COPY gateway ./gateway

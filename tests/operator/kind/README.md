@@ -164,7 +164,7 @@ values files and the real Codex AgentRun flow, see
 ```sh
 make operator-codex-auth-secret
 make github-comments-producer-secret GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem
-make broker-env-secret BROKER_ENV_FILE=.nvt-local/secrets/broker-env
+make broker-env-secret BROKER_ENV_FILE=.broker/env
 ```
 
 These Secrets are separate on purpose:
@@ -177,7 +177,7 @@ These Secrets are separate on purpose:
   `charts/nvt` broker deployment through `broker.envSecretName`.
 
 The producer GitHub App Secret and broker env Secret may use different GitHub
-Apps later. Do not commit real private keys, `.nvt-local/secrets/`, or other secret
+Apps later. Do not commit real private keys, `.broker/env`, or other secret
 files.
 
 With local values prepared, build, load, and install the GitHub comments
@@ -204,7 +204,7 @@ Full local POC setup sequence:
 make operator-kind-setup CREATE_CLUSTER=1
 make operator-codex-auth-secret
 make github-comments-producer-secret GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem
-make broker-env-secret BROKER_ENV_FILE=.nvt-local/secrets/broker-env
+make broker-env-secret BROKER_ENV_FILE=.broker/env
 make producer-kind-setup PRODUCER_VALUES=values.nvt-local.yaml
 ```
 
@@ -217,18 +217,8 @@ KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=mediated-egress make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=profile-auth make operator-kind-smoke
-KIND_SMOKE_MODE=render KIND_SMOKE_CASE=dynamic-credentials make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=broker-seed make operator-kind-smoke
-KIND_SMOKE_MODE=render KIND_SMOKE_CASE=external-execution make operator-kind-smoke
 ```
-
-`external-execution` runs the digest-pinned fake OCI driver through its
-authenticated host, issues and delivers one broker-backed guest enrollment,
-proves no Agent Pod is created, restarts both the host and operator, and
-observes the accepted handoff plus provider drift repair after each restart.
-Deletion verifies broker execution-scope revocation before the durable
-provider, handoff, and subordinate state disappear, then verifies the durable
-broker cleanup-complete marker before the finalizer clears.
 
 The current case is `parallel-lifecycle`. It exercises this no-GitHub,
 no-secret lifecycle:

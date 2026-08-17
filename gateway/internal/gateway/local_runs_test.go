@@ -383,7 +383,7 @@ func testLocalGateway(t *testing.T, proxyURL string, source LocalRunSource, auth
 		config.LocalRuns = LocalRunsConfig{Enabled: true, ControllerURL: "http://controller.test:7480", TokenFile: "/run/secrets/local-controller-route-token", BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true}
 		config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "owner", Effect: authorizationEffectAllow, Owner: true}}
 	}
-	server, err := NewServerWithSources(config, nil, "", nil, source)
+	server, err := NewServerWithSources(config, nil, "", source)
 	if err != nil {
 		t.Fatal(err)
 	}

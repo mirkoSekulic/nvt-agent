@@ -26,29 +26,6 @@
 {{- if or (lt (int $templateSwitching.assertionTTLSeconds) 1) (gt (int $templateSwitching.assertionTTLSeconds) (int (default 60 (index $brokerSwitching "max-assertion-seconds")))) }}{{ fail "operator template-switching assertion TTL is outside the broker window" }}{{ end -}}
 {{- end -}}
 {{- end -}}
-{{- if .Values.executionDrivers.guestEnrollment.enabled }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: nvt-guest-enrollment-client
-  namespace: {{ include "nvt.namespace" . | quote }}
-  labels:
-    {{- include "nvt.operatorLabels" . | nindent 4 }}
-data:
-  config.json: |
-    {
-      "version": 1,
-      "baseURL": {{ .Values.executionDrivers.guestEnrollment.brokerURL | quote }},
-      "serverName": {{ .Values.executionDrivers.guestEnrollment.serverName | quote }},
-      "caFile": "/var/run/nvt-guest-enrollment/ca.crt",
-      "bearerTokenFile": "/var/run/nvt-guest-enrollment/orchestrator-token",
-      "requestTimeoutSeconds": {{ .Values.executionDrivers.guestEnrollment.requestTimeoutSeconds }},
-      "handoffTimeoutSeconds": {{ .Values.executionDrivers.guestEnrollment.handoffTimeoutSeconds }},
-      "ttlSeconds": {{ .Values.executionDrivers.guestEnrollment.ttlSeconds }},
-      "driverRegistrations": {{ .Values.executionDrivers.guestEnrollment.registrations | toJson }}
-    }
----
-{{- end }}
 {{- if $principalAccountsEnabled }}
 apiVersion: v1
 kind: ConfigMap
@@ -92,15 +69,8 @@ spec:
       {{- include "nvt.operatorSelectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- if or .Values.executionDrivers.guestEnrollment.enabled .Values.nativeEgressRelay.enabled $principalAccountsEnabled }}
+      {{- if $principalAccountsEnabled }}
       annotations:
-        {{- if .Values.executionDrivers.guestEnrollment.enabled }}
-        checksum/guest-enrollment-client: {{ .Values.executionDrivers.guestEnrollment | toJson | sha256sum | quote }}
-        {{- end }}
-        {{- if .Values.nativeEgressRelay.enabled }}
-        checksum/native-egress-publication: {{ .Values.nativeEgressRelay | toJson | sha256sum | quote }}
-        nvt.dev/native-egress-rollout-revision: {{ .Values.nativeEgressRelay.rolloutRevision | quote }}
-        {{- end }}
         {{- if $principalAccountsEnabled }}
         checksum/principal-account-client: {{ $principalAccounts | toJson | sha256sum | quote }}
         nvt.io/dynamic-account-assertion-rotation-epoch: {{ .Values.broker.dynamicAccountAssertionRotationEpoch | quote }}
@@ -110,7 +80,7 @@ spec:
         {{- include "nvt.operatorSelectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: nvt-operator
-      {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled $principalAccountsEnabled }}
+      {{- if $principalAccountsEnabled }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -153,20 +123,6 @@ spec:
               value: {{ join "," .Values.egress.allowedTCPPorts | quote }}
             - name: NVT_DEFAULT_EGRESS_MODE
               value: {{ .Values.egress.defaultMode | quote }}
-            {{- if .Values.executionDrivers.registrations }}
-            - name: NVT_EXECUTION_DRIVER_REGISTRATIONS_FILE
-              value: /var/run/nvt-execution-drivers/registrations.json
-            {{- end }}
-            {{- if .Values.executionDrivers.guestEnrollment.enabled }}
-            - name: NVT_GUEST_ENROLLMENT_CONFIG_FILE
-              value: /var/run/nvt-guest-enrollment/config.json
-            {{- end }}
-            {{- if .Values.nativeEgressRelay.enabled }}
-            - name: NVT_NATIVE_EGRESS_PUBLICATION_CONFIG_FILE
-              value: /var/run/nvt-native-egress-publication/config.json
-            - name: NVT_NATIVE_EGRESS_ATTACHMENT_CONFIG_FILE
-              value: /var/run/nvt-native-egress-attachment/config.json
-            {{- end }}
             {{- if $principalAccountsEnabled }}
             - name: NVT_PRINCIPAL_ACCOUNT_BROKER_CONFIG_FILE
               value: /var/run/nvt-principal-accounts/config.json
@@ -196,108 +152,16 @@ spec:
             httpGet:
               path: /readyz
               port: 8081
-          {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled $principalAccountsEnabled }}
+          {{- if $principalAccountsEnabled }}
           volumeMounts:
-            {{- if .Values.executionDrivers.registrations }}
-            - name: execution-driver-registrations
-              mountPath: /var/run/nvt-execution-drivers
-              readOnly: true
-            {{- if .Values.executionDrivers.guestEnrollment.enabled }}
-            - name: guest-enrollment-client
-              mountPath: /var/run/nvt-guest-enrollment
-              readOnly: true
-            {{- end }}
-            {{- end }}
-            {{- if .Values.nativeEgressRelay.enabled }}
-            - name: native-egress-publication
-              mountPath: /var/run/nvt-native-egress-publication
-              readOnly: true
-            - name: native-egress-attachment
-              mountPath: /var/run/nvt-native-egress-attachment
-              readOnly: true
-            {{- end }}
             {{- if $principalAccountsEnabled }}
             - name: principal-account-client
               mountPath: /var/run/nvt-principal-accounts
               readOnly: true
             {{- end }}
           {{- end }}
-      {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled $principalAccountsEnabled }}
+      {{- if $principalAccountsEnabled }}
       volumes:
-        {{- if .Values.executionDrivers.registrations }}
-        - name: execution-driver-registrations
-          projected:
-            defaultMode: 0440
-            sources:
-              - configMap:
-                  name: nvt-execution-driver-registrations
-                  items:
-                    - key: registrations.json
-                      path: registrations.json
-              {{- range $registration := .Values.executionDrivers.registrations }}
-              {{- $context := dict "root" $ "registration" $registration }}
-              - secret:
-                  name: {{ include "nvt.executionDriverResourceName" $context | quote }}
-                  items:
-                    - key: ca.crt
-                      path: {{ printf "%s/ca.crt" $registration.name | quote }}
-                    - key: auth-token
-                      path: {{ printf "%s/auth-token" $registration.name | quote }}
-              {{- end }}
-        {{- if .Values.executionDrivers.guestEnrollment.enabled }}
-        - name: guest-enrollment-client
-          projected:
-            defaultMode: 0440
-            sources:
-              - configMap:
-                  name: nvt-guest-enrollment-client
-                  items:
-                    - key: config.json
-                      path: config.json
-              - secret:
-                  name: {{ .Values.executionDrivers.guestEnrollment.ca.existingSecret | quote }}
-                  items:
-                    - key: {{ .Values.executionDrivers.guestEnrollment.ca.key | quote }}
-                      path: ca.crt
-              - secret:
-                  name: {{ .Values.executionDrivers.guestEnrollment.orchestratorAuth.existingSecret | quote }}
-                  items:
-                    - key: {{ .Values.executionDrivers.guestEnrollment.orchestratorAuth.tokenKey | quote }}
-                      path: orchestrator-token
-        {{- end }}
-        {{- end }}
-        {{- if .Values.nativeEgressRelay.enabled }}
-        - name: native-egress-publication
-          projected:
-            defaultMode: 0440
-            sources:
-              - configMap:
-                  name: nvt-native-egress-publication-client
-                  items:
-                    - key: config.json
-                      path: config.json
-              - secret:
-                  name: {{ .Values.nativeEgressRelay.credentials.existingSecret | quote }}
-                  items:
-                    - key: {{ .Values.nativeEgressRelay.credentials.controlCAKey | quote }}
-                      path: control-ca.crt
-                    - key: {{ .Values.nativeEgressRelay.credentials.controlTokenKey | quote }}
-                      path: control-token
-        - name: native-egress-attachment
-          projected:
-            defaultMode: 0440
-            sources:
-              - configMap:
-                  name: nvt-native-egress-attachment
-                  items:
-                    - key: config.json
-                      path: config.json
-              - secret:
-                  name: {{ .Values.nativeEgressRelay.credentials.existingSecret | quote }}
-                  items:
-                    - key: {{ .Values.nativeEgressRelay.credentials.dataCAKey | quote }}
-                      path: data-ca.crt
-        {{- end }}
         {{- if $principalAccountsEnabled }}
         - name: principal-account-client
           projected:

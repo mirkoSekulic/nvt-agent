@@ -15,7 +15,6 @@ GATEWAY_IMAGE ?= nvt-agent-gateway:latest
 CREDENTIAL_PORTAL_IMAGE ?= nvt-credential-portal:latest
 EGRESSD_IMAGE ?= nvt-egressd:latest
 CAPTURED_IMAGE ?= nvt-captured:latest
-NATIVE_EGRESS_RELAY_IMAGE ?= nvt-native-egress-relay:latest
 DIND_IMAGE ?= nvt-dind:latest
 ECHO_IMAGE ?= nvt-smoke-echo:latest
 PRODUCER_VALUES ?= values.nvt-local.yaml
@@ -37,7 +36,7 @@ OPERATOR_KIND_EXTRA_IMAGE_TARGETS := gateway-kind-load
 OPERATOR_KIND_GATEWAY_HELM_ARGS := --set gateway.enabled=true --set gateway.image.repository=$(word 1,$(subst :, ,$(GATEWAY_IMAGE))) --set gateway.image.tag=$(word 2,$(subst :, ,$(GATEWAY_IMAGE)))
 endif
 
-.PHONY: runtime-build dind-build broker-build local-controller-build egressd-build captured-build native-egress-relay-build transparent-compose-smoke echo-build echo-kind-load operator-build execution-driver-host-build qemu-execution-driver-build qemu-execution-driver-test azure-execution-driver-build azure-execution-driver-test host-bundle-build host-bundle-test eligibility-test guest-enrollment-test producer-build gateway-build credential-portal-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret codex-mediated-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule local-images local-init local-up local-status local-down local-reset plugin-init
+.PHONY: runtime-build dind-build broker-build local-controller-build egressd-build captured-build transparent-compose-smoke echo-build echo-kind-load operator-build eligibility-test resolved-run-test producer-build gateway-build credential-portal-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret codex-mediated-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule local-images local-init local-up local-status local-down local-reset plugin-init
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -57,46 +56,17 @@ egressd-build:
 captured-build:
 	docker build -f captured/Dockerfile -t "$(CAPTURED_IMAGE)" .
 
-native-egress-relay-build:
-	docker build -f nativeegressrelay/Dockerfile -t "$(NATIVE_EGRESS_RELAY_IMAGE)" .
-
 transparent-compose-smoke:
 	bash tests/runtime/compose-transparent-smoke.sh
 
 operator-build:
 	bash scripts/operator-build.sh $(if $(NO_CACHE),--no-cache)
 
-execution-driver-host-build:
-	docker build -f operator/executiondriver/host-image/Dockerfile -t nvt-execution-driver-host:latest .
-
-qemu-execution-driver-build:
-	docker build -f executiondrivers/qemu/Dockerfile -t nvt-qemu-execution-driver:latest .
-
-qemu-execution-driver-test:
-	cd executiondrivers/qemu && go vet ./... && go test -race -count=1 ./...
-
-azure-execution-driver-build:
-	docker build -f executiondrivers/azure/Dockerfile -t nvt-azure-execution-driver:latest .
-
-azure-execution-driver-test:
-	cd executiondrivers/azure && go vet ./... && go test -race -count=1 ./...
-	BICEP=$${BICEP:-/tmp/bicep} bash executiondrivers/azure/bicep-check.sh
-
-host-bundle-build:
-	bash hostbundle/build.sh "$${NVT_HOST_BUNDLE_VERSION:?set NVT_HOST_BUNDLE_VERSION}" "$${NVT_HOST_BUNDLE_REVISION:?set NVT_HOST_BUNDLE_REVISION}"
-
-host-bundle-test:
-	cd hostbundle && go vet ./... && go test -race -count=1 ./...
-	bash hostbundle/build-test.sh
-
 eligibility-test:
 	cd protocol/eligibility && go vet ./... && go test -race -count=1 ./...
 
 resolved-run-test:
 	cd protocol/resolvedrun && go vet ./... && go test -race -count=1 ./...
-
-guest-enrollment-test:
-	cd protocol/guestenrollment && go vet ./... && go test -race -count=1 ./...
 
 producer-build:
 	docker build -f producers/github-comments/Dockerfile -t "$(PRODUCER_IMAGE)" .

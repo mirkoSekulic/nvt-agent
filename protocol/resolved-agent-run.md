@@ -267,5 +267,5 @@ existing operator's final runtime rendering after removing only the asserted
 Kubernetes lifecycle adapter from the comparison. The test separately pins
 that the Kubernetes renderer still emits that adapter and that the portable
 renderer does not. It also verifies that local resolution does not mutate the
-Kubernetes object. The full operator and execution-driver image suites remain
-regression gates for existing Pod/VM behavior.
+Kubernetes object. The operator and local-platform suites remain regression
+gates for existing Pod and Docker behavior.

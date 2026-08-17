@@ -93,8 +93,6 @@ workflow name is recorded separately in immutable `profileProvenance`.
 runtime:
   type: codex          # codex | claude
   autonomy: trusted-local
-  model: gpt-5.6-sol   # optional opaque runtime model identifier
-  effort: high         # optional runtime-supported effort
   user: root           # root | non-root
 ```
 
@@ -106,26 +104,9 @@ contract consumed by runtime bootstrap. `trusted-local` adds
 `--sandbox danger-full-access --ask-for-approval never` for Codex and
 `--dangerously-skip-permissions` for Claude; `interactive` adds no autonomy
 arguments. An explicitly configured `agent.config.runtime.args` list is a
-complete autonomy override. When `model` or `effort` is selected, the operator
-appends the corresponding selectors to both the fresh arguments and any
-configured `runtime.resume.args`. A raw model or effort selector in either list
-is rejected instead of relying on CLI argument order. When both typed fields
-are omitted, explicit arguments remain unchanged. An explicit non-empty
+complete override and is preserved exactly, so the operator never appends
+potentially contradictory defaults. An explicit non-empty
 `agent.config.runtime.command` is likewise preserved.
-
-For Claude Code the equivalent selection is:
-
-```yaml
-runtime:
-  type: claude
-  autonomy: trusted-local
-  model: opus
-  effort: high
-```
-
-Model names are runtime-owned opaque strings. Codex supports `minimal`, `low`,
-`medium`, `high`, and `xhigh` effort; Claude supports `low`, `medium`, `high`,
-`xhigh`, and `max`. Omitting either field leaves that CLI's default in effect.
 
 Optional `runtimeAuth` copies files from a same-namespace Secret into a
 writable runtime home:
@@ -147,24 +128,6 @@ can use its limits to size the Pod VM. `tolerations` optionally permits only the
 schedule onto matching tainted nodes, but a toleration does not select a node or
 remove the taint. The separate egress service Pod and platform Deployments do
 not inherit AgentRun tolerations.
-
-`execution` is an immutable operator-resolved backend snapshot. Omission is
-backward compatible and selects the built-in `pod`/`kubernetes` adapter. The
-equivalent explicit form is:
-
-```yaml
-execution:
-  kind: pod
-  driver: kubernetes
-```
-
-An external selection additionally records its exact `classRef` and a bounded
-opaque configuration copied from the administrator-owned AgentSchedule
-execution class. The operator never derives this from producer input. Unknown
-drivers and kind/driver/class mismatches fail closed with a portable execution
-condition and no Kubernetes Pod fallback. Deletion uses the same resolved
-backend; old stored AgentRuns with no `execution` field continue to reconcile
-and delete through Kubernetes.
 
 `runtime.container.capabilities.add` optionally adds valid Linux capabilities
 to the untrusted Kubernetes/OCI `agent` container only:
@@ -265,11 +228,6 @@ egressMaxConcurrentTunnels: 512 # optional; default 256
   for those proxy transports (1–4096). Omit it for the 256-tunnel default;
   egressd applies bounded burst queueing rather than an unbounded backlog.
 - `egressAllowInsecureBroker` permits local plaintext broker traffic only.
-
-The egress mode, enforcement request, and transport are immutable after
-creation. Changing the security shape requires creating a new AgentRun; this
-prevents a live execution from changing the policy that governs its mediated
-egress.
 
 Pre-1.0 migration: replace `egressForwardProxy: true` with
 `egressTransport: forward-proxy`. Remove `egressForwardProxy: false` or use
@@ -436,13 +394,6 @@ schedule identity and generation, selected profile, and the immutable
 principal issuer/subject plus optional display name. The fully resolved
 runtime, agent runtime config, egress, and broker grants are stored directly in
 the same `AgentRun`; later schedule edits do not re-resolve existing runs.
-For dynamic principal-owned admission,
-`profileProvenance.principalCredential` additionally freezes the public
-credential template, opaque `dpa_…` provider instance ID, and positive broker
-credential generation. These are non-secret routing provenance, not credential
-material. The immutable AgentRun continues to use the existing mediated broker
-grant and capability paths; no credential bytes enter the CRD, Pod spec,
-runtime config, events, logs, or agent files.
 
 ## Lifecycle
 
@@ -495,35 +446,6 @@ status:
   reason: ""
   conditions: []
 ```
-
-For an external VM only, the operator may publish the exact current non-secret
-native guest routing identity after the selected driver has durably accepted
-that guest's bootstrap handoff:
-
-```yaml
-status:
-  nativeGuestBinding:
-    agentRunUID: "..."
-    executionID: nvt-agentrun-...
-    driverRegistration: example-vm
-    desiredGeneration: 1
-    guestInstanceID: guest-...
-```
-
-This status-subresource field is operator-owned. Producers cannot set or
-override it. It contains the complete provider-neutral binding and no token,
-runtime/session identity, endpoint, provider state, or opaque driver data. The
-operator clears it before replacement, revocation, terminal cleanup, deletion,
-or any failure that makes the exact guest non-authoritative. Built-in Pod/Kata
-runs leave it absent.
-
-An opt-in mediated external VM additionally exposes `NativeEgressReady` only
-after the driver reports infrastructure-owned confinement, its distinct
-per-run egressd Pod/Service are Ready, and the relay acknowledges the complete
-snapshot containing this exact binding. Relay restart resets publication to
-deny-all and the operator republishes before restoring the condition. Cleanup
-withdraws and acknowledges the mapping before broker revocation or driver
-deletion. The condition and binding contain no relay credential or target URL.
 
 Phases are `Pending`, `Running`, `Completed`, `Failed`, and
 `DeadlineExceeded`. Persistent runs expose `WorkspaceReady`. Enforced runs

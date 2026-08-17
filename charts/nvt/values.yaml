@@ -93,19 +93,6 @@ broker:
     # restarts the broker child inside the existing Pod after an atomic import.
     seedSecretName: ""
     seedTargetDir: codex
-  # Provider-neutral native VM guest enrollment is opt-in. It requires the
-  # persistent single-writer broker state, TLS, and a dedicated orchestrator
-  # bearer token mounted from an existing Secret. The token is never a value.
-  guestEnrollment:
-    enabled: false
-    exchangeURL: ""
-    # Aggregate predecessor-digest slots reserved in fixed 20,000-entry
-    # lifecycle units. The default admits 100 concurrent enrollment
-    # lifecycles; size the persistent volume for the selected bound.
-    runtimeIdentityHistoryCapacity: "2000000"
-    orchestratorAuth:
-      existingSecret: ""
-      tokenKey: token
   config:
     providers: []
   agents:
@@ -118,7 +105,6 @@ operator:
     pullPolicy: IfNotPresent
   replicas: 1
   # Optional trusted resolver for dynamic principal-owned broker accounts.
-  # Secret values are mounted as files only into the operator manager.
   principalAccounts:
     enabled: false
     brokerURL: https://nvt-broker:7347
@@ -131,114 +117,12 @@ operator:
     assertionTTLSeconds: 60
     requestTimeoutSeconds: 10
     maxResponseBytes: 65536
-    # Optional operator-only reservation/authorization key. The broker uses
-    # it to serialize dynamic admission with target-free template unlock.
     templateSwitching:
       enabled: false
       authentication:
         existingSecret: ""
         key: NVT_DYNAMIC_ACCOUNT_COORDINATION_KEY
       assertionTTLSeconds: 30
-
-# Opt-in standalone native-VM egress relay. The relay remains unpublished and
-# deny-all until the operator applies a complete exact-binding snapshot. All
-# key material comes from existing administrator-owned Secrets.
-nativeEgressRelay:
-  enabled: false
-  # Non-secret administrator-controlled rollout epoch for every externally
-  # managed relay TLS/control credential and CA. Increment atomically whenever
-  # any referenced Secret material rotates so relay and operator restart
-  # together instead of loading incompatible generations.
-  rolloutRevision: ""
-  image:
-    repository: ghcr.io/mirkosekulic/nvt-native-egress-relay
-    tag: ""
-    pullPolicy: IfNotPresent
-  initImage:
-    repository: docker.io/library/busybox
-    # This root init container handles every relay private key and control
-    # bearer. Keep its multi-architecture image immutable; enabled installs
-    # reject missing or non-canonical digests, including administrator
-    # overrides.
-    digest: sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
-    pullPolicy: IfNotPresent
-  replicas: 1
-  data:
-    port: 7445
-    # Source ranges permitted to reach the guest-facing listener. Empty keeps
-    # the data listener fenced until provider routing is configured.
-    ingressCIDRs: []
-  attachment:
-    # Monotonic installation-owned attachment generation. Increment whenever
-    # relay identity/trust, required bootstrap/control destinations, or
-    # redirect intent changes.
-    generation: 1
-    relayHost: ""
-    relayServerName: ""
-    # Complete provider bootstrap allowlist. Each entry has purpose
-    # "bootstrap" or "control", one canonical DNS/IP host, and one port.
-    requiredDestinations: []
-    redirect:
-      mode: capture-tcp
-      loopbackAddress: 127.0.0.1
-      transparentTCPPort: 15001
-      explicitCONNECTPort: 15002
-  control:
-    port: 7446
-    serverName: ""
-    timeoutSeconds: 10
-  brokerURL: ""
-  brokerServerName: ""
-  authenticationTimeoutSeconds: 5
-  revalidationIntervalSeconds: 30
-  credentials:
-    existingSecret: ""
-    dataCertificateKey: data-tls.crt
-    dataPrivateKeyKey: data-tls.key
-    # Public CA trust for the data listener. This is the only relay Secret
-    # item projected into the operator attachment-plan volume.
-    dataCAKey: data-ca.crt
-    controlCAKey: control-ca.crt
-    controlCertificateKey: control-tls.crt
-    controlPrivateKeyKey: control-tls.key
-    controlTokenKey: control-token
-  brokerCA:
-    existingSecret: ""
-    key: ca.crt
-
-# Administrator-owned external execution-driver registrations. Each entry
-# creates one isolated host workload. AgentRuns select only the exact matching
-# logical name; empty preserves the built-in Kubernetes-only deployment.
-executionDrivers:
-  hostImage:
-    repository: ghcr.io/mirkosekulic/nvt-execution-driver-host
-    tag: ""
-    pullPolicy: IfNotPresent
-  # Optional trusted bridge from the operator to the broker issuer and the
-  # exact selected external driver host. Secret values are projected from
-  # existing Secrets and never enter this values document. The broker and
-  # operator load the bearer once; rotate it by restarting both Deployments.
-  guestEnrollment:
-    enabled: false
-    # Exact external VM driver registrations whose host accepts the sensitive
-    # enrollment handoff. Other registrations retain the ordinary protocol.
-    registrations: []
-    brokerURL: ""
-    serverName: ""
-    ca:
-      existingSecret: ""
-      key: ca.crt
-    orchestratorAuth:
-      existingSecret: ""
-      tokenKey: token
-    requestTimeoutSeconds: 30
-    handoffTimeoutSeconds: 30
-    ttlSeconds: 300
-  # Each registration may opt into one isolated persistent filesystem at
-  # /var/lib/nvt-execution-driver. Omitted storage preserves the existing
-  # ephemeral host shape. A registration may request a chart-owned claim or
-  # name one existing same-namespace claim; it cannot configure both.
-  registrations: []
 
 gateway:
   enabled: false
@@ -255,31 +139,6 @@ gateway:
     mode: subdomain
   port: 8080
   defaultTargetPort: 4090
-  # Opt-in provider-neutral native VM guest session listener. The separate TLS
-  # port accepts only broker-authenticated nvt.native-session/v1 connections;
-  # it does not publish browser/code-server routes.
-  nativeSession:
-    enabled: false
-    port: 7443
-    tls:
-      existingSecret: ""
-      certificateKey: tls.crt
-      privateKeyKey: tls.key
-    brokerURL: ""
-    serverName: ""
-    ca:
-      existingSecret: ""
-      key: ca.crt
-    authenticationTimeoutSeconds: 5
-    # Established connections are closed and must reauthenticate through the
-    # broker at this bound. The gateway never retains the session bearer.
-    revalidationIntervalSeconds: 30
-  # Optional, separate nvt.native-workspace/v1 TLS/yamux data plane. It reuses
-  # the nativeSession serving identity and broker authority. No browser route
-  # is published by enabling this listener.
-  nativeWorkspace:
-    enabled: false
-    port: 7444
   auth:
     mode: none
     session:
@@ -483,9 +342,6 @@ agentSchedule:
   # Empty profile fields preserve the legacy full-AgentRun admission contract.
   # See operator/docs/agentschedule.md for a complete profiled example.
   template: {}
-  # Administrator-owned opaque configurations for explicitly selected
-  # execution drivers. Empty keeps the built-in Kubernetes Pod path only.
-  executionClasses: []
   profiles: []
   profileSelection: {}
   # Optional dynamic selection. When enabled, profileSelection must remain

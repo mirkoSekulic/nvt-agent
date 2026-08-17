@@ -5,10 +5,8 @@ go 1.25.0
 require (
 	github.com/coreos/go-oidc/v3 v3.19.0
 	github.com/gorilla/securecookie v1.1.2
-	github.com/mirkoSekulic/nvt-agent/hostbundle v0.0.0-00010101000000-000000000000
 	github.com/mirkoSekulic/nvt-agent/operator v0.0.0
 	github.com/mirkoSekulic/nvt-agent/protocol/eligibility v0.0.0
-	github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment v0.0.0
 	github.com/mirkoSekulic/nvt-agent/protocol/localroutes v0.0.0
 	golang.org/x/oauth2 v0.36.0
 	k8s.io/api v0.34.2
@@ -30,7 +28,6 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
@@ -62,10 +59,6 @@ require (
 )
 
 replace github.com/mirkoSekulic/nvt-agent/operator => ../operator
-
-replace github.com/mirkoSekulic/nvt-agent/hostbundle => ../hostbundle
-
-replace github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment => ../protocol/guestenrollment
 
 replace github.com/mirkoSekulic/nvt-agent/protocol/eligibility => ../protocol/eligibility
 

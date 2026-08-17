@@ -14,9 +14,6 @@ type AgentRunEgressMode string
 type AgentRunEgressTransport string
 type AgentRunGrantMaterialization string
 
-// +kubebuilder:validation:Enum=pod;vm
-type AgentRunExecutionKind string
-
 const (
 	// AgentRunPhasePending means the run has been accepted but no worker pod has started.
 	AgentRunPhasePending AgentRunPhase = "Pending"
@@ -41,9 +38,6 @@ const (
 	// for the agent; the real credential stays broker-side and is injected at
 	// the edge. Like header-inject, it is a zero-possession mediated mode.
 	AgentRunGrantPlaceholderFile AgentRunGrantMaterialization = "placeholder-file"
-
-	AgentRunExecutionPod AgentRunExecutionKind = "pod"
-	AgentRunExecutionVM  AgentRunExecutionKind = "vm"
 
 	AgentRunWorkspaceEphemeral  AgentRunWorkspaceMode = "Ephemeral"
 	AgentRunWorkspacePersistent AgentRunWorkspaceMode = "Persistent"
@@ -74,15 +68,8 @@ type AgentRun struct {
 
 // AgentRunSpec describes how an agent execution should be started.
 //
-// +kubebuilder:validation:XValidation:rule="has(self.egress) == has(oldSelf.egress) && (!has(self.egress) || self.egress == oldSelf.egress)",message="spec.egress is immutable"
-// +kubebuilder:validation:XValidation:rule="has(self.egressEnforcement) == has(oldSelf.egressEnforcement) && (!has(self.egressEnforcement) || self.egressEnforcement == oldSelf.egressEnforcement)",message="spec.egressEnforcement is immutable"
-// +kubebuilder:validation:XValidation:rule="has(self.egressTransport) == has(oldSelf.egressTransport) && (!has(self.egressTransport) || self.egressTransport == oldSelf.egressTransport)",message="spec.egressTransport is immutable"
-//
 //nolint:govet // Field order follows the CRD schema for readability.
 type AgentRunSpec struct {
-	// Execution is the immutable, operator-resolved execution backend selection.
-	// Omitted means the built-in Kubernetes Pod backend for compatibility.
-	Execution        *AgentRunExecution   `json:"execution,omitempty"`
 	Runtime          AgentRunRuntime      `json:"runtime"`
 	RuntimeAuth      *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
 	Image            string               `json:"image"`
@@ -116,23 +103,6 @@ type AgentRunSpec struct {
 	Lifecycle                  *AgentRunLifecycle         `json:"lifecycle,omitempty"`
 	TTL                        *AgentRunTTL               `json:"ttl,omitempty"`
 	ProfileProvenance          *AgentRunProfileProvenance `json:"profileProvenance,omitempty"`
-}
-
-// AgentRunExecution is an immutable snapshot of an operator-owned execution
-// selection. Configuration is opaque to the operator's generic API layer and
-// is interpreted only by the exact selected driver.
-type AgentRunExecution struct {
-	Kind AgentRunExecutionKind `json:"kind"`
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Driver string `json:"driver"`
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	ClassRef string `json:"classRef,omitempty"`
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Configuration apiextensionsv1.JSON `json:"configuration,omitempty"`
 }
 
 // AgentRunProfileProvenance is the immutable record of a profiled schedule resolution.
@@ -341,50 +311,11 @@ type AgentRunStatus struct {
 	StartedAt  *metav1.Time  `json:"startedAt,omitempty"`
 	FinishedAt *metav1.Time  `json:"finishedAt,omitempty"`
 	Reason     string        `json:"reason,omitempty"`
-	// NativeGuestBinding is the operator-owned, non-secret exact routing
-	// identity for the currently accepted native guest. It is absent for the
-	// built-in Kubernetes backend and whenever no exact guest is authoritative.
-	NativeGuestBinding *AgentRunNativeGuestBinding `json:"nativeGuestBinding,omitempty"`
-	// NativeEgressAttachment records only the operator-owned generation and
-	// digest of the current non-secret provider attachment plan. Producers
-	// cannot write the status subresource or override this authority.
-	NativeEgressAttachment *AgentRunNativeEgressAttachmentStatus `json:"nativeEgressAttachment,omitempty"`
-	// Conditions surfaces portable execution selection failures and the
-	// enforcement-mode provisioning state machine (BrokerPolicyReady,
-	// EgressdCreated, EgressdReady, EgressCAPublished). The agent Pod is never
-	// created before a valid backend selection and its enforcement gates hold.
+	// Conditions surfaces the enforcement-mode provisioning state machine
+	// (BrokerPolicyReady, EgressdCreated, EgressdReady, EgressCAPublished):
+	// each reconcile pass advances one observable step, and the agent Pod is
+	// never created before BrokerPolicyReady and EgressCAPublished both hold.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-}
-
-// AgentRunNativeGuestBinding is the complete provider-neutral identity used
-// for exact native control/workspace registry lookups. It contains no bearer,
-// endpoint, provider state, or driver configuration.
-type AgentRunNativeGuestBinding struct {
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=128
-	AgentRunUID string `json:"agentRunUID"`
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=256
-	ExecutionID string `json:"executionID"`
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	DriverRegistration string `json:"driverRegistration"`
-	// +kubebuilder:validation:Minimum=1
-	DesiredGeneration int64 `json:"desiredGeneration"`
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=256
-	GuestInstanceID string `json:"guestInstanceID"`
-}
-
-// AgentRunNativeEgressAttachmentStatus is the durable operator observation
-// used to prevent a withdrawn or replaced attachment from being resurrected
-// after restart. It intentionally omits endpoints, trust, and provider state.
-type AgentRunNativeEgressAttachmentStatus struct {
-	// +kubebuilder:validation:Minimum=1
-	Generation int64 `json:"generation"`
-	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
-	Digest string `json:"digest"`
 }
 
 // AgentRunList contains a list of AgentRun resources.
@@ -449,9 +380,6 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 
 	out := new(AgentRunSpec)
 	*out = *in
-	if in.Execution != nil {
-		out.Execution = in.Execution.DeepCopy()
-	}
 	out.Runtime = *in.Runtime.DeepCopy()
 	if in.RuntimeClassName != nil {
 		out.RuntimeClassName = new(string)
@@ -488,17 +416,6 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	if in.ProfileProvenance != nil {
 		out.ProfileProvenance = in.ProfileProvenance.DeepCopy()
 	}
-	return out
-}
-
-// DeepCopy returns a copy of AgentRunExecution.
-func (in *AgentRunExecution) DeepCopy() *AgentRunExecution {
-	if in == nil {
-		return nil
-	}
-	out := new(AgentRunExecution)
-	*out = *in
-	out.Configuration = *in.Configuration.DeepCopy()
 	return out
 }
 
@@ -689,14 +606,6 @@ func (in *AgentRunStatus) DeepCopy() *AgentRunStatus {
 	}
 	if in.FinishedAt != nil {
 		out.FinishedAt = in.FinishedAt.DeepCopy()
-	}
-	if in.NativeGuestBinding != nil {
-		out.NativeGuestBinding = new(AgentRunNativeGuestBinding)
-		*out.NativeGuestBinding = *in.NativeGuestBinding
-	}
-	if in.NativeEgressAttachment != nil {
-		out.NativeEgressAttachment = new(AgentRunNativeEgressAttachmentStatus)
-		*out.NativeEgressAttachment = *in.NativeEgressAttachment
 	}
 	if in.Conditions != nil {
 		out.Conditions = make([]metav1.Condition, len(in.Conditions))

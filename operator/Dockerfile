@@ -5,13 +5,11 @@ ARG TARGETARCH
 
 WORKDIR /src
 
-COPY protocol/guestenrollment/go.mod protocol/guestenrollment/go.mod
 COPY protocol/resolvedrun/go.mod protocol/resolvedrun/go.mod
 COPY operator/go.mod operator/go.sum operator/
 WORKDIR /src/operator
 RUN go mod download
 
-COPY protocol/guestenrollment/ ../protocol/guestenrollment/
 COPY protocol/resolvedrun/ ../protocol/resolvedrun/
 COPY operator/ ./
 RUN CGO_ENABLED=0 \
