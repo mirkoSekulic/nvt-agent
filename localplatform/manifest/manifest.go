@@ -127,13 +127,18 @@ type Workstation struct {
 // Repository is provider-neutral checkout intent. GitHub is an optional
 // shorthand expanded by Compile; otherwise URL and CheckoutTarget are exact.
 type Repository struct {
-	GitHub           string `json:"github,omitempty"`
-	URL              string `json:"url,omitempty"`
-	CheckoutTarget   string `json:"checkoutTarget,omitempty"`
-	BrokerRepository string `json:"brokerRepository,omitempty"`
-	Path             string `json:"path,omitempty"`
-	Upstream         string `json:"upstream,omitempty"`
-	Account          string `json:"account,omitempty"`
+	GitHub           string            `json:"github,omitempty"`
+	URL              string            `json:"url,omitempty"`
+	CheckoutTarget   string            `json:"checkoutTarget,omitempty"`
+	BrokerRepository string            `json:"brokerRepository,omitempty"`
+	Path             string            `json:"path,omitempty"`
+	Upstream         string            `json:"upstream,omitempty"`
+	Account          string            `json:"account,omitempty"`
+	Access           *RepositoryAccess `json:"access,omitempty"`
+}
+
+type RepositoryAccess struct {
+	Permissions map[string]string `json:"permissions"`
 }
 
 type Workflow struct {
@@ -415,6 +420,44 @@ func (m Manifest) Validate() error {
 		if profile.DefaultRepositoryAccount != "" && !contains(repositoryAccounts, profile.DefaultRepositoryAccount) || len(repositoryAccounts) > 1 && profile.DefaultRepositoryAccount == "" || len(repositoryAccounts) == 0 && profile.DefaultRepositoryAccount != "" {
 			return fmt.Errorf("profile %q has an invalid default repository account", name)
 		}
+		accessByProvider := map[string]string{}
+		checkAccess := func(repositoryName string) error {
+			repository := m.Repositories[repositoryName]
+			if repository.Account == "" || !oneOf(m.Accounts[repository.Account].Preset, "github-app", "github-pat") {
+				return nil
+			}
+			provider := repository.Account
+			if m.Accounts[repository.Account].Preset == "github-app" && len(m.Accounts[repository.Account].Installations) > 1 {
+				owner, _, _ := githubCoordinates(repository)
+				provider += "/" + strings.ToLower(owner)
+			}
+			permissions := repository.Access
+			if permissions == nil {
+				permissions = &RepositoryAccess{Permissions: map[string]string{"contents": "write", "pull_requests": "write"}}
+			}
+			encoded, _ := json.Marshal(permissions.Permissions)
+			if previous, ok := accessByProvider[provider]; ok && previous != string(encoded) {
+				return errors.New("contradictory repository access declarations for one profile provider")
+			}
+			accessByProvider[provider] = string(encoded)
+			return nil
+		}
+		for _, workflow := range m.Workflows {
+			if workflow.Profile == name {
+				if err := checkAccess(workflow.Repository); err != nil {
+					return fmt.Errorf("profile %q: %w", name, err)
+				}
+			}
+		}
+		for _, workstation := range m.Workstations {
+			if workstation.Profile == name {
+				for _, repository := range workstation.Repositories {
+					if err := checkAccess(repository); err != nil {
+						return fmt.Errorf("profile %q: %w", name, err)
+					}
+				}
+			}
+		}
 	}
 	seenProducers := map[string]struct{}{}
 	for _, producer := range m.Producers {
@@ -561,6 +604,22 @@ func contains(values []string, target string) bool {
 func validateRepository(value Repository, accounts map[string]Account) error {
 	if value.Account != "" && !has(accounts, value.Account) || value.Path != "" && !safeRelativePath(value.Path, "") {
 		return errors.New("invalid repository account or path")
+	}
+	if value.Access != nil {
+		if value.Account == "" || !oneOf(accounts[value.Account].Preset, "github-app", "github-pat") {
+			return errors.New("repository access requires a GitHub account")
+		}
+		if len(value.Access.Permissions) == 0 {
+			return errors.New("repository access permissions must not be empty")
+		}
+		for permission, level := range value.Access.Permissions {
+			if !oneOf(permission, "contents", "pull_requests", "workflows") || !oneOf(level, "read", "write") {
+				return errors.New("repository access has an unsupported permission or level")
+			}
+		}
+		if value.Access.Permissions["workflows"] == "write" && value.Access.Permissions["contents"] != "write" {
+			return errors.New("workflow write access requires contents write access")
+		}
 	}
 	if value.GitHub != "" {
 		if !repositoryPattern.MatchString(value.GitHub) || value.URL != "" || value.CheckoutTarget != "" || value.BrokerRepository != "" {

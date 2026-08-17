@@ -95,10 +95,11 @@ type BrokerProfileIntent struct {
 	Grants   []BrokerGrantIntent `json:"grants,omitempty"`
 }
 type BrokerGrantIntent struct {
-	Account      string   `json:"account"`
-	Preset       string   `json:"preset"`
-	Purpose      string   `json:"purpose"`
-	Repositories []string `json:"repositories"`
+	Account      string            `json:"account"`
+	Preset       string            `json:"preset"`
+	Purpose      string            `json:"purpose"`
+	Repositories []string          `json:"repositories"`
+	Permissions  map[string]string `json:"permissions,omitempty"`
 }
 type ControllerProfileIntent struct {
 	Name                      string                               `json:"name"`
@@ -122,9 +123,10 @@ type ProducerAdmissionIntent struct {
 	AllowedPrincipalIssuers []string          `json:"allowedPrincipalIssuers"`
 }
 type BrokerRepositoryIntent struct {
-	Name             string `json:"name"`
-	BrokerRepository string `json:"brokerRepository,omitempty"`
-	Account          string `json:"account,omitempty"`
+	Name             string            `json:"name"`
+	BrokerRepository string            `json:"brokerRepository,omitempty"`
+	Account          string            `json:"account,omitempty"`
+	Permissions      map[string]string `json:"permissions,omitempty"`
 }
 type ControllerRepositoryIntent struct {
 	Name             string `json:"name"`
@@ -185,7 +187,7 @@ func Compile(m Manifest) (Compiled, error) {
 	for _, name := range SortedNames(m.Repositories) {
 		repository := compileRepository(name, m.Repositories[name])
 		result.Controller.Repositories = append(result.Controller.Repositories, repository)
-		result.Broker.Repositories = append(result.Broker.Repositories, BrokerRepositoryIntent{name, repository.BrokerRepository, repository.Account})
+		result.Broker.Repositories = append(result.Broker.Repositories, BrokerRepositoryIntent{name, repository.BrokerRepository, repository.Account, repositoryPermissions(m.Repositories[name], m.Accounts)})
 	}
 	result.Controller.Workstations = append([]Workstation(nil), m.Workstations...)
 	for i := range result.Controller.Workstations {
@@ -277,22 +279,30 @@ func Compile(m Manifest) (Compiled, error) {
 func cloneBrokerGrants(input []BrokerGrantIntent) []BrokerGrantIntent {
 	result := make([]BrokerGrantIntent, len(input))
 	for index, grant := range input {
-		result[index] = BrokerGrantIntent{grant.Account, grant.Preset, grant.Purpose, append([]string(nil), grant.Repositories...)}
+		result[index] = BrokerGrantIntent{grant.Account, grant.Preset, grant.Purpose, append([]string(nil), grant.Repositories...), sortedMap(grant.Permissions)}
 	}
 	return result
 }
 
 func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
-	byAccount := map[string]map[string]struct{}{}
+	type group struct {
+		account      string
+		permissions  map[string]string
+		repositories map[string]struct{}
+	}
+	groups := map[string]*group{}
 	add := func(repositoryName string) {
 		repository := compileRepository(repositoryName, m.Repositories[repositoryName])
 		if repository.Account == "" || repository.BrokerRepository == "" {
 			return
 		}
-		if byAccount[repository.Account] == nil {
-			byAccount[repository.Account] = map[string]struct{}{}
+		permissions := repositoryPermissions(m.Repositories[repositoryName], m.Accounts)
+		encoded, _ := json.Marshal(permissions)
+		key := repository.Account + "\x00" + string(encoded)
+		if groups[key] == nil {
+			groups[key] = &group{repository.Account, permissions, map[string]struct{}{}}
 		}
-		byAccount[repository.Account][repository.BrokerRepository] = struct{}{}
+		groups[key].repositories[repository.BrokerRepository] = struct{}{}
 	}
 	for _, workflow := range m.Workflows {
 		if workflow.Profile == profileName {
@@ -306,14 +316,25 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 			}
 		}
 	}
-	result := make([]BrokerGrantIntent, 0, len(byAccount)+1)
+	result := make([]BrokerGrantIntent, 0, len(groups)+1)
 	if runtimeAccount := m.Profiles[profileName].Runtime.Account; runtimeAccount != "" {
-		result = append(result, BrokerGrantIntent{runtimeAccount, m.Accounts[runtimeAccount].Preset, "runtime-injection", nil})
+		result = append(result, BrokerGrantIntent{Account: runtimeAccount, Preset: m.Accounts[runtimeAccount].Preset, Purpose: "runtime-injection"})
 	}
-	for _, account := range SortedNames(byAccount) {
-		result = append(result, BrokerGrantIntent{account, m.Accounts[account].Preset, "repository", SortedNames(byAccount[account])})
+	for _, key := range SortedNames(groups) {
+		entry := groups[key]
+		result = append(result, BrokerGrantIntent{Account: entry.account, Preset: m.Accounts[entry.account].Preset, Purpose: "repository", Repositories: SortedNames(entry.repositories), Permissions: entry.permissions})
 	}
 	return result
+}
+
+func repositoryPermissions(repository Repository, accounts map[string]Account) map[string]string {
+	if repository.Access != nil {
+		return sortedMap(repository.Access.Permissions)
+	}
+	if repository.Account != "" && oneOf(accounts[repository.Account].Preset, "github-app", "github-pat") {
+		return map[string]string{"contents": "write", "pull_requests": "write"}
+	}
+	return nil
 }
 
 func defaultRepositoryAccount(m Manifest, profileName string) string {
