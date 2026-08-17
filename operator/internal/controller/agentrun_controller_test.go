@@ -145,6 +145,62 @@ func TestReconcileRotatesEgressCAWithoutMixedPodGenerations(t *testing.T) {
 	}
 }
 
+func TestReconcileRecordsCompletedPodBeforeEgressCARotation(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	run := enforcedAgentRun()
+	run.Spec.Lifecycle = &nvtv1alpha1.AgentRunLifecycle{CompleteOn: []string{"plugin.work.done"}}
+	run.Spec.TTL = &nvtv1alpha1.AgentRunTTL{CompletedTTLSeconds: ptrTo[int64](3600)}
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(run, testBrokerAgentsConfigMap(run.Namespace)).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, Now: func() metav1.Time { return metav1.NewTime(now) }}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	markPodReady(ctx, t, k8sClient, run.Namespace, EgressdPodName(run.Name))
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	var oldSecret corev1.Secret
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: EgressCASecretName(run.Name)}, &oldSecret); err != nil {
+		t.Fatal(err)
+	}
+	var pod corev1.Pod
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: AgentPodName(run.Name)}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: roleLabelAgent, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: `{"nvtLifecycleEvent":"plugin.work.done"}`}}}}
+	if err := k8sClient.Status().Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(egressCAValidity - egressCARenewalMargin)
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatal(err)
+	}
+	var updated nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(run), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseCompleted {
+		t.Fatalf("phase = %s, want Completed", updated.Status.Phase)
+	}
+	var preservedPod corev1.Pod
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: AgentPodName(run.Name)}, &preservedPod); err != nil {
+		t.Fatalf("completed Pod was removed for rotation: %v", err)
+	}
+	var preservedSecret corev1.Secret
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: EgressCASecretName(run.Name)}, &preservedSecret); err != nil {
+		t.Fatal(err)
+	}
+	if preservedSecret.Annotations[egressCAGenerationAnnotation] != oldSecret.Annotations[egressCAGenerationAnnotation] || !reflect.DeepEqual(preservedSecret.Data, oldSecret.Data) {
+		t.Fatal("CA rotated after workload completion")
+	}
+}
+
 func TestInitializeAgentRunStatusKeepsExistingPhase(t *testing.T) {
 	agentRun := &nvtv1alpha1.AgentRun{
 		Status: nvtv1alpha1.AgentRunStatus{Phase: nvtv1alpha1.AgentRunPhaseRunning},

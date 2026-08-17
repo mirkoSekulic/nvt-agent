@@ -378,6 +378,19 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := r.ensureImmutablePodSecurityState(ctx, &agentRun, existingPod); err != nil {
 			return ctrl.Result{}, err
 		}
+		// Record a terminal workload before any maintenance path can replace its
+		// Pod. In particular, CA rotation must never erase the only durable
+		// lifecycle observation and re-execute a completed entrypoint.
+		observed := agentRun
+		SyncAgentRunLifecycleFromPodTermination(&observed, existingPod, r.now())
+		SyncAgentRunStatusFromPod(&observed, existingPod, r.now())
+		if IsTerminalAgentRunPhase(observed.Status.Phase) {
+			agentRun.Status = observed.Status
+			if err := r.Status().Update(ctx, &agentRun); err != nil {
+				return ctrl.Result{}, fmt.Errorf("record terminal AgentRun Pod before maintenance: %w", err)
+			}
+			return r.reconcileTerminalResourceCleanup(ctx, &agentRun)
+		}
 	}
 	conditionsChanged := false
 	if existingPod == nil {
