@@ -66,7 +66,7 @@ loopback and link-local/metadata ranges but cannot infer cluster-specific CIDRs.
 The published chart's `appVersion` is the immutable image tag for its tested
 platform bundle. Chart `0.2.0` published from commit `943d5ba...`, for example,
 uses `0.2.0-943d5ba` for runtime, DinD, broker, egressd, captured, operator,
-gateway, and producer images. Empty component tags default to `Chart.AppVersion`;
+gateway, credential-portal, and producer images. Empty component tags default to `Chart.AppVersion`;
 repository, tag, and pull policy remain independently overridable.
 
 `dind.image` is the coordinated Docker sidecar image. It contains the ext4 and
@@ -74,7 +74,7 @@ loop-device tools used only when an AgentRun's Docker data root is backed by
 Kata virtiofs; it performs no per-run package installation.
 
 All default repositories are under `ghcr.io/mirkosekulic`. The chart is
-published only after all eight manifests exist and can be fetched anonymously
+published only after all nine manifests exist and can be fetched anonymously
 with an isolated credential-free Docker configuration. The release reuses an
 existing image tag only when its OCI source, full revision, and version labels
 match. GHCR package writers are trusted: matching labels establish coordinated
@@ -719,7 +719,7 @@ gateway:
       issuer: https://github.com
       authorizationURL: https://github.com/login/oauth/authorize
       tokenURL: https://github.com/login/oauth/access_token
-      scopes: []
+      scopes: [read:org]
       clientAuthMethod: client_secret_post
       identity:
         endpoint: https://api.github.com/user
@@ -728,17 +728,29 @@ gateway:
         displayNamePath: login
     claimEnrichment:
       allowedHosts: [api.github.com]
+      limits:
+        maxResponseBytes: 262144
+        maxArrayItems: 60
+        maxTotalNodes: 4096
       sources:
-        - endpoint: https://api.github.com/user/memberships/orgs/Altinn
-          outputClaim: organization_membership
-          valuePath: state
+        - endpoint: https://api.github.com/user/teams
+          outputClaim: teams
+          valuePath: $
+          pagination:
+            mode: link
+            maxPages: 2
     admission:
       default: deny
       rules:
-        - id: allowed-organization
+        - id: allowed-team
           effect: allow
-          claimPath: organization_membership
-          values: [active]
+          where:
+            array: teams[]
+            all:
+              - claimPath: organization.login
+                values: [Altinn]
+              - claimPath: slug
+                values: [allowed-team]
     authorization:
       default: deny
       rules:
@@ -747,16 +759,14 @@ gateway:
           owner: true
 ```
 
-This is a generic claim-source example, not GitHub-specific gateway policy.
-Each configured endpoint receives the temporary OAuth bearer token, must use
-HTTPS, and must be on `allowedHosts`; redirects and failures deny login. Only
-the selected non-sensitive value is retained. Required OAuth permissions and
-organization approval belong to provider/client configuration. For the GitHub
-example, the GitHub App needs organization **Members: read**, must be installed
-and approved for the Altinn organization by an organization owner, and must be
-authorized by each user. It needs no repository permissions. Active membership
-returns `state: active`; pending, unaffiliated, blocked, or unapproved access
-fails admission closed.
+This is provider configuration, not GitHub-specific application behavior. The
+shown GitHub OAuth App requests `read:org` and needs no installation;
+organization policy and SAML SSO may affect team visibility. A GitHub App is
+also supported with `scopes: []` and per-user authorization. The same-array
+rule requires `organization.login` and `slug` on one team object. The 256 KiB,
+60-item, 4,096-node, two-page limits bound cumulative Link pagination; unsafe
+next links, redirects, loops, partial results, extra pages, and overflow deny
+login closed.
 
 Claim enrichment runs only during OAuth login. The selected claims are kept in
 the server-side session and are not refreshed on every request; OAuth tokens
@@ -793,7 +803,15 @@ gateway:
 ```
 
 All `where.all` conditions must match the same array element. See the
-[gateway README](../../gateway/README.md) for callback and session behavior.
+[generic eligibility contract](../../docs/oauth-eligibility.md) for shared
+gateway/portal enrichment, pagination, limits, and fail-closed behavior, and
+the [gateway README](../../gateway/README.md) for callback/session behavior.
+
+The credential portal keeps ID-token eligibility as its compatibility default.
+Set `credentialPortal.auth.oidc.eligibilityClaimSource` to `access_token` only
+for a JWT access token verifiable through OIDC discovery; its audience defaults
+to the portal client ID or can be set with `accessTokenAudience`. `userinfo` is
+also supported and must return the ID token's exact subject.
 
 ### Generic OAuth2 owner login
 
