@@ -155,6 +155,10 @@ if command -v gh-auth >/dev/null 2>&1 && command -v github-watch >/dev/null 2>&1
 
 Use `gh-auth` for GitHub CLI operations. It injects the configured provider
 token for the target repository, so do not run `gh auth login`.
+Do not use `gh-auth auth status` to test access: mediated grants may be scoped
+to repository endpoints and intentionally deny account identity probes. Run the
+required `gh-auth` repository command with an explicit `--repo OWNER/REPO`
+instead, even when an auth-status probe would fail.
 
 Create a PR with `gh-auth pr create --repo OWNER/REPO --fill`, then register it:
 
