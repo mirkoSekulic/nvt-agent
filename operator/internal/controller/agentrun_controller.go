@@ -316,6 +316,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	if agentRun.Spec.Execution != nil || hasLegacyExternalFinalizer(&agentRun) {
 		if !agentRun.DeletionTimestamp.IsZero() {
+			if err := r.finalizeLegacyBrokerPolicy(ctx, &agentRun); err != nil {
+				return ctrl.Result{}, err
+			}
 			if err := r.setAgentRunFailed(ctx, &agentRun, legacyExternalDeletionReason); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -552,6 +555,22 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 func hasLegacyExternalFinalizer(agentRun *nvtv1alpha1.AgentRun) bool {
 	return controllerutil.ContainsFinalizer(agentRun, legacyExternalExecutionFinalizer) ||
 		controllerutil.ContainsFinalizer(agentRun, legacyGuestEnrollmentFinalizer)
+}
+
+// finalizeLegacyBrokerPolicy revokes the independently managed broker access
+// without claiming that the removed external runtime has been cleaned up.
+func (r *AgentRunReconciler) finalizeLegacyBrokerPolicy(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	if !controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
+		return nil
+	}
+	if err := r.removeBrokerAgentsPolicyEntry(ctx, agentRun); err != nil {
+		return err
+	}
+	controllerutil.RemoveFinalizer(agentRun, agentRunFinalizer)
+	if err := r.Update(ctx, agentRun); err != nil {
+		return fmt.Errorf("remove legacy AgentRun broker-policy finalizer: %w", err)
+	}
+	return nil
 }
 
 func earliestRequeue(first, second ctrl.Result) ctrl.Result {

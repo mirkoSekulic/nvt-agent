@@ -127,9 +127,18 @@ func TestReconcileDeletingLegacyExternalAgentRunRetainsCleanupFinalizers(t *test
 	agentRun := testAgentRun()
 	now := metav1.Now()
 	agentRun.DeletionTimestamp = &now
-	agentRun.Finalizers = []string{legacyExternalExecutionFinalizer, legacyGuestEnrollmentFinalizer}
+	agentRun.Finalizers = []string{legacyExternalExecutionFinalizer, legacyGuestEnrollmentFinalizer, agentRunFinalizer}
+	renderedPolicy, err := RenderBrokerAgentsYAML(brokerAgentsPolicy{Agents: []brokerAgentEntry{
+		{ID: AgentRunBrokerID(agentRun.Namespace, agentRun.Name), TokenSHA256: validTestTokenHash("legacy"), Grants: []brokerAgentGrantEntry{}},
+		{ID: AgentRunBrokerID(agentRun.Namespace, "unrelated"), TokenSHA256: validTestTokenHash("unrelated"), Grants: []brokerAgentGrantEntry{}},
+	}})
+	if err != nil {
+		t.Fatalf("render broker policy: %v", err)
+	}
+	brokerConfig := testBrokerAgentsConfigMap(agentRun.Namespace)
+	brokerConfig.Data[brokerAgentsConfigKey] = renderedPolicy
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).WithObjects(agentRun).Build()
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).WithObjects(agentRun, brokerConfig).Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
@@ -142,8 +151,19 @@ func TestReconcileDeletingLegacyExternalAgentRunRetainsCleanupFinalizers(t *test
 	if !hasLegacyExternalFinalizer(&updated) {
 		t.Fatalf("cleanup finalizers were removed: %#v", updated.Finalizers)
 	}
+	if controllerutil.ContainsFinalizer(&updated, agentRunFinalizer) {
+		t.Fatalf("broker-policy finalizer remains: %#v", updated.Finalizers)
+	}
 	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed || updated.Status.Reason != legacyExternalDeletionReason {
 		t.Fatalf("expected actionable fail-closed deletion status, got %#v", updated.Status)
+	}
+	var updatedBrokerConfig corev1.ConfigMap
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(brokerConfig), &updatedBrokerConfig); err != nil {
+		t.Fatalf("get broker policy: %v", err)
+	}
+	policy := mustParseBrokerAgentsPolicy(t, updatedBrokerConfig.Data[brokerAgentsConfigKey])
+	if len(policy.Agents) != 1 || policy.Agents[0].ID != AgentRunBrokerID(agentRun.Namespace, "unrelated") {
+		t.Fatalf("legacy broker access was not revoked cleanly: %#v", policy.Agents)
 	}
 }
 
