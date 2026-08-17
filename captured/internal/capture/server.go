@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress/captureinspect"
+	"github.com/mirkoSekulic/nvt-agent/captured/internal/captureinspect"
 )
 
 const (

@@ -26,12 +26,8 @@ type AgentScheduleSpec struct {
 	// exact immutable issuer+subject identity.
 	PrincipalParallelism *AgentSchedulePrincipalParallelism `json:"principalParallelism,omitempty"`
 	Template             *AgentScheduleTemplate             `json:"template,omitempty"`
-	// ExecutionClasses are administrator-owned, bounded driver configurations.
-	// +listType=map
-	// +listMapKey=name
-	ExecutionClasses []AgentScheduleExecutionClass   `json:"executionClasses,omitempty"`
-	Profiles         []AgentScheduleExecutionProfile `json:"profiles,omitempty"`
-	ProfileSelection *AgentScheduleProfileSelection  `json:"profileSelection,omitempty"`
+	Profiles             []AgentScheduleExecutionProfile    `json:"profiles,omitempty"`
+	ProfileSelection     *AgentScheduleProfileSelection     `json:"profileSelection,omitempty"`
 	// PrincipalCredentialSelection enables broker-resolved, principal-owned
 	// credential selection instead of static issuer/subject profile rules.
 	PrincipalCredentialSelection *AgentSchedulePrincipalCredentialSelection `json:"principalCredentialSelection,omitempty"`
@@ -61,11 +57,10 @@ type AgentScheduleTemplate struct {
 // AgentScheduleExecutionProfile is one operator-owned execution identity and
 // its complete runtime/broker/egress security configuration.
 type AgentScheduleExecutionProfile struct {
-	Name               string                           `json:"name"`
-	Execution          *AgentScheduleExecutionSelection `json:"execution,omitempty"`
-	Runtime            AgentRunRuntime                  `json:"runtime"`
-	RuntimeAuth        *AgentRunRuntimeAuth             `json:"runtimeAuth,omitempty"`
-	AgentRuntimeConfig apiextensionsv1.JSON             `json:"agentRuntimeConfig"`
+	Name               string               `json:"name"`
+	Runtime            AgentRunRuntime      `json:"runtime"`
+	RuntimeAuth        *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
+	AgentRuntimeConfig apiextensionsv1.JSON `json:"agentRuntimeConfig"`
 	// WorkspaceInstructions is administrator-owned guidance snapshotted into
 	// each AgentRun selected from this profile.
 	// +kubebuilder:validation:MaxLength=65536
@@ -83,36 +78,6 @@ type AgentScheduleExecutionProfile struct {
 	// +kubebuilder:validation:Maximum=4096
 	EgressMaxConcurrentTunnels int32           `json:"egressMaxConcurrentTunnels,omitempty"`
 	Broker                     *AgentRunBroker `json:"broker,omitempty"`
-}
-
-// AgentScheduleExecutionSelection selects one operator-owned execution class.
-// Omitted means the built-in Kubernetes Pod backend.
-type AgentScheduleExecutionSelection struct {
-	Kind AgentRunExecutionKind `json:"kind"`
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Driver string `json:"driver"`
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	ClassRef string `json:"classRef,omitempty"`
-}
-
-// AgentScheduleExecutionClass binds an opaque configuration to one exact
-// workload kind and logical driver name.
-type AgentScheduleExecutionClass struct {
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Name string                `json:"name"`
-	Kind AgentRunExecutionKind `json:"kind"`
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Driver string `json:"driver"`
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Configuration apiextensionsv1.JSON `json:"configuration"`
 }
 
 // AgentScheduleWorkflowProfile is reusable, administrator-owned workflow guidance.
@@ -271,12 +236,6 @@ func (in *AgentScheduleSpec) DeepCopy() *AgentScheduleSpec {
 	if in.PrincipalParallelism != nil {
 		out.PrincipalParallelism = in.PrincipalParallelism.DeepCopy()
 	}
-	if in.ExecutionClasses != nil {
-		out.ExecutionClasses = make([]AgentScheduleExecutionClass, len(in.ExecutionClasses))
-		for i := range in.ExecutionClasses {
-			out.ExecutionClasses[i] = *in.ExecutionClasses[i].DeepCopy()
-		}
-	}
 	if in.Profiles != nil {
 		out.Profiles = make([]AgentScheduleExecutionProfile, len(in.Profiles))
 		for i := range in.Profiles {
@@ -337,17 +296,6 @@ func (in *AgentSchedulePrincipalCredentialSelection) DeepCopy() *AgentSchedulePr
 	return out
 }
 
-// DeepCopy returns a copy of the AgentScheduleExecutionClass.
-func (in *AgentScheduleExecutionClass) DeepCopy() *AgentScheduleExecutionClass {
-	if in == nil {
-		return nil
-	}
-	out := new(AgentScheduleExecutionClass)
-	*out = *in
-	out.Configuration = *in.Configuration.DeepCopy()
-	return out
-}
-
 func (in *AgentScheduleTemplate) DeepCopy() *AgentScheduleTemplate {
 	if in == nil {
 		return nil
@@ -382,11 +330,6 @@ func (in *AgentScheduleExecutionProfile) DeepCopy() *AgentScheduleExecutionProfi
 	}
 	out := new(AgentScheduleExecutionProfile)
 	*out = *in
-	if in.Execution != nil {
-		out.Execution = &AgentScheduleExecutionSelection{
-			Kind: in.Execution.Kind, Driver: in.Execution.Driver, ClassRef: in.Execution.ClassRef,
-		}
-	}
 	out.Runtime = *in.Runtime.DeepCopy()
 	if in.EgressForwardProxy != nil {
 		out.EgressForwardProxy = new(bool)

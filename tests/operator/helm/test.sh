@@ -5,18 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.69" || "${CHART_APP_VERSION}" != "0.8.69" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.69, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.70" || "${CHART_APP_VERSION}" != "0.8.70" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.70, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.69' "${CHART}/README.md"
-grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
-grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
-grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.70' "${CHART}/README.md"
 grep -Fq 'kubectl apply --server-side -f -' "${CHART}/README.md"
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
@@ -34,8 +31,6 @@ SCHEDULE_LEGACY_RENDER="${WORKDIR}/schedule-legacy.yaml"
 PACKAGED_SCHEDULE_RENDER="${WORKDIR}/packaged-schedule.yaml"
 EGRESS_POLICY_RENDER="${WORKDIR}/egress-policy.yaml"
 GATEWAY_RENDER="${WORKDIR}/gateway.yaml"
-GATEWAY_NATIVE_SESSION_RENDER="${WORKDIR}/gateway-native-session.yaml"
-GATEWAY_NATIVE_SESSION_FAILURE="${WORKDIR}/gateway-native-session-failure.txt"
 GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
 GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-failure.txt"
 GATEWAY_OIDC_REPLICAS_FAILURE="${WORKDIR}/gateway-oidc-replicas-failure.txt"
@@ -57,10 +52,6 @@ BROKER_EXISTING_CLAIM_RENDER="${WORKDIR}/broker-existing-claim.yaml"
 BROKER_SEED_RENDER="${WORKDIR}/broker-seed.yaml"
 BROKER_SEED_WITHOUT_PERSISTENCE_FAILURE="${WORKDIR}/broker-seed-without-persistence-failure.txt"
 BROKER_SEED_TARGET_FAILURE="${WORKDIR}/broker-seed-target-failure.txt"
-BROKER_ENROLLMENT_RENDER="${WORKDIR}/broker-enrollment.yaml"
-BROKER_ENROLLMENT_FAILURE="${WORKDIR}/broker-enrollment-failure.txt"
-BROKER_DYNAMIC_ACCOUNTS_RENDER="${WORKDIR}/broker-dynamic-accounts.yaml"
-BROKER_DYNAMIC_ACCOUNTS_FAILURE="${WORKDIR}/broker-dynamic-accounts-failure.txt"
 NAMESPACE_OVERRIDE_RENDER="${WORKDIR}/namespace-override.yaml"
 NAMESPACE_CREATE_RENDER="${WORKDIR}/namespace-create.yaml"
 REPLICA_FAILURE="${WORKDIR}/replica-failure.txt"
@@ -84,12 +75,6 @@ PACKAGED_RELEASE_RENDER="${WORKDIR}/packaged-release.yaml"
 SOURCE_GLOBAL_TAG_RENDER="${WORKDIR}/source-global-tag.yaml"
 COMPONENT_TAG_RENDER="${WORKDIR}/component-tag.yaml"
 LEGACY_IMAGE_FAILURE="${WORKDIR}/legacy-image-failure.txt"
-EXECUTION_DRIVERS_RENDER="${WORKDIR}/execution-drivers.yaml"
-EXECUTION_DRIVER_EXISTING_STORAGE_RENDER="${WORKDIR}/execution-driver-existing-storage.yaml"
-EXECUTION_DRIVER_ENROLLMENT_RENDER="${WORKDIR}/execution-driver-enrollment.yaml"
-EXECUTION_DRIVER_LONG_NAME_RENDER="${WORKDIR}/execution-driver-long-name.yaml"
-EXECUTION_DRIVER_FAILURE="${WORKDIR}/execution-driver-failure.txt"
-NATIVE_EGRESS_RELAY_RENDER="${WORKDIR}/native-egress-relay.yaml"
 OAUTH2_ARGS=(
   --set gateway.auth.oauth2.credentials.existingSecret=nvt-agent-gateway-oauth2
   --set gateway.auth.oauth2.credentials.clientIDKey=oauth2-client-id
@@ -104,215 +89,7 @@ OAUTH2_ARGS=(
 )
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
-if grep -q 'dynamic-accounts:' "${DEFAULT_RENDER}"; then
-  echo "default rendering unexpectedly enabled dynamic principal accounts" >&2
-  exit 1
-fi
-helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" > "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
-grep -q 'dynamic-accounts:' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
-grep -q 'state-dir: /state/principal-accounts' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
-grep -q 'secretRef:' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
-grep -q 'name: "nvt-broker-dynamic-account-auth"' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
-grep -q 'path: /ready' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
-if grep -q 'credential_base64\|SECRET-NEEDLE' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"; then
-  echo "dynamic account render must not contain credential material" >&2
-  exit 1
-fi
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" \
-  --set broker.persistence.enabled=false > /dev/null 2> "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"; then
-  echo "dynamic accounts without persistent broker state unexpectedly rendered" >&2
-  exit 1
-fi
-grep -q 'dynamic-accounts.enabled requires broker.persistence.enabled=true' "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" \
-  --set broker.tls.enabled=false > /dev/null 2> "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"; then
-  echo "dynamic accounts without broker TLS unexpectedly rendered" >&2
-  exit 1
-fi
-grep -q 'dynamic-accounts.enabled requires broker.tls.enabled=true' "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" \
-  --set-string broker.envSecretName= > /dev/null 2> "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"; then
-  echo "dynamic accounts without assertion Secret unexpectedly rendered" >&2
-  exit 1
-fi
-grep -q 'dynamic-accounts.enabled requires broker.envSecretName' "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" \
-  --set-string broker.config.dynamic-accounts.state-dir=/tmp/accounts > /dev/null 2> "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"; then
-  echo "dynamic accounts outside broker state unexpectedly rendered" >&2
-  exit 1
-fi
-grep -q 'dynamic-accounts.state-dir must be a normalized path below /state' "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"
-if grep -q 'NVT_EXECUTION_DRIVER_STATE_DIR\|name: driver-state\|component: execution-driver-host' "${DEFAULT_RENDER}"; then
-  echo "default rendering unexpectedly added execution-driver storage/workloads" >&2
-  exit 1
-fi
-helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" > "${EXECUTION_DRIVERS_RENDER}"
-helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].storage.size= \
-  --set-string executionDrivers.registrations[0].storage.storageClassName= \
-  --set-string executionDrivers.registrations[0].storage.existingClaim=existing-driver-state \
-  > "${EXECUTION_DRIVER_EXISTING_STORAGE_RENDER}"
-helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set executionDrivers.guestEnrollment.enabled=true \
-  --set 'executionDrivers.guestEnrollment.registrations={fake-east}' \
-  --set-string executionDrivers.guestEnrollment.brokerURL=https://nvt-broker.custom-ns.svc:7347 \
-  --set-string executionDrivers.guestEnrollment.serverName=nvt-broker.custom-ns.svc \
-  --set-string executionDrivers.guestEnrollment.ca.existingSecret=nvt-broker-tls \
-  --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
-  --set-string executionDrivers.guestEnrollment.orchestratorAuth.tokenKey=control-token \
-  > "${EXECUTION_DRIVER_ENROLLMENT_RENDER}"
-helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set nativeEgressRelay.enabled=true \
-  --set-string nativeEgressRelay.rolloutRevision=credentials-1 \
-  --set egress.networkPolicyCapable=true \
-  --set broker.persistence.enabled=true \
-  --set broker.guestEnrollment.enabled=true \
-  --set-string broker.guestEnrollment.exchangeURL=https://nvt-broker.custom-ns.svc.cluster.local:7347/v1/guest-enrollment/exchange \
-  --set-string broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
-  --set executionDrivers.guestEnrollment.enabled=true \
-  --set 'executionDrivers.guestEnrollment.registrations={fake-east}' \
-  --set-string executionDrivers.guestEnrollment.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
-  --set-string executionDrivers.guestEnrollment.serverName=nvt-broker.custom-ns.svc.cluster.local \
-  --set-string executionDrivers.guestEnrollment.ca.existingSecret=nvt-broker-tls \
-  --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
-  --set-string nativeEgressRelay.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
-  --set-string nativeEgressRelay.brokerServerName=nvt-broker.custom-ns.svc.cluster.local \
-  --set-string nativeEgressRelay.credentials.existingSecret=nvt-native-egress-relay-credentials \
-  --set-string nativeEgressRelay.brokerCA.existingSecret=nvt-broker-tls \
-  --set-string nativeEgressRelay.data.ingressCIDRs[0]=10.40.0.0/16 \
-  --set-string nativeEgressRelay.attachment.requiredDestinations[0].purpose=bootstrap \
-  --set-string nativeEgressRelay.attachment.requiredDestinations[0].host=nvt-broker.custom-ns.svc.cluster.local \
-  --set nativeEgressRelay.attachment.requiredDestinations[0].port=7347 \
-  --set-string nativeEgressRelay.attachment.requiredDestinations[1].purpose=control \
-  --set-string nativeEgressRelay.attachment.requiredDestinations[1].host=nvt-gateway.custom-ns.svc.cluster.local \
-  --set nativeEgressRelay.attachment.requiredDestinations[1].port=7443 \
-  > "${NATIVE_EGRESS_RELAY_RENDER}"
-if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set nativeEgressRelay.enabled=true \
-  --set-string nativeEgressRelay.rolloutRevision=credentials-1 \
-  --set egress.networkPolicyCapable=true \
-  --set broker.persistence.enabled=true \
-  --set broker.guestEnrollment.enabled=true \
-  --set-string broker.guestEnrollment.exchangeURL=https://nvt-broker.custom-ns.svc.cluster.local:7347/v1/guest-enrollment/exchange \
-  --set-string broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
-  --set executionDrivers.guestEnrollment.enabled=true \
-  --set 'executionDrivers.guestEnrollment.registrations={fake-east}' \
-  --set-string executionDrivers.guestEnrollment.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
-  --set-string executionDrivers.guestEnrollment.serverName=nvt-broker.custom-ns.svc.cluster.local \
-  --set-string executionDrivers.guestEnrollment.ca.existingSecret=nvt-broker-tls \
-  --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
-  --set-string nativeEgressRelay.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
-  --set-string nativeEgressRelay.brokerServerName=nvt-broker.custom-ns.svc.cluster.local \
-  --set-string nativeEgressRelay.credentials.existingSecret=nvt-native-egress-relay-credentials \
-  --set-string nativeEgressRelay.brokerCA.existingSecret=nvt-broker-tls \
-  --set-string nativeEgressRelay.data.ingressCIDRs[0]=10.40.0.0/16 \
-  --set-string nativeEgressRelay.attachment.relayHost=8.8.8.8 \
-  --set-string nativeEgressRelay.attachment.relayServerName=8.8.8.8 \
-  --set-string nativeEgressRelay.attachment.requiredDestinations[0].purpose=bootstrap \
-  --set-string nativeEgressRelay.attachment.requiredDestinations[0].host=nvt-broker.custom-ns.svc.cluster.local \
-  --set nativeEgressRelay.attachment.requiredDestinations[0].port=7347 \
-  --set-string nativeEgressRelay.attachment.requiredDestinations[1].purpose=control \
-  --set-string nativeEgressRelay.attachment.requiredDestinations[1].host=nvt-gateway.custom-ns.svc.cluster.local \
-  --set nativeEgressRelay.attachment.requiredDestinations[1].port=7443 \
-  >/dev/null 2>"${WORKDIR}/native-relay-server-name.txt"; then
-  echo "expected IP-literal native relay TLS server name to fail" >&2
-  exit 1
-fi
-grep -q 'nativeEgressRelay.attachment.relayServerName must be a canonical DNS name' "${WORKDIR}/native-relay-server-name.txt"
-for invalid_relay_host in a..b aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.invalid 999.999.999.999 10.0.0.1; do
-  if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-    --set nativeEgressRelay.enabled=true \
-    --set-string nativeEgressRelay.rolloutRevision=credentials-1 \
-    --set egress.networkPolicyCapable=true \
-    --set broker.persistence.enabled=true \
-    --set broker.guestEnrollment.enabled=true \
-    --set-string broker.guestEnrollment.exchangeURL=https://nvt-broker.custom-ns.svc.cluster.local:7347/v1/guest-enrollment/exchange \
-    --set-string broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
-    --set executionDrivers.guestEnrollment.enabled=true \
-    --set 'executionDrivers.guestEnrollment.registrations={fake-east}' \
-    --set-string executionDrivers.guestEnrollment.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
-    --set-string executionDrivers.guestEnrollment.serverName=nvt-broker.custom-ns.svc.cluster.local \
-    --set-string executionDrivers.guestEnrollment.ca.existingSecret=nvt-broker-tls \
-    --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
-    --set-string nativeEgressRelay.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
-    --set-string nativeEgressRelay.brokerServerName=nvt-broker.custom-ns.svc.cluster.local \
-    --set-string nativeEgressRelay.credentials.existingSecret=nvt-native-egress-relay-credentials \
-    --set-string nativeEgressRelay.brokerCA.existingSecret=nvt-broker-tls \
-    --set-string nativeEgressRelay.data.ingressCIDRs[0]=10.40.0.0/16 \
-    --set-string nativeEgressRelay.attachment.relayHost="${invalid_relay_host}" \
-    --set-string nativeEgressRelay.attachment.requiredDestinations[0].purpose=bootstrap \
-    --set-string nativeEgressRelay.attachment.requiredDestinations[0].host=nvt-broker.custom-ns.svc.cluster.local \
-    --set nativeEgressRelay.attachment.requiredDestinations[0].port=7347 \
-    --set-string nativeEgressRelay.attachment.requiredDestinations[1].purpose=control \
-    --set-string nativeEgressRelay.attachment.requiredDestinations[1].host=nvt-gateway.custom-ns.svc.cluster.local \
-    --set nativeEgressRelay.attachment.requiredDestinations[1].port=7443 \
-    >/dev/null 2>"${WORKDIR}/native-relay-host.txt"; then
-    echo "expected invalid native relay host to fail: ${invalid_relay_host}" >&2
-    exit 1
-  fi
-  grep -q 'nativeEgressRelay.attachment.relayHost must be a canonical DNS name' "${WORKDIR}/native-relay-host.txt"
-done
-if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set nativeEgressRelay.enabled=true \
-  --set-string nativeEgressRelay.rolloutRevision=credentials-1 \
-  --set egress.networkPolicyCapable=true \
-  --set broker.persistence.enabled=true \
-  --set broker.guestEnrollment.enabled=true \
-  --set-string broker.guestEnrollment.exchangeURL=https://nvt-broker.custom-ns.svc.cluster.local:7347/v1/guest-enrollment/exchange \
-  --set-string broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
-  --set executionDrivers.guestEnrollment.enabled=true \
-  --set 'executionDrivers.guestEnrollment.registrations={fake-east}' \
-  --set-string executionDrivers.guestEnrollment.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
-  --set-string executionDrivers.guestEnrollment.serverName=nvt-broker.custom-ns.svc.cluster.local \
-  --set-string executionDrivers.guestEnrollment.ca.existingSecret=nvt-broker-tls \
-  --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
-  --set-string nativeEgressRelay.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
-  --set-string nativeEgressRelay.brokerServerName=nvt-broker.custom-ns.svc.cluster.local \
-  --set-string nativeEgressRelay.credentials.existingSecret=nvt-native-egress-relay-credentials \
-  --set-string nativeEgressRelay.brokerCA.existingSecret=nvt-broker-tls \
-  >/dev/null 2>"${WORKDIR}/native-relay-attachment.txt"; then
-  echo "expected native relay without an attachment allowlist to fail" >&2
-  exit 1
-fi
-grep -q 'nativeEgressRelay.attachment.requiredDestinations must contain 2 to 16 exact endpoints' "${WORKDIR}/native-relay-attachment.txt"
-if helm template nvt "${CHART}" -n custom-ns --set nativeEgressRelay.enabled=true --set-string nativeEgressRelay.rolloutRevision=test-1 >/dev/null 2>"${WORKDIR}/native-relay-missing.txt"; then
-  echo "expected native relay without trusted dependencies to fail" >&2
-  exit 1
-fi
-grep -q 'nativeEgressRelay.enabled requires executionDrivers.guestEnrollment.enabled=true' "${WORKDIR}/native-relay-missing.txt"
-if helm template nvt "${CHART}" -n custom-ns --set nativeEgressRelay.enabled=true --set-string nativeEgressRelay.rolloutRevision=INVALID >/dev/null 2>"${WORKDIR}/native-relay-rollout.txt"; then
-  echo "expected invalid native relay rollout revision to fail" >&2
-  exit 1
-fi
-grep -q 'nativeEgressRelay.rolloutRevision must be a non-empty canonical rollout epoch' "${WORKDIR}/native-relay-rollout.txt"
-if helm template nvt "${CHART}" -n custom-ns \
-  --set nativeEgressRelay.enabled=true \
-  --set-string nativeEgressRelay.rolloutRevision=test-1 \
-  --set-string nativeEgressRelay.initImage.tag=1.36.1 \
-  --set-string nativeEgressRelay.initImage.digest= \
-  >/dev/null 2>"${WORKDIR}/native-relay-init-image.txt"; then
-  echo "expected unpinned native relay init image to fail" >&2
-  exit 1
-fi
-grep -q 'nativeEgressRelay.initImage must use a non-empty repository and canonical sha256 digest' "${WORKDIR}/native-relay-init-image.txt"
-if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set nativeEgressRelay.enabled=true --set nativeEgressRelay.replicas=2 >/dev/null 2>"${WORKDIR}/native-relay-replicas.txt"; then
-  echo "expected multi-replica native relay to fail" >&2
-  exit 1
-fi
-grep -q 'nativeEgressRelay.replicas must be exactly 1' "${WORKDIR}/native-relay-replicas.txt"
 helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/profile-values.yaml" > "${PROFILE_RENDER}"
-helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/dynamic-principal-values.yaml" > "${DYNAMIC_PRINCIPAL_RENDER}"
-helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/dynamic-principal-values.yaml" \
-  --set-string broker.dynamicAccountAssertionRotationEpoch=epoch-2 > "${DYNAMIC_PRINCIPAL_ROTATED_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -s templates/agentschedule.yaml \
   --set agentSchedule.template.workspace.mode=Ephemeral > "${SCHEDULE_DEFAULT_IMAGE_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -s templates/agentschedule.yaml \
@@ -326,22 +103,6 @@ helm template nvt "${CHART}" -n custom-ns \
   --set 'egress.denyCIDRs={10.240.0.0/16,fd00:1234::/48}' \
   > "${EGRESS_POLICY_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set gateway.enabled=true --set gateway.port=8091 > "${GATEWAY_RENDER}"
-helm template nvt "${CHART}" -n custom-ns \
-  --set gateway.enabled=true \
-  --set gateway.nativeSession.enabled=true \
-  --set gateway.nativeSession.port=7443 \
-  --set-string gateway.nativeSession.tls.existingSecret=nvt-gateway-native-session-tls \
-  --set-string gateway.nativeSession.tls.certificateKey=server.crt \
-  --set-string gateway.nativeSession.tls.privateKeyKey=server.key \
-  --set-string gateway.nativeSession.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
-  --set-string gateway.nativeSession.serverName=nvt-broker.custom-ns.svc.cluster.local \
-  --set-string gateway.nativeSession.ca.existingSecret=nvt-broker-tls \
-  --set-string gateway.nativeSession.ca.key=ca.crt \
-  --set gateway.nativeSession.authenticationTimeoutSeconds=7 \
-  --set gateway.nativeSession.revalidationIntervalSeconds=45 \
-  --set gateway.nativeWorkspace.enabled=true \
-  --set gateway.nativeWorkspace.port=7444 \
-  > "${GATEWAY_NATIVE_SESSION_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
   --set branding.existingConfigMap=company-agent-branding \
@@ -456,13 +217,6 @@ helm template nvt "${CHART}" -n custom-ns \
   --set broker.persistence.seedSecretName=codex-auth \
   --set broker.persistence.seedTargetDir=codex \
   > "${BROKER_SEED_RENDER}"
-helm template nvt "${CHART}" -n custom-ns \
-  --set broker.persistence.enabled=true \
-  --set broker.guestEnrollment.enabled=true \
-  --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test/v1/guest-enrollment/exchange \
-  --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-guest-enrollment-orchestrator \
-  --set broker.guestEnrollment.orchestratorAuth.tokenKey=control-plane-token \
-  > "${BROKER_ENROLLMENT_RENDER}"
 helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RENDER}"
 helm template nvt "${CHART}" --set namespace.create=true --set namespace.name=nvt > "${NAMESPACE_CREATE_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true > "${PRODUCER_RENDER}"
@@ -843,447 +597,6 @@ missing_resource "${DEFAULT_RENDER}" Service nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Role nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Deployment nvt-github-comments-producer
 missing_resource "${DEFAULT_RENDER}" ConfigMap nvt-github-comments-producer
-missing_resource "${DEFAULT_RENDER}" ConfigMap nvt-execution-driver-registrations
-missing_resource "${DEFAULT_RENDER}" Deployment nvt-native-egress-relay
-missing_resource "${DEFAULT_RENDER}" Service nvt-native-egress-relay
-missing_resource "${DEFAULT_RENDER}" Service nvt-native-egress-relay-control
-missing_resource "${DEFAULT_RENDER}" NetworkPolicy nvt-native-egress-relay
-missing_resource "${DEFAULT_RENDER}" ConfigMap nvt-native-egress-attachment
-if grep -q 'app.kubernetes.io/component: execution-driver-host\|NVT_EXECUTION_DRIVER_REGISTRATIONS_FILE\|NVT_GUEST_ENROLLMENT_CONFIG_FILE\|nvt-execution-driver-host:' "${DEFAULT_RENDER}"; then
-  echo "default render unexpectedly creates or wires an execution-driver host" >&2
-  exit 1
-fi
-
-for resource in \
-  "Deployment nvt-native-egress-relay" \
-  "Service nvt-native-egress-relay" \
-  "Service nvt-native-egress-relay-control" \
-  "NetworkPolicy nvt-native-egress-relay" \
-  "ConfigMap nvt-native-egress-relay" \
-  "ConfigMap nvt-native-egress-attachment" \
-  "ConfigMap nvt-native-egress-publication-client"; do
-  read -r kind name <<<"${resource}"
-  require_resource "${NATIVE_EGRESS_RELAY_RENDER}" "${kind}" "${name}"
-done
-python3 - "${NATIVE_EGRESS_RELAY_RENDER}" "${CHART_APP_VERSION}" <<'PY'
-import sys, yaml
-docs = [doc for doc in yaml.safe_load_all(open(sys.argv[1])) if doc]
-version = sys.argv[2]
-by = {(doc.get("kind"), doc.get("metadata", {}).get("name")): doc for doc in docs}
-deployment = by[("Deployment", "nvt-native-egress-relay")]
-pod = deployment["spec"]["template"]["spec"]
-assert deployment["spec"]["replicas"] == 1
-assert deployment["spec"]["strategy"]["type"] == "Recreate"
-assert deployment["spec"]["template"]["metadata"]["annotations"]["nvt.dev/native-egress-rollout-revision"] == "credentials-1"
-assert pod["securityContext"]["runAsUser"] == 65532
-assert pod["containers"][0]["image"].endswith(":" + version)
-assert pod["containers"][0]["securityContext"]["capabilities"]["drop"] == ["ALL"]
-assert pod["initContainers"][0]["image"] == "docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-assert pod["initContainers"][0]["securityContext"]["runAsUser"] == 0
-assert pod["initContainers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["CHOWN"]}
-init_script = pod["initContainers"][0]["args"][0]
-assert init_script.index("chmod 0600 /owned/*") < init_script.index("chown 65532:65532 /owned/*")
-assert pod["volumes"][1]["emptyDir"]["medium"] == "Memory"
-operator = by[("Deployment", "nvt-operator")]
-assert operator["spec"]["strategy"]["type"] == "Recreate"
-assert operator["spec"]["template"]["metadata"]["annotations"]["nvt.dev/native-egress-rollout-revision"] == "credentials-1"
-operator_env = operator["spec"]["template"]["spec"]["containers"][0]["env"]
-env = {item["name"]: item.get("value") for item in operator_env}
-assert env["NVT_NATIVE_EGRESS_PUBLICATION_CONFIG_FILE"] == "/var/run/nvt-native-egress-publication/config.json"
-assert env["NVT_NATIVE_EGRESS_ATTACHMENT_CONFIG_FILE"] == "/var/run/nvt-native-egress-attachment/config.json"
-attachment = by[("ConfigMap", "nvt-native-egress-attachment")]
-attachment_config = __import__("json").loads(attachment["data"]["config.json"])
-assert attachment_config["version"] == 1 and attachment_config["generation"] == 1
-assert attachment_config["relayHost"] == "nvt-native-egress-relay.custom-ns.svc.cluster.local"
-assert attachment_config["relayServerName"] == attachment_config["relayHost"]
-assert attachment_config["requiredDestinations"] == [
-    {"purpose": "bootstrap", "host": "nvt-broker.custom-ns.svc.cluster.local", "port": 7347},
-    {"purpose": "control", "host": "nvt-gateway.custom-ns.svc.cluster.local", "port": 7443},
-]
-assert attachment_config["redirect"] == {
-    "mode": "capture-tcp", "loopback_address": "127.0.0.1",
-    "transparent_tcp_port": 15001, "explicit_connect_port": 15002,
-}
-operator_volumes = {volume["name"]: volume for volume in operator["spec"]["template"]["spec"]["volumes"]}
-attachment_sources = operator_volumes["native-egress-attachment"]["projected"]["sources"]
-assert attachment_sources[1]["secret"]["items"] == [{"key": "data-ca.crt", "path": "data-ca.crt"}]
-for document in docs:
-    if document.get("kind") == "Deployment" and document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component") == "execution-driver-host":
-        encoded = __import__("json").dumps(document)
-        assert "nvt-native-egress-relay-credentials" not in encoded
-        assert "NVT_NATIVE_EGRESS_ATTACHMENT_CONFIG_FILE" not in encoded
-pod_namespace = next(item for item in operator_env if item["name"] == "POD_NAMESPACE")
-assert pod_namespace["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.namespace"
-role = by[("Role", "nvt-operator")]
-assert any("agentruns" in rule.get("resources", []) and "list" in rule.get("verbs", []) for rule in role["rules"])
-for document in docs:
-    if document.get("kind") == "ClusterRole":
-        assert all("agentruns" not in rule.get("resources", []) for rule in document.get("rules", []))
-data = by[("Service", "nvt-native-egress-relay")]
-control = by[("Service", "nvt-native-egress-relay-control")]
-assert [p["name"] for p in data["spec"]["ports"]] == ["data"]
-assert [p["name"] for p in control["spec"]["ports"]] == ["control"]
-policy = by[("NetworkPolicy", "nvt-native-egress-relay")]
-assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
-assert policy["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "nvt-operator"}
-assert policy["spec"]["ingress"][1]["from"][0]["ipBlock"]["cidr"] == "10.40.0.0/16"
-render = open(sys.argv[1]).read()
-assert "control-token" in render
-assert "nvt_rc1_" not in render
-assert "loopbackAddress" not in attachment["data"]["config.json"]
-PY
-
-python3 - "${EXECUTION_DRIVERS_RENDER}" "${CHART_APP_VERSION}" "${DEFAULT_RENDER}" <<'PY'
-import json
-import sys
-import yaml
-
-documents = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
-version = sys.argv[2]
-default_documents = [item for item in yaml.safe_load_all(open(sys.argv[3])) if item]
-
-def resources(kind):
-    return {item["metadata"]["name"]: item for item in documents if item.get("kind") == kind}
-
-deployments = resources("Deployment")
-services = resources("Service")
-policies = resources("NetworkPolicy")
-persistent_volume_claims = resources("PersistentVolumeClaim")
-secrets = resources("Secret")
-accounts = resources("ServiceAccount")
-configmaps = resources("ConfigMap")
-default_operator = next(item for item in default_documents if item.get("kind") == "Deployment" and item["metadata"]["name"] == "nvt-operator")
-assert "securityContext" not in default_operator["spec"]["template"]["spec"]
-assert default_operator["spec"]["strategy"] == {"type": "Recreate"}
-assert "nvt.dev/native-egress-rollout-revision" not in default_operator["spec"]["template"].get("metadata", {}).get("annotations", {})
-expected = {"fake-east", "fake-west"}
-driver_names = {f"nvt-execution-driver-{name}" for name in expected}
-assert driver_names <= deployments.keys()
-assert driver_names <= services.keys()
-assert driver_names <= policies.keys()
-assert driver_names <= secrets.keys()
-assert "nvt-execution-driver-fake-east" in accounts
-assert "nvt-execution-driver-fake-west" not in accounts
-assert persistent_volume_claims["nvt-execution-driver-fake-east"]["spec"]["resources"]["requests"]["storage"] == "20Gi"
-assert persistent_volume_claims["nvt-execution-driver-fake-east"]["spec"]["storageClassName"] == "fast-state"
-assert "nvt-execution-driver-fake-west" not in persistent_volume_claims
-assert deployments["nvt-execution-driver-fake-east"]["spec"]["strategy"] == {"type": "Recreate"}
-assert "strategy" not in deployments["nvt-execution-driver-fake-west"]["spec"]
-
-operator_pod = deployments["nvt-operator"]["spec"]["template"]["spec"]
-operator_security = operator_pod["securityContext"]
-assert operator_security == {
-    "runAsNonRoot": True,
-    "runAsUser": 65532,
-    "runAsGroup": 65532,
-    "fsGroup": 65532,
-    "fsGroupChangePolicy": "OnRootMismatch",
-}
-projection = next(volume for volume in operator_pod["volumes"] if volume["name"] == "execution-driver-registrations")["projected"]
-assert projection["defaultMode"] == 0o440
-operator = operator_pod["containers"][0]
-operator_env = {item["name"]: item for item in operator["env"]}
-assert operator_env["NVT_EXECUTION_DRIVER_REGISTRATIONS_FILE"]["value"] == "/var/run/nvt-execution-drivers/registrations.json"
-operator_text = json.dumps(operator, sort_keys=True)
-assert "fake-east-cloud" not in operator_text and "fake-west-cloud" not in operator_text
-
-registry = json.loads(configmaps["nvt-execution-driver-registrations"]["data"]["registrations.json"])
-assert registry["version"] == 1
-assert {item["name"] for item in registry["registrations"]} == expected
-assert len({item["tokenFile"] for item in registry["registrations"]}) == 2
-assert len({item["caFile"] for item in registry["registrations"]}) == 2
-
-for name, credential in (("fake-east", "fake-east-cloud"), ("fake-west", "fake-west-cloud")):
-    pod = deployments[f"nvt-execution-driver-{name}"]["spec"]["template"]["spec"]
-    assert len(pod["containers"]) == 1 and len(pod["initContainers"]) == 1
-    init = pod["initContainers"][0]
-    assert init["image"] == f"ghcr.io/mirkosekulic/nvt-execution-driver-host:{version}"
-    container = pod["containers"][0]
-    assert container["image"].endswith("@sha256:" + "a" * 64)
-    assert container["command"] == ["/nvt-host/nvt-execution-driver-host"]
-    if name == "fake-east":
-        assert "--pass-env=WORKLOAD_IDENTITY_TOKEN_FILE" in container["args"]
-        assert "--pass-env=NVT_EXECUTION_DRIVER_STATE_DIR" in container["args"]
-        assert next(item for item in container["env"] if item["name"] == "NVT_EXECUTION_DRIVER_STATE_DIR")["value"] == "/var/lib/nvt-execution-driver"
-        assert next(item for item in container["volumeMounts"] if item["name"] == "driver-state")["mountPath"] == "/var/lib/nvt-execution-driver"
-        assert next(item for item in pod["volumes"] if item["name"] == "driver-state")["persistentVolumeClaim"]["claimName"] == "nvt-execution-driver-fake-east"
-    else:
-        assert not any(item == "--pass-env=NVT_EXECUTION_DRIVER_STATE_DIR" for item in container["args"])
-        assert all(item["name"] != "driver-state" for item in container["volumeMounts"])
-    env = {item["name"]: item for item in container["env"]}
-    assert env["CLOUD_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == credential
-    other = "fake-west-cloud" if name == "fake-east" else "fake-east-cloud"
-    assert other not in json.dumps(pod, sort_keys=True)
-    assert pod["automountServiceAccountToken"] is False
-    assert container["securityContext"]["allowPrivilegeEscalation"] is False
-    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
-    startup = container["startupProbe"]
-    assert startup["httpGet"] == {"path": "/readyz", "port": "https", "scheme": "HTTPS"}
-    assert startup["periodSeconds"] * startup["failureThreshold"] >= 60
-    assert startup["timeoutSeconds"] == 2
-    assert policies[f"nvt-execution-driver-{name}"]["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "nvt-operator"
-
-assert deployments["nvt-execution-driver-fake-east"]["spec"]["template"]["spec"]["serviceAccountName"] == "nvt-execution-driver-fake-east"
-assert deployments["nvt-execution-driver-fake-west"]["spec"]["template"]["spec"]["serviceAccountName"] == "fake-west-workload-identity"
-PY
-
-python3 - "${EXECUTION_DRIVER_EXISTING_STORAGE_RENDER}" <<'PY'
-import sys
-import yaml
-
-documents = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
-assert not any(item.get("kind") == "PersistentVolumeClaim" and item["metadata"]["name"] == "nvt-execution-driver-fake-east" for item in documents)
-deployment = next(item for item in documents if item.get("kind") == "Deployment" and item["metadata"]["name"] == "nvt-execution-driver-fake-east")
-volume = next(item for item in deployment["spec"]["template"]["spec"]["volumes"] if item["name"] == "driver-state")
-assert volume["persistentVolumeClaim"]["claimName"] == "existing-driver-state"
-PY
-
-python3 - "${EXECUTION_DRIVER_ENROLLMENT_RENDER}" <<'PY'
-import json
-import sys
-import yaml
-
-documents = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
-deployments = {item["metadata"]["name"]: item for item in documents if item.get("kind") == "Deployment"}
-configmaps = {item["metadata"]["name"]: item for item in documents if item.get("kind") == "ConfigMap"}
-operator = deployments["nvt-operator"]["spec"]["template"]["spec"]
-operator_template = deployments["nvt-operator"]["spec"]["template"]
-container = operator["containers"][0]
-environment = {item["name"]: item for item in container["env"]}
-assert environment["NVT_GUEST_ENROLLMENT_CONFIG_FILE"]["value"] == "/var/run/nvt-guest-enrollment/config.json"
-assert len(operator_template["metadata"]["annotations"]["checksum/guest-enrollment-client"]) == 64
-config = json.loads(configmaps["nvt-guest-enrollment-client"]["data"]["config.json"])
-assert config == {
-    "version": 1,
-    "baseURL": "https://nvt-broker.custom-ns.svc:7347",
-    "serverName": "nvt-broker.custom-ns.svc",
-    "caFile": "/var/run/nvt-guest-enrollment/ca.crt",
-    "bearerTokenFile": "/var/run/nvt-guest-enrollment/orchestrator-token",
-    "requestTimeoutSeconds": 30,
-    "handoffTimeoutSeconds": 30,
-    "ttlSeconds": 300,
-    "driverRegistrations": ["fake-east"],
-}
-volume = next(item for item in operator["volumes"] if item["name"] == "guest-enrollment-client")
-assert volume["projected"]["defaultMode"] == 0o440
-projection_text = json.dumps(volume, sort_keys=True)
-assert "nvt-broker-tls" in projection_text and "nvt-enrollment-orchestrator" in projection_text and "control-token" in projection_text
-assert "orchestrator-token-" not in projection_text
-east_args = deployments["nvt-execution-driver-fake-east"]["spec"]["template"]["spec"]["containers"][0]["args"]
-west_args = deployments["nvt-execution-driver-fake-west"]["spec"]["template"]["spec"]["containers"][0]["args"]
-assert "--enrollment-socket=/tmp/nvt-guest-enrollment.sock" in east_args
-assert "--enrollment-timeout=30s" in east_args
-assert "--enrollment-socket=/tmp/nvt-guest-enrollment.sock" not in west_args
-assert not any(item.startswith("--enrollment-timeout=") for item in west_args)
-for args in (east_args, west_args):
-    assert not any(item.startswith("--operation-timeout=") for item in args)
-PY
-
-for invalid_enrollment_registrations in \
-  '--set executionDrivers.guestEnrollment.registrations[0]=missing' \
-  '--set executionDrivers.guestEnrollment.registrations[0]=fake-east --set executionDrivers.guestEnrollment.registrations[1]=fake-east'; do
-  read -r -a registration_args <<< "${invalid_enrollment_registrations}"
-  if helm template nvt "${CHART}" -n custom-ns \
-    -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-    --set executionDrivers.guestEnrollment.enabled=true \
-    --set-string executionDrivers.guestEnrollment.brokerURL=https://nvt-broker.custom-ns.svc:7347 \
-    --set-string executionDrivers.guestEnrollment.serverName=nvt-broker.custom-ns.svc \
-    --set-string executionDrivers.guestEnrollment.ca.existingSecret=nvt-broker-tls \
-    --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
-    "${registration_args[@]}" > /dev/null 2> "${EXECUTION_DRIVER_FAILURE}"; then
-    echo "expected invalid guest enrollment registration selection to fail: ${invalid_enrollment_registrations}" >&2
-    exit 1
-  fi
-done
-
-for enrollment_failure in \
-  '--set executionDrivers.guestEnrollment.enabled=true' \
-  '--set executionDrivers.guestEnrollment.enabled=true --set-string executionDrivers.guestEnrollment.brokerURL=http://broker.example --set-string executionDrivers.guestEnrollment.serverName=broker.example --set-string executionDrivers.guestEnrollment.ca.existingSecret=ca --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=auth' \
-  '--set executionDrivers.guestEnrollment.enabled=true --set-string executionDrivers.guestEnrollment.brokerURL=https://broker.example:99999 --set-string executionDrivers.guestEnrollment.serverName=broker.example --set-string executionDrivers.guestEnrollment.ca.existingSecret=ca --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=auth'; do
-  read -r -a enrollment_args <<< "${enrollment_failure}"
-  if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" "${enrollment_args[@]}" > /dev/null 2> "${EXECUTION_DRIVER_FAILURE}"; then
-    echo "expected invalid execution-driver guest enrollment configuration to fail: ${enrollment_failure}" >&2
-    exit 1
-  fi
-done
-
-if [[ "$(id -u)" == "0" ]]; then
-  ELEVATE=()
-elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-  ELEVATE=(sudo -n)
-else
-  echo "operator projection readability test requires root or passwordless sudo" >&2
-  exit 1
-fi
-"${ELEVATE[@]}" python3 - <<'PY'
-import os
-import shutil
-import tempfile
-
-directory = tempfile.mkdtemp(prefix="nvt-operator-projection-")
-try:
-    os.chown(directory, 0, 65532)
-    os.chmod(directory, 0o750)
-    paths = []
-    for name in ("registrations.json", "ca.crt", "auth-token", "gateway-tls.crt", "gateway-tls.key", "gateway-broker-ca.crt"):
-        path = os.path.join(directory, name)
-        with open(path, "wb") as value:
-            value.write(name.encode())
-        os.chown(path, 0, 65532)
-        os.chmod(path, 0o440)
-        paths.append(path)
-
-    child = os.fork()
-    if child == 0:
-        try:
-            os.setgroups([])
-            os.setgid(65532)
-            os.setuid(65532)
-            for path in paths:
-                with open(path, "rb") as value:
-                    if not value.read():
-                        raise RuntimeError("empty projected file")
-        except BaseException:
-            os._exit(1)
-        os._exit(0)
-    _, status = os.waitpid(child, 0)
-    if status != 0:
-        raise SystemExit("UID/GID 65532 could not read group-projected 0440 files")
-finally:
-    shutil.rmtree(directory)
-PY
-
-LONG_DRIVER_NAME="$(printf '%063d' 0 | tr 0 a)"
-LONG_DRIVER_RESOURCE="nvt-ed-$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:56])' "${LONG_DRIVER_NAME}")"
-helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].name="${LONG_DRIVER_NAME}" \
-  > "${EXECUTION_DRIVER_LONG_NAME_RENDER}"
-grep -q "name: \"${LONG_DRIVER_RESOURCE}\"" "${EXECUTION_DRIVER_LONG_NAME_RENDER}"
-grep -q "serviceAccountName: \"${LONG_DRIVER_RESOURCE}\"" "${EXECUTION_DRIVER_LONG_NAME_RENDER}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].image=registry.example.test/nvt/fake-driver:latest \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "floating execution-driver image tag was accepted" >&2
-  exit 1
-fi
-grep -q 'image must be pinned by lowercase sha256 digest' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].resources.requests.cpu=0 \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "zero execution-driver CPU request was accepted" >&2
-  exit 1
-fi
-grep -q 'resources.requests.cpu must be a positive Kubernetes quantity' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].resources.limits.memory=-1Gi \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "negative execution-driver memory limit was accepted" >&2
-  exit 1
-fi
-grep -q 'resources.limits.memory must be a positive Kubernetes quantity' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].resources.requests.cpu=2 \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "execution-driver CPU request above its limit was accepted" >&2
-  exit 1
-fi
-grep -q 'resource requests must not exceed limits' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].resources.requests.memory=1Gi \
-  --set-string executionDrivers.registrations[0].resources.limits.memory=512Mi \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "execution-driver memory request above its limit was accepted" >&2
-  exit 1
-fi
-grep -q 'resource requests must not exceed limits' "${EXECUTION_DRIVER_FAILURE}"
-
-LARGE_DRIVER_ARGUMENT="$(python3 -c 'print("x" * 16384)')"
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].command[1]="${LARGE_DRIVER_ARGUMENT}" \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "oversized execution-driver command was accepted" >&2
-  exit 1
-fi
-grep -q 'command exceeds the 16 KiB aggregate bound' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].passEnv[1]=NVT_EXECUTION_DRIVER_STATE_DIR \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "reserved execution-driver state environment was accepted" >&2
-  exit 1
-fi
-grep -q 'environment allowlist contains an invalid name' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[1].name=fake-east \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "duplicate execution-driver registration was accepted" >&2
-  exit 1
-fi
-grep -q 'registration names must be unique' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set executionDrivers.registrations[0].serviceAccount.create=false \
-  --set-string executionDrivers.registrations[0].serviceAccount.name=fake-west-workload-identity \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "shared execution-driver ServiceAccount was accepted" >&2
-  exit 1
-fi
-grep -q 'registrations must use distinct ServiceAccounts' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].serviceAccount.podLabels.app\\.kubernetes\\.io/name=other-driver \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "reserved execution-driver workload label was accepted" >&2
-  exit 1
-fi
-grep -q 'workload-identity Pod label uses a reserved key' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].storage.size=512Mi \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "undersized execution-driver storage was accepted" >&2
-  exit 1
-fi
-grep -q 'storage.size must be between 1Gi and 1Ti' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].storage.existingClaim=driver-state \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "ambiguous execution-driver storage was accepted" >&2
-  exit 1
-fi
-grep -q 'existing storage claim is invalid' "${EXECUTION_DRIVER_FAILURE}"
-
-if helm template nvt "${CHART}" -n custom-ns \
-  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
-  --set-string executionDrivers.registrations[0].storage.size= \
-  --set-string executionDrivers.registrations[0].storage.storageClassName= \
-  --set-string executionDrivers.registrations[0].storage.existingClaim=shared-driver-state \
-  --set-string executionDrivers.registrations[1].storage.existingClaim=shared-driver-state \
-  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
-  echo "shared execution-driver existing storage claim was accepted" >&2
-  exit 1
-fi
-grep -q 'registrations must use distinct existing storage claims' "${EXECUTION_DRIVER_FAILURE}"
 if grep -q 'NVT_BRANDING_CONFIGMAP\|NVT_GATEWAY_BRANDING_DIR\|name: nvt-branding' "${DEFAULT_RENDER}"; then
   echo "default render unexpectedly enables custom branding" >&2
   exit 1
@@ -1364,18 +677,6 @@ fi
 grep -q 'operator.image must use the 0.2 repository/tag/pullPolicy map; migrate 0.1 scalar image values before upgrading' "${LEGACY_IMAGE_FAILURE}"
 
 grep -q 'name: default-codex' "${PROFILE_RENDER}"
-grep -q 'principalParallelism:' "${PROFILE_RENDER}"
-grep -q 'defaultMaxParallelism: 2' "${PROFILE_RENDER}"
-grep -A8 'principalParallelism:' "${PROFILE_RENDER}" | grep -q 'maxParallelism: 4'
-if grep -q 'principalParallelism:' "${SCHEDULE_LEGACY_RENDER}"; then
-  echo "default schedule unexpectedly enabled per-principal capacity" >&2
-  exit 1
-fi
-grep -A10 'executionClasses:' "${PROFILE_RENDER}" | grep -q 'name: vm-standard'
-grep -A10 'executionClasses:' "${PROFILE_RENDER}" | grep -q 'driver: example-vm'
-grep -A10 'executionClasses:' "${PROFILE_RENDER}" | grep -q 'isolation: required'
-grep -A3 '^      execution:' "${PROFILE_RENDER}" | grep -q 'kind: pod'
-grep -A3 '^      execution:' "${PROFILE_RENDER}" | grep -q 'driver: kubernetes'
 grep -q 'provider: codex-main' "${PROFILE_RENDER}"
 grep -q 'provider: github-main-app' "${PROFILE_RENDER}"
 grep -q 'egressMaxConcurrentTunnels: 512' "${PROFILE_RENDER}"
@@ -1414,6 +715,9 @@ grep -A5 'workspace:' "${PROFILE_RENDER}" | grep -q 'storageClassName: managed-c
 grep -A3 'preparations:' "${PROFILE_RENDER}" | grep -q 'operation: identity'
 grep -A3 'workspaceInstructions: |' "${PROFILE_RENDER}" | grep -q 'Follow the administrator-owned repository workflow.'
 grep -A3 'workspaceInstructions: |' "${PROFILE_RENDER}" | grep -q 'Keep changes focused and run repository checks.'
+helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/dynamic-principal-values.yaml" > "${DYNAMIC_PRINCIPAL_RENDER}"
+helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/dynamic-principal-values.yaml" \
+  --set-string broker.dynamicAccountAssertionRotationEpoch=epoch-2 > "${DYNAMIC_PRINCIPAL_ROTATED_RENDER}"
 if grep -Eq 'principalCredentialSelection|principal-account-client|NVT_PRINCIPAL_ACCOUNT' "${DEFAULT_RENDER}"; then
   echo "default render unexpectedly enabled dynamic operator resolution" >&2
   exit 1
@@ -1573,92 +877,6 @@ if grep -q 'secretKeyRef:' "${GATEWAY_RENDER}"; then
   echo "gateway auth.mode=none must not render auth Secret refs" >&2
   exit 1
 fi
-if grep -q 'native-session\|native-workspace\|NVT_GATEWAY_NATIVE_SESSION\|NVT_GATEWAY_NATIVE_WORKSPACE\|/var/run/nvt-agent/native-session' "${GATEWAY_RENDER}"; then
-  echo "default gateway rendering unexpectedly enabled native sessions" >&2
-  exit 1
-fi
-
-python3 - "${GATEWAY_NATIVE_SESSION_RENDER}" <<'PY'
-import sys
-import yaml
-
-documents = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
-deployment = next(item for item in documents if item.get("kind") == "Deployment" and item["metadata"]["name"] == "nvt-agent-gateway")
-service = next(item for item in documents if item.get("kind") == "Service" and item["metadata"]["name"] == "nvt-agent-gateway")
-pod = deployment["spec"]["template"]["spec"]
-assert pod["securityContext"] == {
-    "runAsNonRoot": True,
-    "runAsUser": 65532,
-    "runAsGroup": 65532,
-    "fsGroup": 65532,
-    "fsGroupChangePolicy": "OnRootMismatch",
-    "seccompProfile": {"type": "RuntimeDefault"},
-}
-volumes = {item["name"]: item for item in pod["volumes"]}
-assert volumes["native-session-tls"]["secret"] == {
-    "secretName": "nvt-gateway-native-session-tls",
-    "defaultMode": 0o440,
-    "items": [{"key": "server.crt", "path": "tls.crt"}, {"key": "server.key", "path": "tls.key"}],
-}
-assert volumes["native-session-broker-ca"]["secret"] == {
-    "secretName": "nvt-broker-tls",
-    "defaultMode": 0o440,
-    "items": [{"key": "ca.crt", "path": "ca.crt"}],
-}
-container = pod["containers"][0]
-assert container["securityContext"] == {
-    "allowPrivilegeEscalation": False,
-    "readOnlyRootFilesystem": True,
-    "capabilities": {"drop": ["ALL"]},
-}
-args = container["args"]
-for expected in (
-    "--native-session-enabled=true",
-    "--native-session-listen-addr=:7443",
-    "--native-session-broker-url=https://nvt-broker.custom-ns.svc.cluster.local:7347",
-    "--native-session-broker-server-name=nvt-broker.custom-ns.svc.cluster.local",
-    "--native-session-authentication-timeout-seconds=7",
-    "--native-session-revalidation-interval-seconds=45",
-    "--native-workspace-enabled=true",
-    "--native-workspace-listen-addr=:7444",
-):
-    assert expected in args
-assert not any("credential" in item or "bearer" in item or "token" in item for item in args)
-assert {item["name"] for item in container["ports"]} == {"http", "native-session", "native-workspace"}
-ports = {item["name"]: item for item in service["spec"]["ports"]}
-assert ports["native-session"] == {"name": "native-session", "port": 7443, "targetPort": 7443, "appProtocol": "tls"}
-assert ports["native-workspace"] == {"name": "native-workspace", "port": 7444, "targetPort": 7444, "appProtocol": "tls"}
-PY
-
-for invalid_workspace_args in \
-  '--set gateway.nativeWorkspace.enabled=true' \
-  '--set gateway.enabled=true --set gateway.nativeWorkspace.enabled=true' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeWorkspace.enabled=true --set gateway.nativeWorkspace.port=0 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeWorkspace.enabled=true --set gateway.nativeWorkspace.port=7443 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeWorkspace.enabled=true --set gateway.nativeWorkspace.port=8080 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeWorkspace.enabled=true --set gateway.nativeWorkspace.port=80 --set gateway.service.port=80 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca'; do
-  if helm template nvt "${CHART}" -n custom-ns ${invalid_workspace_args} > /dev/null 2> "${GATEWAY_NATIVE_SESSION_FAILURE}"; then
-    echo "expected invalid gateway native-workspace configuration to fail: ${invalid_workspace_args}" >&2
-    exit 1
-  fi
-done
-
-for invalid_args in \
-  '--set gateway.nativeSession.enabled=true' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.replicas=0 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.replicas=2 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.port=8080 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.port=80 --set gateway.service.port=80 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=http://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:99999 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=other.example --set gateway.nativeSession.ca.existingSecret=ca' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca --set gateway.nativeSession.authenticationTimeoutSeconds=0' \
-  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca --set gateway.nativeSession.revalidationIntervalSeconds=61'; do
-  if helm template nvt "${CHART}" -n custom-ns ${invalid_args} > /dev/null 2> "${GATEWAY_NATIVE_SESSION_FAILURE}"; then
-    echo "expected invalid gateway native-session configuration to fail: ${invalid_args}" >&2
-    exit 1
-  fi
-done
 
 require_resource "${GATEWAY_PATH_RENDER}" Deployment nvt-agent-gateway
 require_resource "${GATEWAY_PATH_RENDER}" Service nvt-agent-gateway
@@ -1856,7 +1074,6 @@ require_file "${CHART}/crds/nvt.dev_agentschedules.yaml"
 cmp -s "${ROOT}/operator/config/crd/bases/nvt.dev_agentruns.yaml" "${CHART}/crds/nvt.dev_agentruns.yaml"
 cmp -s "${ROOT}/operator/config/crd/bases/nvt.dev_agentschedules.yaml" "${CHART}/crds/nvt.dev_agentschedules.yaml"
 grep -A10 'preparations:' "${CHART}/crds/nvt.dev_agentruns.yaml" | grep -q -- '- identity'
-grep -A35 'nativeGuestBinding:' "${CHART}/crds/nvt.dev_agentruns.yaml" | grep -q 'guestInstanceID:'
 grep -A10 'preparations:' "${CHART}/crds/nvt.dev_agentschedules.yaml" | grep -q -- '- identity'
 
 rendered_secret_names() {
@@ -2049,59 +1266,6 @@ missing_resource "${DEFAULT_RENDER}" PersistentVolumeClaim nvt-broker-state
 grep -q 'emptyDir: {}' "${DEFAULT_RENDER}"
 if grep -q 'seed_supervisor.py\|NVT_BROKER_SEED_DIR\|name: broker-state-seed' "${DEFAULT_RENDER}"; then
   echo "default broker rendering must preserve the unsupervised local/ephemeral path" >&2
-  exit 1
-fi
-if grep -q 'NVT_BROKER_GUEST_ENROLLMENT\|guest-enrollment-orchestrator-auth' "${DEFAULT_RENDER}"; then
-  echo "default broker rendering must not enable guest enrollment or project its auth Secret" >&2
-  exit 1
-fi
-
-require_resource "${BROKER_ENROLLMENT_RENDER}" PersistentVolumeClaim nvt-broker-state
-grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_ENABLED' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: "true"'
-grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_DB' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: /state/guest-enrollment.sqlite3'
-grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_EXCHANGE_URL' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: "https://broker.example.test/v1/guest-enrollment/exchange"'
-grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_ORCHESTRATOR_TOKEN_FILE' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: /guest-enrollment-auth/token'
-grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_RUNTIME_IDENTITY_HISTORY_CAPACITY' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: "2000000"'
-grep -q 'secretName: "nvt-guest-enrollment-orchestrator"' "${BROKER_ENROLLMENT_RENDER}"
-grep -q 'key: "control-plane-token"' "${BROKER_ENROLLMENT_RENDER}"
-grep -q 'defaultMode: 0400' "${BROKER_ENROLLMENT_RENDER}"
-grep -q 'mountPath: /guest-enrollment-auth' "${BROKER_ENROLLMENT_RENDER}"
-grep -q 'readinessProbe:' "${BROKER_ENROLLMENT_RENDER}"
-grep -q 'restart both the broker and operator Deployments' "${CHART}/README.md"
-if has_resource "${BROKER_ENROLLMENT_RENDER}" Secret nvt-guest-enrollment-orchestrator; then
-  echo "guest enrollment must reference, never create, the orchestrator auth Secret" >&2
-  exit 1
-fi
-
-for enrollment_failure in \
-  '--set broker.guestEnrollment.enabled=true' \
-  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set broker.tls.enabled=false' \
-  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=http://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment' \
-  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test:0/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment' \
-  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test:99999/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment' \
-  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment --set broker.guestEnrollment.runtimeIdentityHistoryCapacity=19999' \
-  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment --set broker.guestEnrollment.runtimeIdentityHistoryCapacity=10000001' \
-  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=Invalid_Name'; do
-  read -r -a enrollment_args <<< "${enrollment_failure}"
-  if helm template nvt "${CHART}" -n custom-ns "${enrollment_args[@]}" > /dev/null 2> "${BROKER_ENROLLMENT_FAILURE}"; then
-    echo "expected invalid guest enrollment configuration to fail rendering: ${enrollment_failure}" >&2
-    exit 1
-  fi
-done
-if ! helm template nvt "${CHART}" -n custom-ns \
-  --set broker.guestEnrollment.enabled=true \
-  --set broker.persistence.enabled=true \
-  --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test:65535/v1/guest-enrollment/exchange \
-  --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment \
-  > /dev/null 2> "${BROKER_ENROLLMENT_FAILURE}"; then
-  echo "expected maximum valid guest enrollment exchange port to render" >&2
-  exit 1
-fi
-if helm template nvt "${CHART}" -n custom-ns \
-  --set broker.enabled=false \
-  --set broker.guestEnrollment.enabled=true \
-  > /dev/null 2> "${BROKER_ENROLLMENT_FAILURE}"; then
-  echo "expected guest enrollment with the broker disabled to fail rendering" >&2
   exit 1
 fi
 

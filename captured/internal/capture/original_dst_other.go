@@ -5,7 +5,7 @@ package capture
 import (
 	"net"
 
-	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress/captureinspect"
+	"github.com/mirkoSekulic/nvt-agent/captured/internal/captureinspect"
 )
 
 func originalDestination(connection *net.TCPConn) (string, error) {

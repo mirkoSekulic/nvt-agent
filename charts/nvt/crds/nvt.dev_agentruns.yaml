@@ -41,8 +41,6 @@ spec:
                   message: spec.egressMaxConcurrentTunnels requires spec.egressTransport forward-proxy or transparent
                 - rule: "has(self.profileProvenance) == has(oldSelf.profileProvenance) && (!has(self.profileProvenance) || self.profileProvenance == oldSelf.profileProvenance)"
                   message: spec.profileProvenance is immutable
-                - rule: "has(self.execution) == has(oldSelf.execution) && (!has(self.execution) || self.execution == oldSelf.execution)"
-                  message: spec.execution is immutable
                 - rule: "self.workspace == oldSelf.workspace"
                   message: spec.workspace is immutable
                 - rule: "has(self.egress) == has(oldSelf.egress) && (!has(self.egress) || self.egress == oldSelf.egress)"
@@ -53,30 +51,15 @@ spec:
                   message: spec.egressTransport is immutable
               properties:
                 execution:
-                  description: Immutable operator-resolved execution backend selection. Omitted means the built-in Kubernetes Pod backend.
+                  description: Deprecated tombstone used only to fail closed for AgentRuns created by the removed external execution stack.
                   type: object
-                  required:
-                    - kind
-                    - driver
-                  x-kubernetes-validations:
-                    - rule: "self.driver == 'kubernetes' ? self.kind == 'pod' && !has(self.classRef) && !has(self.configuration) : has(self.classRef) && has(self.configuration)"
-                      message: kubernetes requires pod with no class; external drivers require classRef and configuration
                   properties:
                     kind:
                       type: string
-                      enum:
-                        - pod
-                        - vm
                     driver:
                       type: string
-                      minLength: 1
-                      maxLength: 63
-                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
                     classRef:
                       type: string
-                      minLength: 1
-                      maxLength: 63
-                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
                     configuration:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
@@ -513,51 +496,6 @@ spec:
                   format: date-time
                 reason:
                   type: string
-                nativeGuestBinding:
-                  description: Operator-owned non-secret exact native guest routing identity.
-                  type: object
-                  required:
-                    - agentRunUID
-                    - executionID
-                    - driverRegistration
-                    - desiredGeneration
-                    - guestInstanceID
-                  properties:
-                    agentRunUID:
-                      type: string
-                      minLength: 1
-                      maxLength: 128
-                    executionID:
-                      type: string
-                      minLength: 1
-                      maxLength: 256
-                    driverRegistration:
-                      type: string
-                      minLength: 1
-                      maxLength: 63
-                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-                    desiredGeneration:
-                      type: integer
-                      format: int64
-                      minimum: 1
-                    guestInstanceID:
-                      type: string
-                      minLength: 1
-                      maxLength: 256
-                nativeEgressAttachment:
-                  description: Operator-owned non-secret generation and digest of the current native egress attachment plan.
-                  type: object
-                  required:
-                    - generation
-                    - digest
-                  properties:
-                    generation:
-                      type: integer
-                      format: int64
-                      minimum: 1
-                    digest:
-                      type: string
-                      pattern: '^sha256:[0-9a-f]{64}$'
                 conditions:
                   type: array
                   items:

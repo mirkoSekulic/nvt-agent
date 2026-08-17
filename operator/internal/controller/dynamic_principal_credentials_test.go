@@ -340,7 +340,7 @@ func TestStaticProfileAdmissionDoesNotRequirePrincipalAccountResolver(t *testing
 func TestDynamicPrincipalProvenanceCarriesScheduleGeneration(t *testing.T) {
 	schedule := testDynamicPrincipalSchedule()
 	resolved := &ResolvedExecutionProfile{
-		Profile: schedule.Spec.Profiles[0], Execution: &nvtv1alpha1.AgentRunExecution{Kind: nvtv1alpha1.AgentRunExecutionPod, Driver: "kubernetes"},
+		Profile:             schedule.Spec.Profiles[0],
 		PrincipalCredential: &nvtv1alpha1.AgentRunPrincipalCredentialProvenance{Template: "work", ProviderInstanceID: dynamicProvider, Generation: 9},
 	}
 	run, err := buildProfiledAgentRun(schedule, resolved, schedule.Spec.ProducerPolicies[0].Identity,

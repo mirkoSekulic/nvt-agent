@@ -24,11 +24,11 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.69`; otherwise the API server may prune the
-operator-owned native guest routing status or reject new AgentRun and schedule
-fields such as container capabilities, required Docker networks, the Docker
-kernel-log device control, dedicated Docker storage size, broker grant
-preparations, profile workspace instructions, or workflow producer policies.
+of, upgrading to chart `0.8.70`; otherwise the API server will prune or reject
+new AgentRun and schedule fields such as container capabilities, required
+Docker networks, the Docker kernel-log device control, dedicated Docker
+storage size, broker grant preparations, profile workspace instructions, or
+workflow producer policies.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
 install and upgrade:
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.69 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.70 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.69 --namespace nvt --create-namespace
+  --version 0.8.70 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -66,20 +66,16 @@ loopback and link-local/metadata ranges but cannot infer cluster-specific CIDRs.
 The published chart's `appVersion` is the immutable image tag for its tested
 platform bundle. Chart `0.2.0` published from commit `943d5ba...`, for example,
 uses `0.2.0-943d5ba` for runtime, DinD, broker, egressd, captured, operator,
-gateway, producer, execution-driver-host, and the separately deployed native-
-egress-relay image. Empty chart component tags
-default to `Chart.AppVersion`; repository, tag, and pull policy remain
-independently overridable. The QEMU reference driver is a test implementation,
-not a coordinated product image.
+gateway, credential-portal, and producer images. Empty component tags default to `Chart.AppVersion`;
+repository, tag, and pull policy remain independently overridable.
 
 `dind.image` is the coordinated Docker sidecar image. It contains the ext4 and
 loop-device tools used only when an AgentRun's Docker data root is backed by
 Kata virtiofs; it performs no per-run package installation.
 
 All default repositories are under `ghcr.io/mirkosekulic`. The chart is
-published only after all ten image manifests and the native host-bundle OCI
-artifact exist and can be fetched anonymously with isolated credential-free
-clients. The release reuses an
+published only after all nine manifests exist and can be fetched anonymously
+with an isolated credential-free Docker configuration. The release reuses an
 existing image tag only when its OCI source, full revision, and version labels
 match. GHCR package writers are trusted: matching labels establish coordinated
 release metadata, not byte-for-byte content identity against copied labels.
@@ -184,15 +180,12 @@ The chart projects only a rotating `nvt-operator` audience token. The default
 producer AgentRun runtime image is the coordinated `runtime.image`; set
 `producer.agentRun.runtimeImage` only for an intentional override.
 
-Scheduling reactions default to enabled. They are derived only from the
-operator's schedule-admission response: confirmed scheduling and
-`duplicate-work` receive the accepted reaction, while only recognized
-definitive denials receive the rejected reaction. Deferred or uncertain
-outcomes receive no reaction. Posting is bounded and best-effort after
-scheduling/cursor behavior is decided; failures never change that behavior.
-The GitHub App needs **Issues: write** permission. Set `enabled: false` to opt
-out, or choose any GitHub-supported reaction name for `accepted` and
-`rejected`.
+Scheduling reactions default to enabled and are derived only from the
+operator's schedule-admission response. Confirmed scheduling and
+`duplicate-work` receive the accepted reaction; recognized definitive denials
+receive the rejected reaction. Deferred or uncertain outcomes receive none.
+Posting is bounded and best-effort and never changes scheduling or cursor
+behavior. The GitHub App needs **Issues: write** permission.
 
 Legacy/direct producer payloads can opt into AgentRun-scoped persistence:
 
@@ -232,6 +225,41 @@ broker:
     existingSecret: ""
 ```
 
+Dynamic principal-owned accounts are a separate opt-in use of broker state.
+They require broker TLS, persistence, and a pre-created Secret referenced by
+`broker.envSecretName`; enrolled credentials never enter Helm values,
+ConfigMaps, Kubernetes Secrets, annotations, or events:
+
+```yaml
+broker:
+  envSecretName: nvt-broker-dynamic-account-auth
+  tls: {enabled: true}
+  persistence: {enabled: true}
+  config:
+    providers: []
+    dynamic-accounts:
+      enabled: true
+      state-dir: /state/principal-accounts
+      authentication:
+        hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+        max-eligibility-lease-seconds: 3600
+      provider-templates:
+        - name: approved-provider
+          plugin: company-oauth
+          credential-config-key: credentials-file
+          config: {}
+      credential-templates:
+        - name: member
+          label: Member
+          enrollment-adapter: company-oauth-file
+          provider-template: approved-provider
+```
+
+The HMAC value must be at least 32 bytes. Dynamic accounts remain absent unless
+explicitly enabled. Registry/storage corruption makes the broker unready, but
+one degraded account fails only its authenticated readiness and resolution;
+other dynamic accounts and static providers remain routable.
+
 Without `existingSecret`, Helm creates and preserves a self-signed CA and
 serving certificate across normal upgrades. The broker Deployment checksum
 rolls the Pod when the material changes.
@@ -267,52 +295,6 @@ broker:
     storageClassName: ""
     existingClaim: ""
 ```
-
-Dynamic principal-owned accounts are a separate opt-in use of broker state.
-They require broker TLS, persistence, and a pre-created Secret exposed through
-`broker.envSecretName`. That Secret supplies only the short-lived principal
-assertion HMAC key; enrolled credential documents are never Helm values,
-ConfigMaps, Kubernetes Secrets, annotations, or events. For example:
-
-```yaml
-broker:
-  envSecretName: nvt-broker-dynamic-account-auth
-  tls:
-    enabled: true
-  persistence:
-    enabled: true
-  config:
-    providers: []
-    dynamic-accounts:
-      enabled: true
-      state-dir: /state/principal-accounts
-      authentication:
-        hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
-        max-eligibility-lease-seconds: 3600
-      provider-templates:
-        - name: approved-provider
-          plugin: company-oauth
-          credential-config-key: credentials-file
-          config: {}
-      credential-templates:
-        - name: member
-          label: Member
-          enrollment-adapter: company-oauth-file
-          provider-template: approved-provider
-```
-
-The key named by `hmac-key-env` must exist in `broker.envSecretName` and contain
-at least 32 bytes. The chart does not create it. Dynamic accounts remain absent
-unless explicitly enabled, and static provider paths are unchanged. See
-[`protocol/broker.md`](../../protocol/broker.md#dynamic-principal-account-endpoints)
-for the authenticated API and atomic recovery contract.
-
-The broker readiness probe treats registry/storage integrity as shared state,
-but does not aggregate every principal's credential or provider health. A
-degraded dynamic account fails only its authenticated readiness and resolution;
-its owner retains reconnect/revoke recovery while other accounts and static
-providers stay routable. Registry corruption or writer uncertainty still makes
-the pod unready.
 
 Optionally reconcile credential seeds from an existing Kubernetes Secret:
 
@@ -353,93 +335,6 @@ provider-owned readiness contract, then removes it. The chart keeps a single
 broker replica and `Recreate` strategy so there is still exactly one writer for
 provider state.
 
-### Native guest enrollment issuer
-
-The provider-neutral VM guest enrollment issuer is disabled by default. It is
-enabled only with persistent broker state, TLS, a canonical broker-owned
-exchange URL, and a dedicated control-plane bearer token from an existing
-Secret:
-
-```yaml
-broker:
-  persistence:
-    enabled: true
-    size: 1Gi
-  tls:
-    enabled: true
-  guestEnrollment:
-    enabled: true
-    exchangeURL: https://nvt-broker.nvt.svc:7347/v1/guest-enrollment/exchange
-    runtimeIdentityHistoryCapacity: 2000000
-    orchestratorAuth:
-      existingSecret: nvt-guest-enrollment-orchestrator
-      tokenKey: token
-```
-
-The referenced Secret key must contain one 32–4096 byte opaque token using
-letters, digits, `.`, `_`, `~`, or `-`, with no newline. The chart never
-creates or copies that value into a ConfigMap, environment value, AgentRun, or
-agent Pod. The broker and operator each read the projected bearer once at
-startup. Rotation is therefore one coordinated maintenance operation: update
-the shared Secret, then restart both the broker and operator Deployments.
-Restarting only one side creates a temporary authorization mismatch that fails
-closed and can block enrollment cleanup until the other Deployment restarts.
-
-The issuer stores only token/runtime-identity digests and bounded lifecycle
-metadata in `/state/guest-enrollment.sqlite3`. It uses SQLite transactions and
-therefore shares the broker's existing one-replica, `Recreate`, single-writer
-contract. Do not scale the broker or mount the same database through multiple
-broker Pods. Enrolled guests can authenticate and atomically rotate the current
-opaque identity through the same TLS broker; no plaintext credential storage
-is introduced. The canonical URL must resolve to
-this issuer over authenticated HTTPS. Enabling this issuer alone does not route
-AgentRuns to VMs.
-
-`runtimeIdentityHistoryCapacity` is the practical aggregate predecessor-digest
-storage bound. Each accepted enrollment reserves 20,000 entries atomically, so
-the default `2000000` admits 100 complete lifecycles and cannot be consumed
-first-come by rotations from another lifecycle. Values from 20,000 through
-10,000,000 are accepted; size the broker PVC for the selected maximum. New
-enrollment fails before an envelope is returned if a complete reservation is
-unavailable. Expiry before exchange atomically releases the unused reservation;
-an issued runtime identity retains its allowance until exact revocation. The
-recommended 30-minute rotation interval provides a one-year
-planning horizon only when clients follow it; the broker does not enforce that
-interval. Replace/re-enroll guests before their reservation is exhausted.
-
-The operator bridge is a separate opt-in and uses explicit broker trust plus
-the same dedicated orchestrator Secret:
-
-```yaml
-executionDrivers:
-  guestEnrollment:
-    enabled: true
-    registrations: [qemu-lab]
-    brokerURL: https://nvt-broker.nvt.svc:7347
-    serverName: nvt-broker.nvt.svc
-    ca:
-      existingSecret: nvt-broker-tls
-      key: ca.crt
-    orchestratorAuth:
-      existingSecret: nvt-guest-enrollment-orchestrator
-      tokenKey: token
-    requestTimeoutSeconds: 30
-    handoffTimeoutSeconds: 30
-    ttlSeconds: 300
-```
-
-The operator receives the orchestrator bearer; driver hosts receive only their
-existing per-registration authentication and the one-time envelope addressed
-to that exact registration. The bearer is never passed to a driver. Only exact
-names in `guestEnrollment.registrations` receive the sensitive handoff socket;
-other external registrations retain the ordinary execution-driver protocol.
-The controller activates enrollment only for external `kind: vm` runs. Keep
-this configuration and registration available while any AgentRun retains the
-`nvt.dev/agentrun-guest-enrollment` finalizer: cleanup must acknowledge broker
-execution-scope revocation, exact-driver deletion, and broker cleanup completion
-before finalizer removal. Expiry maintenance is automatic, but elapsed time
-alone never erases an uncompleted revocation.
-
 ## Agent Egress
 
 Direct mode remains the default:
@@ -468,287 +363,38 @@ CRD default, which is direct.
 
 ## Execution profiles
 
-`agentSchedule.template`, optional `executionClasses`, `profiles`,
-`profileSelection` (or explicitly enabled `principalCredentialSelection`), and either the legacy
+`agentSchedule.template`, `profiles`, `profileSelection` (or explicitly enabled
+`principalCredentialSelection`), and either the legacy
 `allowedProducers` list or typed workflow `producerPolicies` configure profiled
 admission. Empty values
 preserve legacy full-`AgentRun` admission. Profiled admission requires a
 projected ServiceAccount token with audience `nvt-operator`; see the
 [AgentSchedule contract](../../operator/docs/agentschedule.md).
 
-`agentSchedule.maxParallelism` is always the schedule-wide ceiling. Optional
-`agentSchedule.principalParallelism` adds a positive default per exact
-`issuer` + `subject` and up to 256 exact-principal overrides. Omit the object to
-preserve global-only admission. Overrides never bypass the global ceiling and
-do not use mutable display names or provider-specific usernames.
-The chart fixes the operator at one replica and uses `Recreate` unconditionally
-because schedule admission locking is process-local. An upgrade can briefly
-pause admission, but old and new operator binaries never admit concurrently.
+`agentSchedule.maxParallelism` is the schedule-wide ceiling. Optional
+`agentSchedule.principalParallelism` adds a positive default per exact issuer
+and immutable subject plus up to 256 exact-principal overrides. Display names,
+provider usernames, profiles, and producers never form the capacity key. The
+operator remains single-replica with `Recreate` because admission locking is
+process-local.
 
-Dynamic principal-owned schedule resolution is disabled by default. Enable
-`operator.principalAccounts` and map public broker credential templates only to
-complete administrator-owned mediated profiles. Each mapped profile uses the
-reserved exact scalar `$principal-account` in at least one zero-secret broker
-grant; the trusted operator replaces it with the broker's opaque instance ID.
-Producer policies must list exact allowed canonical principal issuers. Producers
-still send only immutable principal facts, workflow, work metadata, and prompt;
-they cannot choose the template, provider, generation, profile, grants,
-capabilities, runtime, or egress policy.
+Dynamic principal resolution is disabled by default. Enable
+`operator.principalAccounts`, allow exact canonical issuers in producer
+policies, and map public broker credential templates only to complete mediated
+profiles. The operator replaces the reserved exact `$principal-account`
+placeholder with the broker's opaque provider instance; producers cannot choose
+the template, provider, generation, profile, grants, runtime, or egress policy.
+The broker URL must use verified TLS, and readiness/resolution disagreement or
+an expired eligibility lease fails closed without static fallback. Broker CA
+and assertion keys are mounted only into the operator, never producers or
+AgentRun Pods.
 
-Issuer policy is only a producer-domain constraint. Current user eligibility is
-a bounded signed lease created by the portal after the shared OAuth policy
-passes and retained as a non-secret expiry by the broker. Operator resolution
-fails closed as `principal-not-eligible` after expiry or explicit policy
-revocation; a fresh eligible portal login renews it. Configure the portal lease
-no longer than its session and the broker's
-`max-eligibility-lease-seconds` bound. Connect/reconnect retains the exact
-expiry from the successful policy evaluation and cannot extend it; a shorter
-lease therefore requires fresh login before later dynamic actions.
-
-The operator's broker CA and assertion key are projected only into the operator
-manager. They are never mounted into producers or AgentRun Pods. The broker URL
-must be an HTTPS origin, responses and deadlines are bounded, and readiness plus
-resolution must agree exactly. Failures have stable non-sensitive producer
-reasons and never fall back to a static/shared provider. Existing static
-profile selection and legacy admission do not load or contact this client.
-
-The startup-only operator and broker assertion-key consumers share
-`broker.dynamicAccountAssertionRotationEpoch` (the portal uses it too when
-enabled). Rotate by updating the externally managed assertion Secret and
-incrementing this non-secret epoch in one GitOps change, then wait for every
-enabled consumer rollout. The manifest contains neither the key nor a hash of
-it; a transient mixed generation rejects assertions closed.
-
-Adoption does not move credentials through Helm or CRDs: enable the broker and
-portal account flow, let the principal establish a ready broker-owned account,
-add the operator client Secret/CA references and a template-to-profile mapping,
-then enable `principalCredentialSelection`. Existing static schedules can
-remain alongside a separate dynamic schedule. Rollback disables dynamic
-schedule admission and the operator client; it does not delete broker account
-state or mutate already accepted AgentRuns. Do not replace the dynamic schedule
-with a shared static fallback for affected principals.
-
-On upgrade, account metadata written before eligibility leases is preserved
-with an expired lease and therefore cannot admit new dynamic runs. Each owner
-must complete one currently eligible portal login to renew that exact account;
-no credential upload or reconnect is required. Existing AgentRuns continue
-using their frozen provider generation during this adoption step.
-
-Safe credential-template switching is a separate opt-in layered on dynamic
-accounts. Configure broker `dynamic-accounts.template-switching`,
-`operator.principalAccounts.templateSwitching`, and
-`credentialPortal.dynamic.templateSwitch` together. The broker/operator use a
-dedicated HMAC key distinct from the portal principal assertion key. The portal
-sends the operator only an opaque, target-free broker request id. The operator
-serializes its no-active-AgentRun proof with every dynamic schedule admission
-through the broker, commits only when the exact issuer+subject owns no
-non-terminal run, and otherwise denies before the credential runner starts.
-Neither browser nor producer supplies a transition, template, provider,
-profile, grant, capability, runtime, or egress setting. Disabling this layer
-restores the locked-tombstone behavior without changing static schedules.
-The chart requires exactly one operator replica while this process-local
-admission server owns the Kubernetes-side proof boundary.
-
-The coordination key is another startup-only external Secret value. Rotate it
-in the same GitOps change as the principal assertion key when practical and
-always increment `broker.dynamicAccountAssertionRotationEpoch`; the epoch rolls
-the broker, portal, and operator together without exposing or hashing key
-material. During a mixed rollout coordination and admission fail closed.
-
-Omitted profile execution keeps the existing Kubernetes Pod path. Operators
-may spell that selection explicitly as `execution: {kind: pod, driver:
-kubernetes}`. External drivers select one exact entry from
-`agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
-the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.59`
-reconciles external AgentRuns only through the exact matching registered host.
-Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
-credentials, or extra workload.
-
-After a VM driver's exact guest bootstrap handoff is accepted, the operator
-publishes only that guest's non-secret complete routing identity in
-`AgentRun.status.nativeGuestBinding`. It clears the field before replacement
-or cleanup. No enrollment/runtime/session credential, endpoint, or provider
-state enters status, and Pod/Kata runs leave the field absent.
-For mediated external VMs, `status.nativeEgressAttachment` likewise contains
-only the operator-owned plan generation and SHA-256 digest. The complete public
-trust/destination plan remains an operator-to-driver desired member; producers
-cannot write either status field.
-
-Native VM mediated-egress relay deployment and target publication are
-separately opt-in through `nativeEgressRelay.enabled`. The relay starts
-unpublished and deny-all, and the operator publishes only Ready per-run egressd
-targets keyed by the complete accepted guest binding. Existing administrator
-Secrets provide the guest/control TLS identities, control bearer, and broker
-CA. An init container copies projected material into a memory-backed volume
-with owner-only mode for the non-root relay. The bearer is mounted only into
-the relay and operator Pods; the control Service is restricted to the operator
-and is never exposed through the gateway or ingress. Empty
-`data.ingressCIDRs` keeps the guest listener fenced.
-
-Enabled installs also render one operator-only, non-secret native egress
-attachment configuration. `nativeEgressRelay.attachment.generation` is a
-positive installation-owned epoch and must increase whenever relay data
-identity/trust, required destinations, or redirect intent changes.
-`requiredDestinations` contains 2 through 16 unique canonical endpoints and
-must include both `bootstrap` and `control` purposes. The relay data host and
-server name default to the data Service DNS identity. Only the public
-`credentials.dataCAKey` is projected with this configuration; relay control
-credentials stay on their separate mount and never enter execution-driver
-desired state, AgentRun status, or driver Pods.
-
-For mediated external VMs the operator adds this plan only to the exact
-selected driver's desired state and requires its matching infrastructure
-confinement observation before publishing the per-run relay target Ready.
-Direct/non-mediated external runs and Pod/Kata paths omit the member exactly.
-This chart does not add a production provider implementation for redirect
-installation or network confinement.
-
-That root init container reads every relay private key and the control bearer,
-so its default multi-architecture BusyBox image is pinned by an exact
-`sha256` manifest digest. Enabled installs reject an unpinned
-`nativeEgressRelay.initImage` override. Treat any repository/digest change as
-a trusted-supply-chain update and review it together with the init script; a
-mutable tag is not an accepted override. The pin also avoids an implicit
-mutable Docker Hub runtime dependency in coordinated or offline installs once
-the digest-addressed image is mirrored into the installation registry.
-
-The relay and operator load their serving certificates, private keys, control
-bearer, and CA bundles only at process start. Set the required non-secret
-`nativeEgressRelay.rolloutRevision` to one canonical epoch and change it in the
-same Helm upgrade that rotates any referenced control Secret, data-plane TLS
-Secret, control CA, or broker CA. That epoch is stamped onto both Pod templates
-so the two Deployments replace together and fail closed during convergence.
-Both use `Recreate` in this single-process mode, preventing an old and new
-publisher or process-local relay registry from overlapping during the epoch.
-Rotating an external Secret without changing the epoch is unsupported because
-projected-file refresh cannot update already-loaded trust or credentials.
-Changing the init image does not rotate credentials, but it changes the Pod
-template and must remain digest-pinned; credential or CA rotation still
-requires a new rollout epoch in the same upgrade.
-
-This integration does not provide provider NIC confinement or redirect wiring;
-those remain required before a VM can resist bypass by a root-capable guest.
-
-```yaml
-agentSchedule:
-  executionClasses:
-    - name: vm-standard
-      kind: vm
-      driver: example-vm
-      configuration: {cpu: 4}
-  profiles:
-    - name: codex-vm
-      execution: {kind: vm, driver: example-vm, classRef: vm-standard}
-      # remaining profile-owned fields omitted
-```
-
-The matching installation-owned registration uses a complete provider image
-pinned by digest. One workload is created per registration, so two logical
-registrations may reuse the same implementation image without sharing a
-ServiceAccount, infrastructure credential, authentication token, or process:
-
-```yaml
-executionDrivers:
-  registrations:
-    - name: example-vm
-      image: registry.example.test/nvt/example-vm@sha256:<64-lowercase-hex>
-      command: [/usr/local/bin/example-vm-driver]
-      resources:
-        requests: {cpu: 100m, memory: 128Mi}
-        limits: {cpu: "1", memory: 512Mi}
-      serviceAccount:
-        create: true
-        annotations: {} # workload-identity annotations belong here
-        podLabels: {}   # generic identity-webhook opt-in labels, if required
-      # Optional provider-neutral durable convergence/resource storage. A
-      # driver that owns local disks must request a bounded claim or select one
-      # existing claim; omission preserves the previous stateless Pod shape.
-      storage:
-        size: 20Gi
-        storageClassName: ""
-      # Names injected by an approved workload-identity webhook. Every listed
-      # name is required at process start; values are never stored here.
-      passEnv: [PROVIDER_FEDERATED_TOKEN_FILE]
-      secretEnvironment:
-        - name: PROVIDER_CLIENT_SECRET
-          secretName: example-vm-infrastructure
-          key: client-secret
-      secretFiles:
-        - name: provider
-          secretName: example-vm-infrastructure
-          items:
-            - {key: config, path: config.json}
-```
-
-The provider image owns its language runtime and dependencies. A coordinated
-static host binary is copied into the Pod and starts only the explicit command;
-there is no clone, build, package installation, hook, or source acquisition at
-startup. `passEnv` is the exact allowlist for environment added by an approved
-workload-identity webhook; a missing listed name fails process startup.
-Secret-backed environment entries are automatically included in the same
-allowlist. Secret files have fixed mounts below
-`/var/run/secrets/nvt-execution-driver/<name>`; no unlisted host environment
-enters the driver's clean child environment.
-The per-registration HTTPS Service requires its own bearer token and trusts its
-own chart-managed CA; NetworkPolicy admits only the operator Pod. These drivers
-are trusted control-plane extensions, not sandboxes. Infrastructure credentials
-must be scoped to the matching registration. The operator receives only host
-transport CA/token material, never provider credentials.
-
-Registrations are an operational lifecycle commitment. Do not remove or rename
-a registration while an AgentRun still references it: deletion keeps the
-operator finalizer and reports the driver unavailable until the same logical
-registration is restored. Restoring that registration lets level-triggered
-provider cleanup resume; the operator never falls back to Kubernetes or a
-different driver. A driver's ready response is portable execution state only
-and does not publish an external endpoint through the gateway.
-
-The repository's QEMU implementation is a provider-isolated, test-only
-reference driver. CI builds it locally to prove persistent registration
-storage, native linux/amd64 provisioning, one-time guest enrollment, real
-agentd/session readiness, restart recovery, and cleanup. It is not published
-as a coordinated image or supported as a production execution provider. See
-the [QEMU reference-driver contract](../../executiondrivers/qemu/README.md).
-Gateway routing and mediated VM egress remain intentionally outside this
-reference proof.
-
-`activeDeadlineSeconds`, `completedTTLSeconds`, and `failedTTLSeconds` remain
-operator-owned for external runs. When cleanup becomes due, the operator calls
-only that run's exact driver until it reports `deleted`; the external cleanup
-finalizer is not removed on an error. `runRetentionSeconds` independently
-controls how long the terminal AgentRun remains after operational cleanup.
-
-### Native VM host bundle
-
-The coordinated release also publishes
-`ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>` as a generic OCI artifact,
-not a runnable container image. Tags are discovery only. A VM execution class
-must snapshot the complete repository and `sha256` OCI index digest in its
-existing opaque, administrator-owned configuration:
-
-```yaml
-executionClasses:
-  - name: native-vm-small
-    kind: vm
-    driver: example-vm
-    configuration:
-      hostBundle:
-        repository: https://ghcr.io/mirkosekulic/nvt-host-bundle
-        digest: sha256:<64-hex>
-```
-
-The value contains no enrollment credential and is not a producer surface.
-See the [native host-bundle contract](../../protocol/host-bundle.md) for bundle
-contents, native prerequisites, atomic activation, and current limitations.
-
-Helm validates the same load-bearing registration bounds as the host contract:
-the command is capped at 128 arguments and 16 KiB aggregate text, and CPU and
-memory requests/limits must be positive Kubernetes quantities with each request
-no greater than its limit. Kubernetes admission remains authoritative for the
-full syntax of arbitrary annotations, labels, extended resources, and Secret
-object existence; those API-owned checks are not duplicated as a second chart
-policy.
+Safe credential-template switching is separately opt-in. Broker and operator
+coordinate on an exact-principal reservation while the operator proves that no
+matching non-terminal AgentRun exists. The portal supplies only an opaque,
+target-free request ID. Active runs, pagination, or ambiguous provenance deny
+the switch before the credential runner starts. Disabling the layer restores
+locked-tombstone behavior without affecting static schedules.
 
 Scheduling fields in the shared template are passed to the generated agent Pod:
 
@@ -979,58 +625,31 @@ for trust boundaries and traffic behavior.
 
 ### Optional credential portal
 
-The chart can deploy the disabled-by-default standalone
-`nvt-credential-portal`. It provides authenticated, owner-bound Codex and Claude
-Connect/Reconnect flows through the official CLIs. Static-slot mode writes each
-validated document into an exact pre-created broker seed Secret key. It never
-reads current values or participates in refresh/injection. A raw file recovery path
-is separately administrator-enabled and disabled by default. See
-[`docs/credential-portal.md`](https://github.com/mirkoSekulic/nvt-agent/blob/main/docs/credential-portal.md) for the security
-boundary, slot configuration, migration procedure, and removal behavior.
+The disabled-by-default `credentialPortal` Deployment provides authenticated,
+owner-bound Connect/Reconnect flows. Provider CLIs run in a separate tokenless
+sidecar; only the portal container receives its narrowly scoped Kubernetes API
+token. Static-slot mode patches an exact pre-created broker seed Secret key,
+while raw recovery upload is a separate administrator opt-in.
 
-The provider CLIs run in a separate tokenless sidecar. Only the portal
-container receives a manually projected Kubernetes API token; the runner gets
-no portal Secret environment or Kubernetes credential. Codex device
-authorization is experimental, separately gated, and not production-ready
-without the real-account proof described in the portal documentation.
-Generated results remain retrievable until the portal acknowledges a successful
-exact Secret patch; cancellation and bounded expiry wipe retained bytes and
-reclaim runner capacity. Portal readiness includes an authenticated runner
-dependency check but makes no provider-credential health claim.
+Dynamic mode (`credentialPortal.dynamic.enabled`) sends validated credentials
+over verified TLS directly to the broker's principal-account API. Broker CA and
+assertion keys come from existing Secret file mounts visible only to the portal,
+never Helm values or runner environment. Public template/adapter mappings must
+match enabled broker credential templates. Dynamic mode is mutually exclusive
+with static slots and renders no Secret-patch Role or ServiceAccount token.
 
-An independently enabled `credentialPortal.dynamic` mode replaces configured
-static slots with administrator-approved public credential templates. Eligible
-principals enroll, reconnect, inspect their own non-secret readiness, or revoke
-through the broker's principal-account API. The portal mints only short-lived
-exact issuer+immutable-subject assertions for the fixed broker audience and
-uses verified TLS with a mounted CA. The broker CA and assertion key come from
-existing Secret file mounts visible only to the portal container; the runner
-receives neither, and dynamic mode renders no portal Secret-patch Role or
-ServiceAccount token. Helm requires the public template name/adapter mappings
-to match the enabled broker credential templates. Dynamic mode is mutually
-exclusive with static slots and absent by default.
+The browser cannot choose provider plugins, commands, paths, provider IDs,
+Secrets, profiles, grants, capabilities, runtime, or egress policy. A template
+switch remains locked unless separately enabled operator coordination proves
+the exact principal has no active AgentRun. Rotate the external assertion key
+together with `broker.dynamicAccountAssertionRotationEpoch` so broker, portal,
+and operator roll as one fail-closed generation.
 
-The browser cannot choose provider plugins, commands, paths, provider instance
-ids, Secrets, profiles, grants, capabilities, runtime settings, or egress
-policy. Authenticated readiness preserves the committed template for ready,
-unready, and revoked accounts. A different template fails closed before runner
-execution unless the optional trusted operator coordination proves the exact
-principal owns no active AgentRun and commits a target-free broker unlock.
-Admission and proof use the same durable bounded reservation, so neither can
-overtake the other. See
-[credential portal dynamic mode](../../docs/credential-portal.md#dynamic-principal-owned-mode).
-
-Dynamic mode also requires the non-secret
-`broker.dynamicAccountAssertionRotationEpoch`. When the externally managed
-assertion-key Secret changes, increment this epoch in the same GitOps change.
-The chart places the value on broker, portal when enabled, and dynamic operator
-Pod templates so every startup-only key consumer rolls together; it never
-renders or hashes the key material. Wait for all enabled rollouts before considering rotation complete. A
-temporary version mismatch fails authentication closed.
-
-`gateway.credentialPortal.url` adds only a dashboard link. The gateway does not
-proxy the portal, share authentication state, or depend on its availability.
-Portal identity login and provider authorization use separate sessions.
+`gateway.credentialPortal.url` adds only a validated dashboard link. The
+gateway does not proxy portal APIs, share sessions, inspect credential state,
+or depend on portal availability. See
+[`docs/credential-portal.md`](../../docs/credential-portal.md) for the complete
+security and migration contract.
 
 Enable the optional gateway to list and route browser sessions:
 
@@ -1043,56 +662,6 @@ gateway:
 
 The chart creates a ClusterIP Service, not an external Ingress. Configure the
 cluster's ingress layer separately.
-
-### Native VM guest session listener
-
-The provider-neutral native guest listener is separately opt-in and remains
-unrelated to browser ingress. Supply an existing TLS Secret whose certificate
-covers the in-cluster gateway DNS name and an explicit CA Secret for the
-broker. The chart never generates or embeds private key material:
-
-```yaml
-gateway:
-  enabled: true
-  replicas: 1
-  nativeSession:
-    enabled: true
-    port: 7443
-    tls:
-      existingSecret: nvt-gateway-native-session-tls
-      certificateKey: tls.crt
-      privateKeyKey: tls.key
-    brokerURL: https://nvt-broker.nvt.svc.cluster.local:7347
-    serverName: nvt-broker.nvt.svc.cluster.local
-    ca:
-      existingSecret: nvt-broker-tls
-      key: ca.crt
-    authenticationTimeoutSeconds: 5
-    revalidationIntervalSeconds: 30
-  nativeWorkspace:
-    enabled: true
-    port: 7444
-```
-
-The Service exposes `native-session` and, when selected, `native-workspace` as
-separate TLS ports using the same serving identity and broker authority. The
-gateway validates each hello
-through the broker, discards the session bearer, and closes the connection at
-the bounded revalidation interval so reconnect must authenticate again. The
-registry is process-local, so Helm requires exactly one gateway replica while
-this feature is enabled. The native listener port must also differ from both
-the HTTP container port and HTTP Service port. Temporary broker or bounded
-capacity failures close without a definitive rejection so the guest retries
-the same credential; only an authenticated denial or exact status mismatch is
-terminal. Missing Secrets or keys fail at Kubernetes volume
-setup; invalid TLS or CA material fails gateway startup. For an authorized
-external VM, the HTTP gateway requires the exact operator-published native
-guest binding plus ready control and workspace registries, then opens only the
-fixed guest loopback workspace through `StreamOpener`. It never derives a
-destination from browser, AgentRun, or driver input and never falls back to a
-Pod. Pod/Kata routes keep their existing Pod-IP behavior. The gateway loads
-both TLS identity and broker trust once at startup;
-restart its Deployment after rotating either referenced Secret.
 
 ### OIDC
 
@@ -1192,21 +761,12 @@ gateway:
 
 This is provider configuration, not GitHub-specific application behavior. The
 shown GitHub OAuth App requests `read:org` and needs no installation;
-organization policy and SAML SSO may still affect authorization or visibility.
-A GitHub App is also supported: use `scopes: []` and have each user authorize
-it. Its user access token needs no repository or organization permission for
-this endpoint, and authorization does not require App installation. Applicable
-organization policy and SAML SSO can still affect authorization or visible
-teams. The 256 KiB, 60-item, 4,096-node, two-page settings coherently bound the
-documented full team response to at most two default 30-item pages; further
-pages or any cumulative overflow deny login. The shared client
-follows only a validated RFC 8288 `rel=next` link on the exact original HTTPS
-origin, effective port, and path. Only its query may vary. The complete source
-operation shares one timeout. Page count, bytes, combined array items, and
-decoded nodes are cumulative; depth, object, and string limits apply to every
-page. Redirects, unsafe or ambiguous links, loops,
-partial results, and limit overflow deny login. Gateway AgentRun authorization
-remains the separate `owner: true` rule shown above.
+organization policy and SAML SSO may affect team visibility. A GitHub App is
+also supported with `scopes: []` and per-user authorization. The same-array
+rule requires `organization.login` and `slug` on one team object. The 256 KiB,
+60-item, 4,096-node, two-page limits bound cumulative Link pagination; unsafe
+next links, redirects, loops, partial results, extra pages, and overflow deny
+login closed.
 
 Claim enrichment runs only during OAuth login. The selected claims are kept in
 the server-side session and are not refreshed on every request; OAuth tokens
@@ -1244,15 +804,14 @@ gateway:
 
 All `where.all` conditions must match the same array element. See the
 [generic eligibility contract](../../docs/oauth-eligibility.md) for shared
-gateway/portal behavior, bounded top-level array enrichment, limits, and
-fail-closed cases, and the [gateway README](../../gateway/README.md) for callback
-and session behavior.
+gateway/portal enrichment, pagination, limits, and fail-closed behavior, and
+the [gateway README](../../gateway/README.md) for callback/session behavior.
 
 The credential portal keeps ID-token eligibility as its compatibility default.
 Set `credentialPortal.auth.oidc.eligibilityClaimSource` to `access_token` only
-for a JWT access token that can be verified against OIDC discovery; its audience
-defaults to the portal client ID or can be set with `accessTokenAudience`.
-`userinfo` is also supported and must return the ID token's exact subject.
+for a JWT access token verifiable through OIDC discovery; its audience defaults
+to the portal client ID or can be set with `accessTokenAudience`. `userinfo` is
+also supported and must return the ID token's exact subject.
 
 ### Generic OAuth2 owner login
 
@@ -1295,12 +854,11 @@ gateway:
           owner: true
 ```
 
-Register `https://agents.example.com/oauth2/callback` on the selected GitHub
-App or OAuth App. For the identity-only GitHub App values shown, no repository
-permission or OAuth scope is needed; team enrichment uses the client/token
-settings documented above. Owner matching uses only exact normalized
-issuer and immutable subject from `AgentRun.spec.profileProvenance.principal`;
-login/display name and requested-by annotations are ignored. See the [gateway
+Register `https://agents.example.com/oauth2/callback` as the GitHub App
+callback. No repository permission or scope is needed for the current-user
+identity lookup. Owner matching uses only exact normalized issuer and immutable
+subject from `AgentRun.spec.profileProvenance.principal`; login/display name and
+requested-by annotations are ignored. See the [gateway
 README](../../gateway/README.md) for the OAuth2 trust boundary and the exact
 0.3 `github.*` to 0.4 `oauth2.*` migration.
 

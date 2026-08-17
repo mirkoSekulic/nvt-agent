@@ -2,7 +2,6 @@ FROM golang:1.25 AS build
 WORKDIR /src/captured
 COPY captured/go.mod ./
 COPY captured/ ./
-COPY protocol/guestenrollment/ /src/protocol/guestenrollment/
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/captured ./cmd/captured
 
 FROM gcr.io/distroless/static-debian12:nonroot

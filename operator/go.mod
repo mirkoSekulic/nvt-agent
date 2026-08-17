@@ -3,7 +3,6 @@ module github.com/mirkoSekulic/nvt-agent/operator
 go 1.24.0
 
 require (
-	github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment v0.0.0
 	github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun v0.0.0
 	k8s.io/api v0.34.2
 	k8s.io/apiextensions-apiserver v0.34.1
@@ -12,8 +11,6 @@ require (
 	sigs.k8s.io/controller-runtime v0.22.4
 	sigs.k8s.io/yaml v1.6.0
 )
-
-replace github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment => ../protocol/guestenrollment
 
 replace github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun => ../protocol/resolvedrun
 
@@ -35,7 +32,6 @@ require (
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect

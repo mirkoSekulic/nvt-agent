@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"flag"
 	"net/http"
 	"os"
@@ -18,13 +16,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
-	driverregistry "github.com/mirkoSekulic/nvt-agent/operator/executiondriver/registry"
-	"github.com/mirkoSekulic/nvt-agent/operator/guestenrollment/brokerclient"
 	"github.com/mirkoSekulic/nvt-agent/operator/internal/controller"
-	"github.com/mirkoSekulic/nvt-agent/operator/nativeegressattachment"
-	"github.com/mirkoSekulic/nvt-agent/operator/nativeegresspublication"
 	"github.com/mirkoSekulic/nvt-agent/operator/principalaccounts"
-	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress"
 )
 
 var scheme = runtime.NewScheme()
@@ -64,29 +57,6 @@ func main() {
 		ctrl.Log.Error(err, "invalid branding configuration")
 		os.Exit(1)
 	}
-	driverRegistry, err := driverregistry.LoadConfigured()
-	if err != nil {
-		ctrl.Log.Error(err, "invalid execution driver registry")
-		os.Exit(1)
-	}
-	guestEnrollment, err := brokerclient.LoadConfigured()
-	if err != nil {
-		ctrl.Log.Error(err, "invalid guest enrollment broker configuration")
-		os.Exit(1)
-	}
-	nativeEgressPublication, err := nativeegresspublication.LoadConfigured()
-	if err != nil {
-		ctrl.Log.Error(err, "invalid native egress publication configuration")
-		os.Exit(1)
-	}
-	nativeEgressAttachment, err := nativeegressattachment.LoadConfigured()
-	if err == nil && (nativeEgressPublication == nil) != (nativeEgressAttachment == nil) {
-		err = errors.New("native egress publication and attachment must be configured together")
-	}
-	if err != nil {
-		ctrl.Log.Error(err, "invalid native egress attachment configuration")
-		os.Exit(1)
-	}
 	principalAccountClient, err := principalaccounts.LoadConfigured()
 	if err != nil {
 		ctrl.Log.Error(err, "invalid principal account broker configuration")
@@ -106,39 +76,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	reconciler := &controller.AgentRunReconciler{
-		Client:                 mgr.GetClient(),
-		Scheme:                 mgr.GetScheme(),
-		ExecutionDrivers:       driverRegistry,
-		GuestEnrollment:        guestEnrollment,
-		NativeEgressAttachment: nativeEgressAttachment,
-	}
-	if nativeEgressPublication != nil {
-		if err = controller.ConfigureNativeEgressTargetPublication(reconciler, nativeEgressPublication, mgr.GetAPIReader(), os.Getenv("POD_NAMESPACE")); err != nil {
-			ctrl.Log.Error(err, "invalid native egress publication namespace")
-			os.Exit(1)
-		}
-		bootstrapContext, cancelBootstrap := context.WithTimeout(context.Background(), 2*nativeegress.TargetPublicationTimeout)
-		if err = controller.BootstrapNativeEgressTargetPublication(bootstrapContext, reconciler); err != nil {
-			cancelBootstrap()
-			ctrl.Log.Error(err, "unable to restore native egress target publication")
-			os.Exit(1)
-		}
-		cancelBootstrap()
-	}
+	reconciler := &controller.AgentRunReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
 	if err = reconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "AgentRun")
 		os.Exit(1)
-	}
-	if err = mgr.Add(driverRegistry); err != nil {
-		ctrl.Log.Error(err, "unable to add execution driver registry lifecycle")
-		os.Exit(1)
-	}
-	if guestEnrollment != nil {
-		if err = mgr.Add(guestEnrollment); err != nil {
-			ctrl.Log.Error(err, "unable to add guest enrollment broker client lifecycle")
-			os.Exit(1)
-		}
 	}
 	if principalAccountClient != nil {
 		if err = mgr.Add(principalAccountClient); err != nil {

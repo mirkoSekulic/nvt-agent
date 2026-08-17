@@ -149,38 +149,6 @@ recover the hostname when available, then opens a CONNECT tunnel to the paired
 egress endpoint. It does not terminate TLS, inspect application payloads, or
 hold credentials.
 
-The opt-in native-VM host-bundle capture boundary reuses this same bounded
-original-destination and Host/SNI inspector. Instead of dialing CONNECT
-directly, it passes the canonical destination only to the current
-authenticated native-egress `FlowOpener`; absent or withdrawn transport closes
-the connection with no fallback. The provider still owns the redirect into
-the literal loopback listener and the external network confinement that makes
-that redirect non-bypassable.
-
-The opt-in cluster relay accepts only an authenticated, monotonically generated
-complete snapshot from its distinct TLS control listener. Every restart is
-unpublished deny-all until the trusted operator republishes exact five-field
-Binding-to-egressd targets. The operator now owns that level-triggered loop and
-withdraws a mapping before identity revocation or driver cleanup. Provider-owned
-default-deny confinement remains a separate gate, so this wiring alone does
-not establish production mediated-VM readiness.
-
-The operator also derives one bounded, non-secret provider attachment plan only
-for mediated external VMs. It fixes relay data TLS identity/public trust,
-required bootstrap/control destinations, and loopback capture intent;
-producer/class configuration cannot override it. Its monotonic generation and
-digest enter the driver desired generation/fingerprint. Relay target
-publication waits for the driver's exact matching `infrastructure` read-back,
-and an attachment or AgentRun generation change first withdraws the old exact
-mapping. The separately packaged Azure driver consumes this plan and reads back
-an exact per-run NSG boundary; its immutable guest image owns the protected
-receiver that installs capture. Live Azure infrastructure is opt-in and is not
-exercised by repository CI. The core chart contains no Azure workload or
-values, and no untrusted request can select this driver in this phase. A
-separate Azure deployment chart and producer-authorized execution-profile
-integration remain required. The unpublished QEMU reference remains the
-hermetic provider proof.
-
 Proxy-aware clients may use `captured`'s explicit listener on port 15002. This
 path preserves an explicit provider selector when more than one provider uses
 the same hostname. Workload-wide generic HTTP proxy variables remain unset in
@@ -308,30 +276,3 @@ See [Kubernetes smoke tests](../tests/operator/kind/README.md), the
   boundary.
 - Direct and non-enforced mediated modes remain available for compatibility;
   they must not be described as enforced transparent egress.
-
-## Independently managed VMs
-
-Kubernetes NetworkPolicy is the bypass-prevention boundary for Pod/Kata runs;
-it does not confine an independently managed VM. A root-capable VM agent can
-replace guest-local capture and firewall state. The provider-neutral
-[native VM egress contract](../protocol/native-egress.md) therefore requires a
-trusted execution driver/provider to enforce default-deny NIC/network policy
-outside the guest, plus an exact-binding authenticated outbound tunnel into the
-run's separate trusted egress path. Both gates are required. The contract,
-conformance proof, identity authority, guest flow client, cluster relay, and an
-optional strict process-owned exact-binding adapter into per-run egressd
-exist. Guest capture is a separate credential-less process: transparent flows
-carry no provider hint, while its explicit CONNECT listener consumes the
-existing per-flow provider selector before forwarding raw bytes. It reuses
-bounded Host/SNI/original-destination inspection and never falls back to direct
-networking, but it is not a root-adversary boundary. Operator target
-publication/readiness and cleanup ordering are now wired. The unpublished QEMU
-reference consumes the portable plan: QEMU `restrict=on` plus exact host-owned
-forward rules are the outside-guest read-back boundary, while the guest TCP
-redirect remains only routing. After that read-back, the authenticated
-enrollment handoff delivers only the public per-run interception CA; the guest
-proof uses normal TLS chain and hostname verification while the CA private key
-stays in egressd. Its TCG gate proves the complete mediated path. The Azure
-driver is the first production-shaped cloud consumer, but a real deployment
-still depends on installation-owned image, identity, subnet, role, and relay
-infrastructure and therefore is not claimed complete by CI.

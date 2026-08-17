@@ -1,8 +1,0 @@
-{
-  "version": 1,
-  "runtime_directory": "/run/nvt-agent-egress",
-  "identity_socket_path": "/run/nvt-agent-identity/session-credential.sock",
-  "relay_endpoint": "tls://native-egress.example.invalid:7445",
-  "ca_pem_path": "/etc/nvt-agent/native-egress-ca.pem",
-  "flow_socket_path": "/run/nvt-agent-egress/flow.sock"
-}

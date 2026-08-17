@@ -1,7 +1,0 @@
-{
-  "version": 1,
-  "state_directory": "/var/lib/nvt-agent-identity",
-  "runtime_directory": "/run/nvt-agent-identity",
-  "enrollment_path": "/var/lib/nvt-agent-identity/enrollment.json",
-  "ca_pem_path": "/etc/nvt-agent/runtime-identity-ca.pem"
-}

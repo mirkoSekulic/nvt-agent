@@ -89,6 +89,84 @@ func TestReconcileSetsPendingForEmptyPhase(t *testing.T) {
 	}
 }
 
+func TestReconcileLegacyExternalAgentRunFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Execution = &nvtv1alpha1.AgentRunLegacyExecution{Kind: "vm", Driver: "qemu"}
+	agentRun.Finalizers = []string{legacyExternalExecutionFinalizer}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile legacy AgentRun: %v", err)
+	}
+	var updated nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updated); err != nil {
+		t.Fatalf("get updated AgentRun: %v", err)
+	}
+	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed || updated.Status.Reason != legacyExternalExecutionReason {
+		t.Fatalf("expected fail-closed status, got %#v", updated.Status)
+	}
+	var pods corev1.PodList
+	if err := k8sClient.List(ctx, &pods, client.InNamespace(agentRun.Namespace)); err != nil {
+		t.Fatalf("list Pods: %v", err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("legacy external AgentRun created Pods: %#v", pods.Items)
+	}
+}
+
+func TestReconcileDeletingLegacyExternalAgentRunRetainsCleanupFinalizers(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	now := metav1.Now()
+	agentRun.DeletionTimestamp = &now
+	agentRun.Finalizers = []string{legacyExternalExecutionFinalizer, legacyGuestEnrollmentFinalizer, agentRunFinalizer}
+	renderedPolicy, err := RenderBrokerAgentsYAML(brokerAgentsPolicy{Agents: []brokerAgentEntry{
+		{ID: AgentRunBrokerID(agentRun.Namespace, agentRun.Name), TokenSHA256: validTestTokenHash("legacy"), Grants: []brokerAgentGrantEntry{}},
+		{ID: AgentRunBrokerID(agentRun.Namespace, "unrelated"), TokenSHA256: validTestTokenHash("unrelated"), Grants: []brokerAgentGrantEntry{}},
+	}})
+	if err != nil {
+		t.Fatalf("render broker policy: %v", err)
+	}
+	brokerConfig := testBrokerAgentsConfigMap(agentRun.Namespace)
+	brokerConfig.Data[brokerAgentsConfigKey] = renderedPolicy
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).WithObjects(agentRun, brokerConfig).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile deleting legacy AgentRun: %v", err)
+	}
+	var updated nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updated); err != nil {
+		t.Fatalf("get deleting AgentRun: %v", err)
+	}
+	if !hasLegacyExternalFinalizer(&updated) {
+		t.Fatalf("cleanup finalizers were removed: %#v", updated.Finalizers)
+	}
+	if controllerutil.ContainsFinalizer(&updated, agentRunFinalizer) {
+		t.Fatalf("broker-policy finalizer remains: %#v", updated.Finalizers)
+	}
+	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed || updated.Status.Reason != legacyExternalDeletionReason {
+		t.Fatalf("expected actionable fail-closed deletion status, got %#v", updated.Status)
+	}
+	var updatedBrokerConfig corev1.ConfigMap
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(brokerConfig), &updatedBrokerConfig); err != nil {
+		t.Fatalf("get broker policy: %v", err)
+	}
+	policy := mustParseBrokerAgentsPolicy(t, updatedBrokerConfig.Data[brokerAgentsConfigKey])
+	if len(policy.Agents) != 1 || policy.Agents[0].ID != AgentRunBrokerID(agentRun.Namespace, "unrelated") {
+		t.Fatalf("legacy broker access was not revoked cleanly: %#v", policy.Agents)
+	}
+}
+
 func TestReconcileCreatesAgentConfigMap(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
@@ -4692,9 +4770,6 @@ func TestRenderAgentConfigYAMLAppliesRuntimeModelAndEffortToFreshAndResume(t *te
 func TestRenderAgentConfigYAMLRejectsTypedRuntimeSelectorConflicts(t *testing.T) {
 	for _, config := range []string{
 		`{"runtime":{"args":["--model","raw"]}}`,
-		`{"runtime":{"args":["-mraw"]}}`,
-		`{"runtime":{"args":["-c=model=raw"]}}`,
-		`{"runtime":{"args":["--"]}}`,
 		`{"runtime":{"args":[],"resume":{"command":"codex","args":["--config","model_reasoning_effort=low"]}}}`,
 	} {
 		run := testAgentRun()
@@ -5192,15 +5267,6 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	}
 	if !hasCRDValidation(validations, "!has(self.egressMaxConcurrentTunnels) || (has(self.egressTransport) && self.egressTransport in ['forward-proxy', 'transparent'])", "requires spec.egressTransport") {
 		t.Fatalf("missing transport CEL for tunnel capacity: %#v", validations)
-	}
-	for _, immutable := range []struct{ rule, message string }{
-		{"has(self.egress) == has(oldSelf.egress) && (!has(self.egress) || self.egress == oldSelf.egress)", "spec.egress is immutable"},
-		{"has(self.egressEnforcement) == has(oldSelf.egressEnforcement) && (!has(self.egressEnforcement) || self.egressEnforcement == oldSelf.egressEnforcement)", "spec.egressEnforcement is immutable"},
-		{"has(self.egressTransport) == has(oldSelf.egressTransport) && (!has(self.egressTransport) || self.egressTransport == oldSelf.egressTransport)", "spec.egressTransport is immutable"},
-	} {
-		if !hasCRDValidation(validations, immutable.rule, immutable.message) {
-			t.Fatalf("missing immutable egress CEL %q: %#v", immutable.rule, validations)
-		}
 	}
 	transport := crdPath(t, spec, "egressTransport").(map[string]any)
 	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {

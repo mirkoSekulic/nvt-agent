@@ -597,7 +597,6 @@ class DynamicAccountsTest(unittest.TestCase):
         static.validate_state.return_value = True
         broker = Broker.__new__(Broker)
         broker.dynamic_accounts = recovered
-        broker.guest_enrollment = None
         broker.providers = {"shared-static": static}
         self.assertEqual(Broker.readiness(broker), {"ok": True, "status": "ready"})
         self.assertIs(Broker.provider(broker, "shared-static"), static)

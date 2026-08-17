@@ -3,8 +3,8 @@
 `nvt-local-controller` owns durable lifecycle metadata and reconciliation for
 local resolved agent runs. Its controller loop uses a deliberately small local
 backend contract: idempotent `Ensure`, `Inspect`, and `Delete`, plus dependency
-readiness. The first implementation reconciles Docker resources; later QEMU or
-sandbox backends can implement the same contract without changing the run API
+readiness. The implementation reconciles Docker resources; future sandbox
+backends can implement the same contract without changing the run API
 or `agentd`.
 
 The local Docker backend does not change the Kubernetes `AgentRun` contract or

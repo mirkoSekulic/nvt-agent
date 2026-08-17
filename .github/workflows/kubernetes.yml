@@ -66,21 +66,6 @@ jobs:
           go vet ./...
           go test -race -count=1 ./...
 
-  guest-enrollment:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: protocol/guestenrollment/go.mod
-          cache: false
-      - name: Run guest enrollment contract and conformance tests
-        working-directory: protocol/guestenrollment
-        run: |
-          go vet ./...
-          go test -race -count=1 ./...
-
   operator:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -110,9 +95,7 @@ jobs:
           cache: true
           cache-dependency-path: |
             gateway/go.sum
-            hostbundle/go.mod
             protocol/eligibility/go.mod
-            protocol/guestenrollment/go.mod
       - name: Run gateway tests
         working-directory: gateway
         run: |

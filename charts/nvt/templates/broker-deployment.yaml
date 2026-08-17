@@ -37,19 +37,6 @@
 {{- if and .Values.broker.persistence.seedSecretName (or (not (regexMatch `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$` .Values.broker.persistence.seedTargetDir)) (hasPrefix "/" .Values.broker.persistence.seedTargetDir) (contains ".." .Values.broker.persistence.seedTargetDir) (contains `\` .Values.broker.persistence.seedTargetDir)) }}
 {{- fail "broker.persistence.seedTargetDir must be a normalized relative path without traversal" }}
 {{- end }}
-{{- if .Values.broker.guestEnrollment.enabled }}
-{{- if not .Values.broker.persistence.enabled }}{{ fail "broker.guestEnrollment.enabled requires broker.persistence.enabled=true" }}{{ end }}
-{{- if not .Values.broker.tls.enabled }}{{ fail "broker.guestEnrollment.enabled requires broker.tls.enabled=true" }}{{ end }}
-{{- if or (gt (len .Values.broker.guestEnrollment.exchangeURL) 2048) (not (regexMatch `^https://[A-Za-z0-9](?:[-A-Za-z0-9.]*[A-Za-z0-9])?(?::[0-9]{1,5})?/v1/guest-enrollment/exchange$` .Values.broker.guestEnrollment.exchangeURL)) }}{{ fail "broker.guestEnrollment.exchangeURL must be the canonical HTTPS broker exchange endpoint" }}{{ end }}
-{{- $guestEnrollmentPortMatch := regexFind `:[0-9]{1,5}/v1/guest-enrollment/exchange$` .Values.broker.guestEnrollment.exchangeURL }}
-{{- if $guestEnrollmentPortMatch }}
-{{- $guestEnrollmentPort := int (trimSuffix "/v1/guest-enrollment/exchange" (trimPrefix ":" $guestEnrollmentPortMatch)) }}
-{{- if or (lt $guestEnrollmentPort 1) (gt $guestEnrollmentPort 65535) }}{{ fail "broker.guestEnrollment.exchangeURL port must be between 1 and 65535" }}{{ end }}
-{{- end }}
-{{- if or (gt (len .Values.broker.guestEnrollment.orchestratorAuth.existingSecret) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` .Values.broker.guestEnrollment.orchestratorAuth.existingSecret)) }}{{ fail "broker.guestEnrollment.orchestratorAuth.existingSecret must be a Kubernetes Secret name" }}{{ end }}
-{{- if or (gt (len .Values.broker.guestEnrollment.orchestratorAuth.tokenKey) 253) (not (regexMatch `^[A-Za-z0-9._-]+$` .Values.broker.guestEnrollment.orchestratorAuth.tokenKey)) }}{{ fail "broker.guestEnrollment.orchestratorAuth.tokenKey is invalid" }}{{ end }}
-{{- if or (lt (int .Values.broker.guestEnrollment.runtimeIdentityHistoryCapacity) 20000) (gt (int .Values.broker.guestEnrollment.runtimeIdentityHistoryCapacity) 10000000) }}{{ fail "broker.guestEnrollment.runtimeIdentityHistoryCapacity must be between 20000 and 10000000" }}{{ end }}
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -104,18 +91,6 @@ spec:
               value: /config/agents.yaml
             - name: NVT_BROKER_AUDIT_LOG
               value: /state/audit.jsonl
-            {{- if .Values.broker.guestEnrollment.enabled }}
-            - name: NVT_BROKER_GUEST_ENROLLMENT_ENABLED
-              value: "true"
-            - name: NVT_BROKER_GUEST_ENROLLMENT_DB
-              value: /state/guest-enrollment.sqlite3
-            - name: NVT_BROKER_GUEST_ENROLLMENT_EXCHANGE_URL
-              value: {{ .Values.broker.guestEnrollment.exchangeURL | quote }}
-            - name: NVT_BROKER_GUEST_ENROLLMENT_ORCHESTRATOR_TOKEN_FILE
-              value: /guest-enrollment-auth/token
-            - name: NVT_BROKER_GUEST_ENROLLMENT_RUNTIME_IDENTITY_HISTORY_CAPACITY
-              value: {{ .Values.broker.guestEnrollment.runtimeIdentityHistoryCapacity | quote }}
-            {{- end }}
             {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
             - name: NVT_BROKER_SEED_DIR
               value: /seed
@@ -151,12 +126,7 @@ spec:
               mountPath: /tls
               readOnly: true
             {{- end }}
-            {{- if .Values.broker.guestEnrollment.enabled }}
-            - name: guest-enrollment-orchestrator-auth
-              mountPath: /guest-enrollment-auth
-              readOnly: true
-            {{- end }}
-          {{- if or (and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName) .Values.broker.guestEnrollment.enabled $dynamicAccountsEnabled }}
+          {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
           readinessProbe:
             httpGet:
               path: /ready
@@ -197,14 +167,5 @@ spec:
           secret:
             secretName: {{ .Values.broker.persistence.seedSecretName | quote }}
             defaultMode: 0400
-        {{- end }}
-        {{- if .Values.broker.guestEnrollment.enabled }}
-        - name: guest-enrollment-orchestrator-auth
-          secret:
-            secretName: {{ .Values.broker.guestEnrollment.orchestratorAuth.existingSecret | quote }}
-            defaultMode: 0400
-            items:
-              - key: {{ .Values.broker.guestEnrollment.orchestratorAuth.tokenKey | quote }}
-                path: token
         {{- end }}
 {{- end }}

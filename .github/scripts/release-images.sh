@@ -30,11 +30,8 @@ images=(
   "nvt-egressd|egressd/Dockerfile"
   "nvt-captured|captured/Dockerfile"
   "nvt-operator|operator/Dockerfile"
-  "nvt-execution-driver-host|operator/executiondriver/host-image/Dockerfile"
-  "nvt-azure-execution-driver|executiondrivers/azure/Dockerfile"
   "nvt-agent-gateway|gateway/Dockerfile"
   "nvt-credential-portal|credentialportal/Dockerfile"
-  "nvt-native-egress-relay|nativeegressrelay/Dockerfile"
   "nvt-github-comments-producer|producers/github-comments/Dockerfile"
 )
 
@@ -164,5 +161,5 @@ fi
 if [[ -n "${image_filter}" ]]; then
   echo "Verified coordinated release image ${image_filter}."
 else
-  echo "Verified all twelve image manifests and coordinated release metadata labels."
+  echo "Verified all nine image manifests and coordinated release metadata labels."
 fi

@@ -42,8 +42,6 @@ type Config struct {
 	Routing           RoutingConfig
 	Auth              AuthConfig
 	BrandingDir       string
-	NativeSession     NativeSessionConfig
-	NativeWorkspace   NativeWorkspaceConfig
 	CredentialPortal  CredentialPortalLinkConfig
 	LocalRuns         LocalRunsConfig
 	basePathValue     string
@@ -176,30 +174,6 @@ func (c Config) Validate() error {
 	}
 	if c.DefaultTargetPort <= 0 || c.DefaultTargetPort > 65535 {
 		return fmt.Errorf("defaultTargetPort must be between 1 and 65535")
-	}
-	if err := c.NativeSession.validate(); err != nil {
-		return err
-	}
-	if c.NativeSession.Enabled {
-		_, httpPort, httpErr := net.SplitHostPort(c.ListenAddr)
-		_, nativePort, nativeErr := net.SplitHostPort(c.NativeSession.ListenAddr)
-		if httpErr == nil && nativeErr == nil && httpPort == nativePort {
-			return fmt.Errorf("nativeSession.listenAddr must use a separate port from listenAddr")
-		}
-	}
-	if err := c.NativeWorkspace.validate(c.NativeSession); err != nil {
-		return err
-	}
-	if c.NativeWorkspace.Enabled {
-		_, httpPort, httpErr := net.SplitHostPort(c.ListenAddr)
-		_, controlPort, controlErr := net.SplitHostPort(c.NativeSession.ListenAddr)
-		_, workspacePort, workspaceErr := net.SplitHostPort(c.NativeWorkspace.ListenAddr)
-		if httpErr == nil && workspaceErr == nil && httpPort == workspacePort {
-			return fmt.Errorf("nativeWorkspace.listenAddr must use a separate port from listenAddr")
-		}
-		if controlErr == nil && workspaceErr == nil && controlPort == workspacePort {
-			return fmt.Errorf("nativeWorkspace.listenAddr must use a separate port from nativeSession.listenAddr")
-		}
 	}
 	authMode := c.Auth.Mode
 	if authMode == "" {
@@ -416,14 +390,13 @@ func isLoopbackHost(host string) bool {
 }
 
 type Server struct {
-	config                  Config
-	client                  ctrlclient.Client
-	namespace               string
-	auth                    *Authenticator
-	branding                brandAssets
-	nativeWorkspaceResolver NativeWorkspaceResolver
-	localRuns               LocalRunSource
-	localProxyTransport     http.RoundTripper
+	config              Config
+	client              ctrlclient.Client
+	namespace           string
+	auth                *Authenticator
+	branding            brandAssets
+	localRuns           LocalRunSource
+	localProxyTransport http.RoundTripper
 }
 
 type routeKind int
@@ -444,17 +417,10 @@ type route struct {
 }
 
 func NewServer(config Config, client ctrlclient.Client, namespace string) (*Server, error) {
-	return NewServerWithNativeWorkspaceResolver(config, client, namespace, nil)
+	return NewServerWithSources(config, client, namespace, nil)
 }
 
-// NewServerWithNativeWorkspaceResolver constructs the HTTP gateway with the
-// optional exact native-VM routing seam. A nil resolver preserves the existing
-// Pod-only server and makes external VM routes unavailable without fallback.
-func NewServerWithNativeWorkspaceResolver(config Config, client ctrlclient.Client, namespace string, resolver NativeWorkspaceResolver) (*Server, error) {
-	return NewServerWithSources(config, client, namespace, resolver, nil)
-}
-
-func NewServerWithSources(config Config, client ctrlclient.Client, namespace string, resolver NativeWorkspaceResolver, localSource LocalRunSource) (*Server, error) {
+func NewServerWithSources(config Config, client ctrlclient.Client, namespace string, localSource LocalRunSource) (*Server, error) {
 	if config.Routing.Mode == "" {
 		config.Routing.Mode = routingModeSubdomain
 	}
@@ -489,7 +455,7 @@ func NewServerWithSources(config Config, client ctrlclient.Client, namespace str
 	}
 	return &Server{
 		config: config, client: client, namespace: namespace, auth: auth, branding: branding,
-		nativeWorkspaceResolver: resolver, localRuns: localSource, localProxyTransport: localProxyTransport,
+		localRuns: localSource, localProxyTransport: localProxyTransport,
 	}, nil
 }
 
@@ -627,21 +593,6 @@ func (s *Server) proxyAgentRun(w http.ResponseWriter, r *http.Request, accessKey
 }
 
 func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, run nvtv1alpha1.AgentRun, accessKey string) {
-	if isExternalVMRun(run) {
-		if s.nativeWorkspaceResolver == nil {
-			http.Error(w, "AgentRun session unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		opener, err := s.nativeWorkspaceResolver.Resolve(&run)
-		if err != nil || opener == nil {
-			http.Error(w, "AgentRun session unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		transport := nativeWorkspaceHTTPTransport(opener)
-		defer transport.CloseIdleConnections()
-		s.proxyAgentRunToUpstream(w, r, accessKey, nativeWorkspaceUpstreamURL(), transport)
-		return
-	}
 	target, err := s.resolveTargetForRun(r.Context(), run)
 	if err == errNoRunningPod {
 		http.Error(w, "AgentRun has no ready running pod with a pod IP", http.StatusServiceUnavailable)
@@ -691,10 +642,6 @@ func (s *Server) proxyAgentRunToUpstream(w http.ResponseWriter, r *http.Request,
 		http.Error(rw, "proxy AgentRun session", http.StatusBadGateway)
 	}
 	proxy.ServeHTTP(w, r)
-}
-
-func isExternalVMRun(run nvtv1alpha1.AgentRun) bool {
-	return run.Spec.Execution != nil && run.Spec.Execution.Kind == nvtv1alpha1.AgentRunExecutionVM
 }
 
 var errNoRunningPod = fmt.Errorf("no running pod")
@@ -810,13 +757,6 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 				continue
 			}
 			routable := routableRuns[run.Name]
-			if isExternalVMRun(run) {
-				routable = false
-				if s.nativeWorkspaceResolver != nil {
-					_, resolveErr := s.nativeWorkspaceResolver.Resolve(&run)
-					routable = resolveErr == nil
-				}
-			}
 			if view == dashboardViewActive && !routable {
 				continue
 			}
