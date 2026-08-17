@@ -285,6 +285,12 @@ Request:
 
 Requires `Authorization: Bearer ...`.
 
+The broker passes the provider every grant for the authenticated agent and the
+selected capability. The provider must match the request target to exactly one
+grant and use that grant's repository scope and permissions when acquiring
+upstream authority. No match or an ambiguous match fails closed; provider-wide
+permission ceilings must not replace the matched grant's narrower authority.
+
 Response:
 
 ```json

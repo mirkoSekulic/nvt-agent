@@ -161,8 +161,17 @@ class ExecutableProviderAdapter(ProviderAdapter):
             raise ProviderError("provider-protocol-error", "provider returned an invalid target", 502)
         return repo.audit_target
 
-    def http_request(self, method, url, headers, paginate, effective_repositories):
+    def http_request(self, method, url, headers, paginate, grants):
         self._ensure_capability("http.request")
+        if any(grant.get("permissions") for grant in grants):
+            raise ProviderError(
+                "permissions-not-supported",
+                "executable provider protocol v1 cannot enforce http.request grant permissions",
+                403,
+            )
+        effective_repositories = []
+        for grant in grants:
+            effective_repositories.extend(grant.get("repositories") or [])
         result = self._request("http.request", {
             "method": method,
             "url": url,

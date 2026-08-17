@@ -347,7 +347,8 @@ class GithubAppProvider:
             if method not in self.allowed_methods:
                 raise ProviderError("method-not-allowed")
             repo = self._single_concrete_grant_repo(effective_repositories)
-            token, expires_at = self.token_for_repo(repo, effective_repositories)
+            permissions = self._effective_permissions(grant)
+            token, expires_at = self.token_for_repo(repo, effective_repositories, permissions)
             headers = {"authorization": f"Bearer {token}"}
         else:
             git = self._git_path(path)
@@ -355,7 +356,8 @@ class GithubAppProvider:
                 if method not in self.allowed_methods:
                     raise ProviderError("method-not-allowed")
                 repo = self._repo_from_path(path)
-                token, expires_at = self.token_for_repo(repo, effective_repositories)
+                permissions = self._effective_permissions(grant)
+                token, expires_at = self.token_for_repo(repo, effective_repositories, permissions)
                 headers = {"authorization": f"Bearer {token}"}
             else:
                 repo, service = git
@@ -435,6 +437,20 @@ class GithubAppProvider:
             output[name] = value
         return output
 
+    def _effective_permissions(self, grant):
+        output = {}
+        declared = (grant or {}).get("permissions") or {}
+        if not declared:
+            declared = {"contents": "read"}
+        for name, value in declared.items():
+            if value not in PERMISSION_ORDER:
+                raise ProviderError("permissions-invalid", f"grant {name} permission must be read or write, got {value!r}", 403)
+            ceiling = self.permissions.get(name)
+            if ceiling not in PERMISSION_ORDER or PERMISSION_ORDER[value] > PERMISSION_ORDER[ceiling]:
+                raise ProviderError("permission-not-allowed", f"provider permissions do not allow {name}: {value}", 403)
+            output[name] = value
+        return output
+
     def _injection_expiry(self, expires_at):
         timestamp = self._parse_time(expires_at)
         if timestamp <= 0:
@@ -468,10 +484,20 @@ class GithubAppProvider:
         query.extend([("per_page", str(self.per_page)), ("page", str(page))])
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", urlencode(query), ""))
 
-    def http_request(self, method, url, headers, paginate, effective_repositories):
+    def http_request(self, method, url, headers, paginate, grants):
         method = method.upper()
+        parsed = urlparse(url)
+        repo = self._repo_from_path(parsed.path)
+        matching = [grant for grant in grants if any(fnmatch.fnmatchcase(repo, pattern) for pattern in grant.get("repositories", []))]
+        if not matching:
+            raise ProviderError("repo-not-allowed", "HTTP request does not match a repository grant", 403)
+        if len(matching) != 1:
+            raise ProviderError("provider-not-granted", "HTTP request must match exactly one repository grant", 403)
+        grant = matching[0]
+        effective_repositories = grant.get("repositories")
         parsed, repo = self._validate_url(url, method, effective_repositories)
-        token, _expires_at = self.token_for_repo(repo, effective_repositories)
+        permissions = self._effective_permissions(grant)
+        token, _expires_at = self.token_for_repo(repo, effective_repositories, permissions)
         if paginate:
             return self._paginated_request(parsed, token, headers)
         return self._single_request(url, method, token, headers, self.max_response_bytes), repo

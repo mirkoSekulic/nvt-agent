@@ -33,6 +33,11 @@ repositories:
   nvt-agent:
     github: mirkoSekulic/nvt-agent
     account: github
+    access:
+      permissions:
+        contents: write
+        pull_requests: write
+        workflows: write
   studio:
     github: Altinn/altinn-studio
   infrastructure:

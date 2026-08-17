@@ -60,6 +60,71 @@ mode uses the complete `dev.azure.com/organization/project/_git/repository`
 target. GitHub App installation provider names are therefore derived from the
 same URL-validated owner in both broker and controller projections.
 
+GitHub repository authority is declared independently from credential
+acquisition with `repositories.<name>.access.permissions`. Supported permission
+names are `contents`, `pull_requests`, and `workflows`; supported levels are
+`read` and `write`. When `access` is omitted, the pre-1.0 least-privilege
+default is `contents: write` plus `pull_requests: write`. Workflow-file writes
+are never implicit: they require an explicit `workflows: write` declaration,
+which also requires `contents: write`. Every explicit access declaration must
+include at least `contents: read` because checkout is mandatory. Empty access maps, unknown permissions,
+unknown levels, access on an uncredentialed or non-GitHub repository, and
+contradictory workflow-write declarations fail validation.
+
+For a GitHub App account, the compiler places the exact requested permissions
+in each agent grant and computes the provider ceiling from the union of the
+repositories assigned to that App installation. GitHub validates that request
+against the installation's upstream permissions when the broker mints a token;
+it cannot become stronger than the installation. For example:
+
+```yaml
+accounts:
+  github:
+    preset: github-app
+    appId: "1"
+    privateKeySecret: github-key
+    installations: {example: "2"}
+repositories:
+  project:
+    github: example/project
+    account: github
+    access:
+      permissions:
+        contents: write
+        pull_requests: write
+        workflows: write
+```
+
+A PAT uses the same repository declaration and profile/workflow selection; only
+the account changes. The broker enforces the exact repository fence, while the
+PAT's scopes are the outer authority ceiling. Because GitHub PATs do not offer
+per-request installation-token permissions, NVT does not put granular
+permission claims in a PAT-backed agent grant or claim to enforce them. An
+insufficient PAT therefore fails at GitHub without exposing the token to the
+agent. PAT values remain named secret-file inputs under `.nvt-local`:
+
+```yaml
+secrets:
+  github-token:
+    file: ./.nvt-local/secrets/github/token
+accounts:
+  github:
+    preset: github-pat
+    tokenSecret: github-token
+repositories:
+  project:
+    github: example/project
+    account: github
+    access:
+      permissions:
+        contents: write
+        pull_requests: write
+```
+
+Producer authentication is separate. The built-in `github-comments` producer
+continues to select a GitHub App account even when an agent repository selects
+a PAT-backed account.
+
 ## Canonical compilation and ownership
 
 Compilation produces deterministic JSON. Map entries and set-like lists are

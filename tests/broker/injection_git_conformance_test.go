@@ -362,6 +362,59 @@ func TestGitInjectionGraphQLUsesSingleRepoGrant(t *testing.T) {
 	}
 }
 
+// Two agents may share one App installation provider while receiving different
+// repository authority. REST and GraphQL token minting must use the matching
+// grant rather than the provider's union ceiling.
+func TestGitAPIInjectionMintsExactPerRepositoryPermissions(t *testing.T) {
+	f := newBrokerFixture(t)
+	identities := map[string]roleIdentity{}
+	for _, fixture := range []struct {
+		name, token, repo string
+		permissions       map[string]string
+	}{
+		{"default", "default-token", "my-user/my-repo", map[string]string{"contents": "write"}},
+		{"workflow", "workflow-token", "my-user/other-repo", map[string]string{"contents": "write", "workflows": "write"}},
+	} {
+		identities[fixture.name] = roleIdentity{Token: fixture.token, Role: "agent", Grants: []roleGrant{{Provider: "git-app", Materialization: "header-inject", Repositories: []string{fixture.repo}, Permissions: fixture.permissions}}}
+		identities[fixture.name+"-egress"] = roleIdentity{Token: fixture.token + "-egress", Role: "egress", PairedAgent: fixture.name}
+	}
+	f.writeRoleIdentities(identities)
+
+	for _, test := range []struct {
+		token, path string
+		workflow    bool
+	}{
+		{"default-token-egress", "/repos/my-user/my-repo/pulls", false},
+		{"workflow-token-egress", "/repos/my-user/other-repo/pulls", true},
+		{"default-token-egress", "/graphql", false},
+		{"workflow-token-egress", "/graphql", true},
+	} {
+		f.fake.mu.Lock()
+		before := len(f.fake.tokenRequests)
+		f.fake.mu.Unlock()
+		request := gitInjectionRequest("POST", test.path)
+		request["host"] = "api.github.com"
+		status, body := f.postJSONWithToken(test.token, "/v1/injection/headers", request)
+		if status != http.StatusOK || body["ok"] != true {
+			t.Fatalf("API injection denied: status=%d body=%v", status, body)
+		}
+		f.fake.mu.Lock()
+		after := len(f.fake.tokenRequests)
+		f.fake.mu.Unlock()
+		if after == before {
+			continue // Reusing the repository-and-permission cache entry is correct.
+		}
+		permissions := mintedPermissions(t, f.lastTokenRequest(t))
+		if permissions["contents"] != "write" {
+			t.Fatalf("mint omitted contents write: %v", permissions)
+		}
+		_, hasWorkflow := permissions["workflows"]
+		if hasWorkflow != test.workflow {
+			t.Fatalf("workflow permission mismatch for %s: %v", test.path, permissions)
+		}
+	}
+}
+
 func TestGitInjectionGraphQLRejectsAmbiguousGrants(t *testing.T) {
 	tests := []struct {
 		name         string

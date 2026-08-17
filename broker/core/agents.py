@@ -84,6 +84,9 @@ class AgentRegistry:
                 return grant
         return None
 
+    def grants(self, agent, provider_name):
+        return [grant for grant in agent["grants"] if grant["provider"] == provider_name]
+
     def by_id(self, agent_id):
         return self.agents_by_id.get(agent_id)
 

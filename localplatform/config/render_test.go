@@ -54,6 +54,9 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	if bytes.Contains(broker, []byte(".nvt-local")) || bytes.Contains(broker, []byte("PRIVATE KEY")) {
 		t.Fatalf("host path or credential entered broker configuration: %s", broker)
 	}
+	if !bytes.Contains(broker, []byte(`"permissions":{"contents":"write","pull_requests":"write"}`)) || bytes.Contains(broker, []byte(`"workflows":"write"`)) {
+		t.Fatalf("broker provider did not preserve least privilege: %s", broker)
+	}
 	if bytes.Contains(broker, []byte(plancontract.CredentialSlotName("codex")+".json")) {
 		t.Fatalf("broker OAuth path does not match the portal-persisted slot name: %s", broker)
 	}
@@ -140,8 +143,8 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 			if strings.Join(grant.EgressHosts, ",") != "github.com:443,api.github.com:443" {
 				t.Fatalf("GitHub grant omitted the API injection route: %#v", grant)
 			}
-			if grant.Permissions["contents"] != "write" || grant.Permissions["workflows"] != "write" {
-				t.Fatalf("GitHub grant omitted repository or workflow write access: %#v", grant)
+			if grant.Permissions["contents"] != "write" || grant.Permissions["pull_requests"] != "write" || grant.Permissions["workflows"] != "" {
+				t.Fatalf("GitHub grant did not preserve the least-privilege repository access: %#v", grant)
 			}
 		}
 	}
@@ -303,6 +306,73 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	}
 	if _, err := serviceconfig.Controller(ambiguous, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil || !bytes.Contains([]byte(err.Error()), []byte("plugin egress provider is ambiguous")) {
 		t.Fatalf("multi-installation plugin egress policy did not fail closed: %v", err)
+	}
+}
+
+func TestExplicitWorkflowWriteRendersForGitHubApp(t *testing.T) {
+	raw, err := os.ReadFile("../manifest/testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.Replace(string(raw), "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        contents: write\n        pull_requests: write\n        workflows: write\n  infrastructure:", 1)
+	decoded, err := manifest.Decode(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := manifest.Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker, err := serviceconfig.Broker(compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := serviceconfig.Controller(compiled, serviceconfig.Instructions{"development": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for label, rendered := range map[string][]byte{"broker": broker, "controller": controller} {
+		if !bytes.Contains(rendered, []byte(`"workflows":"write"`)) {
+			t.Fatalf("%s omitted explicit workflow write: %s", label, rendered)
+		}
+	}
+}
+
+func TestPATRepositoryRendersWithoutGranularPermissionClaim(t *testing.T) {
+	raw, err := os.ReadFile("../manifest/testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.Replace(string(raw), "  github-key:\n    file: ./.nvt-local/secrets/github/main-app.pem", "  github-key:\n    file: ./.nvt-local/secrets/github/main-app.pem\n  github-token:\n    file: ./.nvt-local/secrets/github/token", 1)
+	input = strings.Replace(input, "  codex:\n", "  github-pat:\n    preset: github-pat\n    tokenSecret: github-token\n  codex:\n", 1)
+	input = strings.Replace(input, "accounts: [github, codex, azure]", "accounts: [github, github-pat, codex, azure]", 1)
+	input = strings.Replace(input, "defaultRepositoryAccount: github", "defaultRepositoryAccount: github-pat", 1)
+	input = strings.Replace(input, "          provider: github", "          provider: github-pat", 1)
+	input = strings.Replace(input, "    account: github\n  infrastructure:", "    account: github-pat\n  infrastructure:", 1)
+	decoded, err := manifest.Decode(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := manifest.Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker, err := serviceconfig.Broker(compiled)
+	if err != nil || !bytes.Contains(broker, []byte(`"name":"github-pat"`)) || !bytes.Contains(broker, []byte(`"plugin":"token"`)) || !bytes.Contains(broker, []byte(`"repositories":["mirkoSekulic/nvt-agent"]`)) {
+		t.Fatalf("PAT provider did not render the repository fence: %v %s", err, broker)
+	}
+	controller, err := serviceconfig.Controller(compiled, serviceconfig.Instructions{"development": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trusted resolvedrun.TrustedConfiguration
+	if err := json.Unmarshal(controller, &trusted); err != nil {
+		t.Fatal(err)
+	}
+	for _, grant := range trusted.Profiles[0].Broker.Grants {
+		if grant.Provider == "github-pat" && len(grant.Permissions) != 0 {
+			t.Fatalf("PAT grant claimed granular enforcement: %#v", grant)
+		}
 	}
 }
 

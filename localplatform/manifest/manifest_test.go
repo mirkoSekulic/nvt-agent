@@ -343,7 +343,7 @@ func TestBrokerGrantsDoNotCrossProfilesSharingAnAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	decoded.Profiles["other"] = Profile{Runtime: Runtime{Preset: "shell", Autonomy: "approval-required"}, Accounts: []string{"github"}}
-	decoded.Repositories["other"] = Repository{GitHub: "mirkoSekulic/other", Account: "github"}
+	decoded.Repositories["other"] = Repository{GitHub: "mirkoSekulic/other", Account: "github", Access: &RepositoryAccess{Permissions: map[string]string{"contents": "write", "pull_requests": "write", "workflows": "write"}}}
 	decoded.Workflows["other"] = Workflow{Profile: "other", Repository: "other", Retention: "disposable"}
 	compiled, err := Compile(decoded)
 	if err != nil {
@@ -356,10 +356,77 @@ func TestBrokerGrantsDoNotCrossProfilesSharingAnAccount(t *testing.T) {
 	if len(grants["other"]) != 1 || strings.Join(grants["other"][0].Repositories, ",") != "mirkoSekulic/other" {
 		t.Fatalf("other profile grants = %#v", grants["other"])
 	}
+	if grants["other"][0].Permissions["workflows"] != "write" {
+		t.Fatalf("opted-in profile omitted workflow authority: %#v", grants["other"])
+	}
 	for _, grant := range grants["development"] {
+		if grant.Purpose == "repository" && grant.Permissions["workflows"] != "" {
+			t.Fatalf("default profile inherited workflow authority: %#v", grant)
+		}
 		for _, repository := range grant.Repositories {
 			if repository == "mirkoSekulic/other" {
 				t.Fatal("repository grant crossed profile boundary")
+			}
+		}
+	}
+}
+
+func TestRepositoryAccessValidationAndCompilation(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := string(raw)
+	withAccess := strings.Replace(base, "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        contents: write\n        pull_requests: write\n        workflows: write\n  infrastructure:", 1)
+	decoded, err := Decode(strings.NewReader(withAccess))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := compiled.Broker.Repositories[1].Permissions["workflows"]; got != "write" {
+		t.Fatalf("compiled workflow permission = %q", got)
+	}
+
+	for name, mutation := range map[string]string{
+		"unknown permission":             strings.Replace(withAccess, "workflows: write", "administration: write", 1),
+		"invalid level":                  strings.Replace(withAccess, "workflows: write", "workflows: admin", 1),
+		"contradictory workflow write":   strings.Replace(withAccess, "contents: write", "contents: read", 1),
+		"pull requests without checkout": strings.Replace(base, "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        pull_requests: write\n  infrastructure:", 1),
+		"workflow read without checkout": strings.Replace(base, "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        workflows: read\n  infrastructure:", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Decode(strings.NewReader(mutation)); err == nil {
+				t.Fatal("invalid repository access was accepted")
+			}
+		})
+	}
+}
+
+func TestGitHubPATUsesSameRepositoryAccessContract(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.Replace(string(raw), "  github-key:\n    file: ./.nvt-local/secrets/github/main-app.pem", "  github-key:\n    file: ./.nvt-local/secrets/github/main-app.pem\n  github-token:\n    file: ./.nvt-local/secrets/github/token", 1)
+	input = strings.Replace(input, "  codex:\n", "  github-pat:\n    preset: github-pat\n    tokenSecret: github-token\n  codex:\n", 1)
+	input = strings.Replace(input, "accounts: [github, codex, azure]", "accounts: [github, github-pat, codex, azure]", 1)
+	input = strings.Replace(input, "defaultRepositoryAccount: github", "defaultRepositoryAccount: github-pat", 1)
+	input = strings.Replace(input, "    account: github\n  infrastructure:", "    account: github-pat\n  infrastructure:", 1)
+	decoded, err := Decode(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range compiled.Broker.Profiles {
+		for _, grant := range profile.Grants {
+			if grant.Account == "github-pat" && grant.Purpose == "repository" && grant.Preset != "github-pat" {
+				t.Fatalf("repository grant = %#v", grant)
 			}
 		}
 	}
