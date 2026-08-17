@@ -152,6 +152,7 @@ const (
 	legacyExternalExecutionFinalizer       = "nvt.dev/agentrun-external-execution"
 	legacyGuestEnrollmentFinalizer         = "nvt.dev/agentrun-guest-enrollment"
 	legacyExternalExecutionReason          = "spec.execution belongs to the removed external execution stack; delete and recreate this AgentRun"
+	legacyExternalDeletionReason           = "legacy external resources require cleanup by the pre-0.8.70 operator or explicit administrator acknowledgement; cleanup finalizers were retained"
 	completedLifecycleReason               = "Completed by lifecycle event "
 	failedLifecycleReason                  = "Failed by lifecycle event "
 	activeDeadlineReason                   = "Active deadline exceeded"
@@ -315,7 +316,10 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	if agentRun.Spec.Execution != nil || hasLegacyExternalFinalizer(&agentRun) {
 		if !agentRun.DeletionTimestamp.IsZero() {
-			return ctrl.Result{}, r.finalizeLegacyExternalAgentRun(ctx, &agentRun)
+			if err := r.setAgentRunFailed(ctx, &agentRun, legacyExternalDeletionReason); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
 		}
 		if err := r.setAgentRunFailed(ctx, &agentRun, legacyExternalExecutionReason); err != nil {
 			return ctrl.Result{}, err
@@ -548,23 +552,6 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 func hasLegacyExternalFinalizer(agentRun *nvtv1alpha1.AgentRun) bool {
 	return controllerutil.ContainsFinalizer(agentRun, legacyExternalExecutionFinalizer) ||
 		controllerutil.ContainsFinalizer(agentRun, legacyGuestEnrollmentFinalizer)
-}
-
-// finalizeLegacyExternalAgentRun only removes finalizers owned by components
-// that no longer exist. It deliberately does not attempt remote cleanup.
-func (r *AgentRunReconciler) finalizeLegacyExternalAgentRun(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
-	if controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
-		if err := r.removeBrokerAgentsPolicyEntry(ctx, agentRun); err != nil {
-			return err
-		}
-		controllerutil.RemoveFinalizer(agentRun, agentRunFinalizer)
-	}
-	controllerutil.RemoveFinalizer(agentRun, legacyExternalExecutionFinalizer)
-	controllerutil.RemoveFinalizer(agentRun, legacyGuestEnrollmentFinalizer)
-	if err := r.Update(ctx, agentRun); err != nil {
-		return fmt.Errorf("remove legacy external AgentRun finalizers: %w", err)
-	}
-	return nil
 }
 
 func earliestRequeue(first, second ctrl.Result) ctrl.Result {

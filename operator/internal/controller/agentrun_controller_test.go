@@ -121,27 +121,29 @@ func TestReconcileLegacyExternalAgentRunFailsClosed(t *testing.T) {
 	}
 }
 
-func TestReconcileDeletingLegacyExternalAgentRunRemovesObsoleteFinalizers(t *testing.T) {
+func TestReconcileDeletingLegacyExternalAgentRunRetainsCleanupFinalizers(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
 	agentRun := testAgentRun()
 	now := metav1.Now()
 	agentRun.DeletionTimestamp = &now
-	agentRun.Finalizers = []string{legacyExternalExecutionFinalizer, legacyGuestEnrollmentFinalizer, agentRunFinalizer}
+	agentRun.Finalizers = []string{legacyExternalExecutionFinalizer, legacyGuestEnrollmentFinalizer}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).Build()
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).WithObjects(agentRun).Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
 		t.Fatalf("reconcile deleting legacy AgentRun: %v", err)
 	}
 	var updated nvtv1alpha1.AgentRun
-	err := k8sClient.Get(ctx, clientKey(agentRun), &updated)
-	if err != nil && !errors.IsNotFound(err) {
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updated); err != nil {
 		t.Fatalf("get deleting AgentRun: %v", err)
 	}
-	if err == nil && len(updated.Finalizers) != 0 {
-		t.Fatalf("AgentRun finalizers remain: %#v", updated.Finalizers)
+	if !hasLegacyExternalFinalizer(&updated) {
+		t.Fatalf("cleanup finalizers were removed: %#v", updated.Finalizers)
+	}
+	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed || updated.Status.Reason != legacyExternalDeletionReason {
+		t.Fatalf("expected actionable fail-closed deletion status, got %#v", updated.Status)
 	}
 }
 
