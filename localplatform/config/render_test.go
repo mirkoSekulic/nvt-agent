@@ -72,8 +72,56 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	if err := json.Unmarshal(controller, &trusted); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolvedrun.NewResolver(trusted); err != nil {
+	resolver, err := resolvedrun.NewResolver(trusted)
+	if err != nil {
 		t.Fatalf("native controller policy is invalid: %v\n%s", err, controller)
+	}
+	workflows := map[string]resolvedrun.Workflow{}
+	for _, workflow := range trusted.Workflows {
+		workflows[workflow.Name] = workflow
+	}
+	if got := workflows["nvt-review"].Lifecycle; got == nil || strings.Join(got.CompleteOn, ",") != "plugin.work.completed" || strings.Join(got.FailOn, ",") != "plugin.work.failed" {
+		t.Fatalf("review lifecycle was not projected: %#v", got)
+	}
+	if got := workflows["nvt-development"].Lifecycle; got == nil || strings.Join(got.CompleteOn, ",") != "plugin.github.pr.merged,plugin.github.pr.closed" || len(got.FailOn) != 0 {
+		t.Fatalf("PR lifecycle was not projected: %#v", got)
+	}
+	authorization := resolvedrun.AuthorizationContext{Principal: resolvedrun.Principal{Issuer: "https://github.com", Subject: "owner"}, Selections: []resolvedrun.AuthorizedSelection{{Profile: "development", Workflows: []string{"nvt-development", "nvt-review"}}}}
+	for _, test := range []struct {
+		workflow string
+		complete []string
+		fail     []string
+	}{
+		{"nvt-review", []string{"plugin.work.completed"}, []string{"plugin.work.failed"}},
+		{"nvt-development", []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}, nil},
+	} {
+		resolved, resolveErr := resolver.Resolve(authorization, resolvedrun.LocalRunRequest{RunID: "snapshot-" + test.workflow, Profile: "development", Workflow: test.workflow, Retention: "disposable", Backend: "local-docker"})
+		if resolveErr != nil || strings.Join(resolved.Lifecycle.CompleteOn, ",") != strings.Join(test.complete, ",") || strings.Join(resolved.Lifecycle.FailOn, ",") != strings.Join(test.fail, ",") {
+			t.Fatalf("resolved %s lifecycle = %#v err=%v", test.workflow, resolved.Lifecycle, resolveErr)
+		}
+	}
+	var native struct {
+		Schedules []struct {
+			Producers []struct {
+				Selections      []struct{ Profile, Workflow string }
+				DefaultWorkflow string `json:"default_workflow"`
+			}
+		} `json:"schedules"`
+	}
+	if err := json.Unmarshal(controller, &native); err != nil || len(native.Schedules) != 2 {
+		t.Fatalf("native schedules = %#v err=%v", native, err)
+	}
+	var githubSelections map[string]string
+	for _, schedule := range native.Schedules {
+		if len(schedule.Producers) > 0 && schedule.Producers[0].DefaultWorkflow == "nvt-development" {
+			githubSelections = map[string]string{}
+			for _, selection := range schedule.Producers[0].Selections {
+				githubSelections[selection.Workflow] = selection.Profile
+			}
+		}
+	}
+	if githubSelections["nvt-development"] != "development" || githubSelections["nvt-review"] != "development" || len(githubSelections) != 2 {
+		t.Fatalf("authorized GitHub selections = %#v", githubSelections)
 	}
 	if len(trusted.Profiles) != 1 || trusted.Profiles[0].Runtime == nil || trusted.Profiles[0].Runtime.Docker == nil ||
 		trusted.Profiles[0].Egress.Transport != "transparent" || !trusted.Profiles[0].Egress.AllowInsecureBroker || trusted.Profiles[0].DefaultCredentialProvider != "github" {
@@ -101,6 +149,15 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		t.Fatalf("Codex runtime grant is missing: %#v", trusted.Profiles[0].Broker.Grants)
 	}
 	var agentConfig struct {
+		Plugins []struct {
+			Name    string         `json:"name"`
+			When    string         `json:"when"`
+			Restart string         `json:"restart"`
+			Config  map[string]any `json:"config"`
+			Egress  struct {
+				Provider string `json:"provider"`
+			} `json:"egress"`
+		} `json:"plugins"`
 		Runtime struct {
 			Args   []string `json:"args"`
 			Resume struct {
@@ -128,6 +185,23 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	}
 	if err := json.Unmarshal(trusted.Profiles[0].AgentConfig, &agentConfig); err != nil {
 		t.Fatal(err)
+	}
+	pluginByName := map[string]struct {
+		when, restart, provider string
+		config                  map[string]any
+	}{}
+	for _, plugin := range agentConfig.Plugins {
+		pluginByName[plugin.Name] = struct {
+			when, restart, provider string
+			config                  map[string]any
+		}{plugin.When, plugin.Restart, plugin.Egress.Provider, plugin.Config}
+	}
+	watcher := pluginByName["github-watcher"]
+	if watcher.when != "after-agent" || watcher.restart != "always" || watcher.provider != "github" || fmt.Sprint(watcher.config["poll-seconds"]) != "30" {
+		t.Fatalf("mediated github-watcher plugin policy = %#v", watcher)
+	}
+	if workControl, exists := pluginByName["work-control"]; !exists || workControl.provider != "" {
+		t.Fatalf("ordinary work-control plugin policy = %#v", workControl)
 	}
 	if got := agentConfig.Runtime.Resume.Args; len(got) != 3 || got[0] != "resume" || got[1] != "--last" || got[2] != "--dangerously-bypass-approvals-and-sandbox" {
 		t.Fatalf("Codex resume command is incomplete: %#v", got)
@@ -199,6 +273,22 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	if _, err := serviceconfig.Controller(readOnly, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil || !strings.Contains(err.Error(), "compiled runtime autonomy is unsupported") {
 		t.Fatalf("unsupported compiled read-only autonomy did not fail closed: %v", err)
 	}
+	incompatible := compiled
+	incompatible.Controller.Workflows = append([]manifest.NamedWorkflow(nil), compiled.Controller.Workflows...)
+	for index := range incompatible.Controller.Workflows {
+		if incompatible.Controller.Workflows[index].Name == "nvt-review" {
+			incompatible.Controller.Workflows[index].Workflow.Retention = "retained"
+		}
+	}
+	if _, err := serviceconfig.Controller(incompatible, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil || !strings.Contains(err.Error(), "incompatible workflow policy") {
+		t.Fatalf("mixed-retention command workflows did not fail closed: %v", err)
+	}
+	unsupported := compiled
+	unsupported.Controller.ProducerAdmissions = append([]manifest.ProducerAdmissionIntent(nil), compiled.Controller.ProducerAdmissions...)
+	unsupported.Controller.ProducerAdmissions[1].CommandWorkflows = map[string]string{"deploy": "nvt-review"}
+	if _, err := serviceconfig.Controller(unsupported, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil || !strings.Contains(err.Error(), "unsupported command mapping") {
+		t.Fatalf("unsupported compiled command mapping did not fail closed: %v", err)
+	}
 	github := decoded.Accounts["github"]
 	github.Installations["other"] = "456"
 	decoded.Accounts["github"] = github
@@ -208,8 +298,8 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serviceconfig.Controller(ambiguous, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil || !bytes.Contains([]byte(err.Error()), []byte("default credential provider is ambiguous")) {
-		t.Fatalf("multi-installation default policy did not fail closed: %v", err)
+	if _, err := serviceconfig.Controller(ambiguous, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil || !bytes.Contains([]byte(err.Error()), []byte("plugin egress provider is ambiguous")) {
+		t.Fatalf("multi-installation plugin egress policy did not fail closed: %v", err)
 	}
 }
 

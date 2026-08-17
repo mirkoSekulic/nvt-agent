@@ -1,5 +1,17 @@
 apiVersion: nvt.dev/local/v1
 
+secrets:
+  github-key:
+    file: ./.nvt-local/secrets/github/app.pem
+
+accounts:
+  github:
+    preset: github-app
+    appId: "1"
+    privateKeySecret: github-key
+    installations:
+      mirkoSekulic: "1"
+
 profiles:
   development:
     runtime:
@@ -7,10 +19,20 @@ profiles:
       autonomy: trusted-local
     editor:
       preset: code-server
+    accounts: [github]
+    defaultRepositoryAccount: github
+    plugins:
+      - work-control
+      - name: github-watcher
+        when: after-agent
+        restart: always
+        egress:
+          provider: github
 
 repositories:
   nvt-agent:
     github: mirkoSekulic/nvt-agent
+    account: github
   studio:
     github: Altinn/altinn-studio
   infrastructure:
@@ -32,6 +54,15 @@ workflows:
     profile: development
     repository: nvt-agent
     retention: disposable
+    lifecycle:
+      completeOn: [plugin.github.pr.merged, plugin.github.pr.closed]
+  nvt-review:
+    profile: development
+    repository: nvt-agent
+    retention: disposable
+    lifecycle:
+      completeOn: [plugin.work.completed]
+      failOn: [plugin.work.failed]
   studio-development:
     profile: development
     repository: studio

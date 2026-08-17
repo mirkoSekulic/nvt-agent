@@ -105,7 +105,11 @@ func Controller(compiled manifest.Compiled, instructions Instructions) ([]byte, 
 		if !ok || !repositoryOK {
 			return nil, errors.New("compiled workflow references are invalid")
 		}
-		result.Workflows = append(result.Workflows, resolvedrun.Workflow{Name: item.Name, Repositories: []resolvedrun.Repository{renderRepository(repository, profile, accounts)}})
+		lifecycle := &resolvedrun.Lifecycle{CompleteOn: append([]string(nil), item.Workflow.Lifecycle.CompleteOn...), FailOn: append([]string(nil), item.Workflow.Lifecycle.FailOn...)}
+		if len(lifecycle.CompleteOn) == 0 && len(lifecycle.FailOn) == 0 {
+			lifecycle = nil
+		}
+		result.Workflows = append(result.Workflows, resolvedrun.Workflow{Name: item.Name, Repositories: []resolvedrun.Repository{renderRepository(repository, profile, accounts)}, Lifecycle: lifecycle})
 	}
 	for _, item := range compiled.Controller.Workstations {
 		profile, ok := profiles[item.Profile]
@@ -134,15 +138,33 @@ func Controller(compiled manifest.Compiled, instructions Instructions) ([]byte, 
 		workflowRetentions[item.Name] = item.Workflow.Retention
 	}
 	for _, admission := range compiled.Controller.ProducerAdmissions {
+		for command := range admission.CommandWorkflows {
+			if command != "pr-create" && command != "review" && command != "run" && command != "pr-continue" {
+				return nil, errors.New("compiled producer admission has unsupported command mapping")
+			}
+		}
 		profile := workflowProfiles[admission.Workflow]
 		retention := workflowRetentions[admission.Workflow]
 		if profile == "" || retention == "" {
 			return nil, errors.New("compiled producer admission is invalid")
 		}
+		selected := map[string]struct{}{admission.Workflow: {}}
+		for _, workflow := range admission.CommandWorkflows {
+			selected[workflow] = struct{}{}
+		}
+		selections := make([]scheduleSelection, 0, len(selected))
+		for workflow := range selected {
+			selectedProfile, ok := workflowProfiles[workflow]
+			if !ok || workflowRetentions[workflow] != retention {
+				return nil, errors.New("compiled producer admission has incompatible workflow policy")
+			}
+			selections = append(selections, scheduleSelection{Profile: selectedProfile, Workflow: workflow})
+		}
+		sort.Slice(selections, func(i, j int) bool { return selections[i].Workflow < selections[j].Workflow })
 		result.Schedules = append(result.Schedules, schedule{Name: admission.Producer, Producers: []scheduleProducer{{
 			Identity: admission.Identity, TokenFile: plancontract.PrivateTarget(admission.Credential),
 			AllowedPrincipalIssuers: append([]string(nil), admission.AllowedPrincipalIssuers...),
-			Selections:              []scheduleSelection{{Profile: profile, Workflow: admission.Workflow}}, DefaultWorkflow: admission.Workflow,
+			Selections:              selections, DefaultWorkflow: admission.Workflow,
 			Retention: retention, Backend: "local-docker",
 		}}})
 	}
@@ -238,8 +260,25 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		return resolvedrun.Profile{}, errors.New("compiled runtime preset is invalid")
 	}
 	plugins := make([]any, 0, len(intent.Profile.Plugins))
-	for _, name := range intent.Profile.Plugins {
-		plugins = append(plugins, map[string]any{"name": name, "source": "builtin"})
+	for _, plugin := range intent.Profile.Plugins {
+		rendered := map[string]any{"name": plugin.Name, "source": "builtin"}
+		if plugin.When != "" {
+			rendered["when"] = plugin.When
+		}
+		if plugin.Restart != "" {
+			rendered["restart"] = plugin.Restart
+		}
+		if len(plugin.Config) != 0 {
+			rendered["config"] = plugin.Config
+		}
+		if plugin.Egress != nil {
+			provider, err := pluginEgressProvider(intent, plugin.Egress.Provider, accounts, repositories)
+			if err != nil {
+				return resolvedrun.Profile{}, err
+			}
+			rendered["egress"] = map[string]any{"provider": provider}
+		}
+		plugins = append(plugins, rendered)
 	}
 	codeServerEnabled := intent.Profile.Editor.Preset != "none"
 	codeServer := map[string]any{
@@ -340,6 +379,33 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		profile.Egress.MaxConcurrentTunnels = 128
 	}
 	return profile, nil
+}
+
+func pluginEgressProvider(intent manifest.ControllerProfileIntent, account string, accounts map[string]manifest.Account, repositories map[string]manifest.ControllerRepositoryIntent) (string, error) {
+	provider := ""
+	for _, grant := range intent.BrokerGrants {
+		if grant.Account != account {
+			continue
+		}
+		candidates := []string{account}
+		if grant.Purpose != "runtime-injection" {
+			candidates = candidates[:0]
+			for _, repositoryName := range grant.Repositories {
+				repository := brokerRepositoryByIdentity(repositories, repositoryName, account)
+				candidates = append(candidates, providerFor(account, repository.BrokerRepository, accounts[account]))
+			}
+		}
+		for _, candidate := range candidates {
+			if provider != "" && provider != candidate {
+				return "", errors.New("compiled plugin egress provider is ambiguous")
+			}
+			provider = candidate
+		}
+	}
+	if provider == "" {
+		return "", errors.New("compiled plugin egress provider is unavailable")
+	}
+	return provider, nil
 }
 
 func runtimePreseed(runtimeType string) map[string]any {

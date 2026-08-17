@@ -49,6 +49,7 @@ type ProducerIntent struct {
 	Image               string                `json:"image,omitempty"`
 	RuntimeIdentity     RuntimeIdentityIntent `json:"runtimeIdentity"`
 	Workflow            string                `json:"workflow"`
+	CommandWorkflows    map[string]string     `json:"commandWorkflows,omitempty"`
 	PublicConfig        map[string]any        `json:"publicConfig,omitempty"`
 	Secrets             map[string]string     `json:"secrets,omitempty"`
 	GitHub              *GitHubProducerIntent `json:"github,omitempty"`
@@ -113,11 +114,12 @@ type ControllerCredentialProviderIntent struct {
 	Preset string `json:"preset"`
 }
 type ProducerAdmissionIntent struct {
-	Producer                string   `json:"producer"`
-	Identity                string   `json:"identity"`
-	Workflow                string   `json:"workflow"`
-	Credential              string   `json:"credential"`
-	AllowedPrincipalIssuers []string `json:"allowedPrincipalIssuers"`
+	Producer                string            `json:"producer"`
+	Identity                string            `json:"identity"`
+	Workflow                string            `json:"workflow"`
+	CommandWorkflows        map[string]string `json:"commandWorkflows,omitempty"`
+	Credential              string            `json:"credential"`
+	AllowedPrincipalIssuers []string          `json:"allowedPrincipalIssuers"`
 }
 type BrokerRepositoryIntent struct {
 	Name             string `json:"name"`
@@ -156,12 +158,19 @@ func Compile(m Manifest) (Compiled, error) {
 		profile.Tools.Packages = append([]string(nil), profile.Tools.Packages...)
 		profile.Tools.Mise = append([]string(nil), profile.Tools.Mise...)
 		profile.Capabilities = append([]string(nil), profile.Capabilities...)
-		profile.Plugins = append([]string(nil), profile.Plugins...)
+		profile.Plugins = append([]Plugin(nil), profile.Plugins...)
+		for index := range profile.Plugins {
+			profile.Plugins[index].Config = cloneConfig(profile.Plugins[index].Config)
+			if profile.Plugins[index].Egress != nil {
+				egress := *profile.Plugins[index].Egress
+				profile.Plugins[index].Egress = &egress
+			}
+		}
 		sort.Strings(profile.Accounts)
 		sort.Strings(profile.Tools.Packages)
 		sort.Strings(profile.Tools.Mise)
 		sort.Strings(profile.Capabilities)
-		sort.Strings(profile.Plugins)
+		sort.Slice(profile.Plugins, func(i, j int) bool { return profile.Plugins[i].Name < profile.Plugins[j].Name })
 		grants := compileBrokerGrants(m, name)
 		result.Broker.Profiles = append(result.Broker.Profiles, BrokerProfileIntent{Name: name, Accounts: append([]string(nil), profile.Accounts...), Grants: grants})
 		controllerProfile := ControllerProfileIntent{Name: name, Profile: profile, DefaultCredentialProvider: defaultRepositoryAccount(m, name), EgressProxyProvider: profile.Runtime.Account, BrokerGrants: cloneBrokerGrants(grants)}
@@ -206,7 +215,7 @@ func Compile(m Manifest) (Compiled, error) {
 		if producer.RuntimeIdentity != nil {
 			identity = RuntimeIdentityIntent{UID: producer.RuntimeIdentity.UID, GID: producer.RuntimeIdentity.GID}
 		}
-		intent := ProducerIntent{Owner: "producer:" + producer.Name, Name: producer.Name, Kind: producer.Preset, Image: producer.Image, RuntimeIdentity: identity, Workflow: producer.Workflow, PublicConfig: producer.PublicConfig, Secrets: sortedMap(producer.Secrets), AdmissionCredential: credential}
+		intent := ProducerIntent{Owner: "producer:" + producer.Name, Name: producer.Name, Kind: producer.Preset, Image: producer.Image, RuntimeIdentity: identity, Workflow: producer.Workflow, CommandWorkflows: sortedMap(producer.CommandWorkflows), PublicConfig: producer.PublicConfig, Secrets: sortedMap(producer.Secrets), AdmissionCredential: credential}
 		if producer.Preset == "github-comments" {
 			account := m.Accounts[producer.Account]
 			owner, repository, _ := githubCoordinates(m.Repositories[producer.Repository])
@@ -225,7 +234,8 @@ func Compile(m Manifest) (Compiled, error) {
 			issuers = []string{"https://github.com"}
 		}
 		sort.Strings(issuers)
-		result.Controller.ProducerAdmissions = append(result.Controller.ProducerAdmissions, ProducerAdmissionIntent{producer.Name, "producer:" + producer.Name, producer.Workflow, credential, issuers})
+		workflows := sortedMap(producer.CommandWorkflows)
+		result.Controller.ProducerAdmissions = append(result.Controller.ProducerAdmissions, ProducerAdmissionIntent{Producer: producer.Name, Identity: "producer:" + producer.Name, Workflow: producer.Workflow, CommandWorkflows: workflows, Credential: credential, AllowedPrincipalIssuers: issuers})
 		result.GeneratedPrivateInputs = append(result.GeneratedPrivateInputs, GeneratedPrivateInputIntent{"local-platform-state", credential, "schedule-admission-token", []string{"local-controller", "producer:" + producer.Name}})
 	}
 	for _, name := range SortedNames(m.Accounts) {
@@ -338,6 +348,32 @@ func sortedMap[T any](input map[string]T) map[string]T {
 		result[key] = input[key]
 	}
 	return result
+}
+
+func cloneConfig(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	result := make(map[string]any, len(input))
+	for key, value := range input {
+		result[key] = cloneConfigValue(value)
+	}
+	return result
+}
+
+func cloneConfigValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneConfig(typed)
+	case []any:
+		result := make([]any, len(typed))
+		for index := range typed {
+			result[index] = cloneConfigValue(typed[index])
+		}
+		return result
+	default:
+		return value
+	}
 }
 
 // CanonicalJSON is the stable serialization used for equality, hashing, and

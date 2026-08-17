@@ -36,6 +36,7 @@ var (
 	runIDPattern      = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$`)
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	integerPattern    = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)$`)
+	eventPattern      = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 	secretKeyPattern  = regexp.MustCompile(`(?i)(secret|token|password|passwd|private.?key|credential|api.?key)`)
 )
 
@@ -70,7 +71,34 @@ type Profile struct {
 	Capabilities             []string `json:"capabilities,omitempty"`
 	Instructions             *FileRef `json:"instructions,omitempty"`
 	Editor                   Editor   `json:"editor,omitempty"`
-	Plugins                  []string `json:"plugins,omitempty"`
+	Plugins                  []Plugin `json:"plugins,omitempty"`
+}
+
+type Plugin struct {
+	Name    string         `json:"name"`
+	When    string         `json:"when,omitempty"`
+	Restart string         `json:"restart,omitempty"`
+	Config  map[string]any `json:"config,omitempty"`
+	Egress  *PluginEgress  `json:"egress,omitempty"`
+}
+
+type PluginEgress struct {
+	Provider string `json:"provider"`
+}
+
+func (p *Plugin) UnmarshalJSON(data []byte) error {
+	var shorthand string
+	if err := json.Unmarshal(data, &shorthand); err == nil {
+		*p = Plugin{Name: shorthand}
+		return nil
+	}
+	type plain Plugin
+	var value plain
+	if err := strictJSON(data, &value); err != nil {
+		return err
+	}
+	*p = Plugin(value)
+	return nil
 }
 
 type Runtime struct {
@@ -109,9 +137,15 @@ type Repository struct {
 }
 
 type Workflow struct {
-	Profile    string `json:"profile"`
-	Repository string `json:"repository"`
-	Retention  string `json:"retention"`
+	Profile    string    `json:"profile"`
+	Repository string    `json:"repository"`
+	Retention  string    `json:"retention"`
+	Lifecycle  Lifecycle `json:"lifecycle"`
+}
+
+type Lifecycle struct {
+	CompleteOn []string `json:"completeOn,omitempty"`
+	FailOn     []string `json:"failOn,omitempty"`
 }
 
 type Producer struct {
@@ -124,6 +158,7 @@ type Producer struct {
 	Prefix                  string            `json:"prefix,omitempty"`
 	AllowedAuthors          []string          `json:"allowedAuthors,omitempty"`
 	Workflow                string            `json:"workflow"`
+	CommandWorkflows        map[string]string `json:"commandWorkflows,omitempty"`
 	AllowedPrincipalIssuers []string          `json:"allowedPrincipalIssuers,omitempty"`
 	PublicConfig            map[string]any    `json:"publicConfig,omitempty"`
 	Secrets                 map[string]string `json:"secrets,omitempty"`
@@ -312,8 +347,21 @@ func (m Manifest) Validate() error {
 		if err := uniqueStrings(profile.Capabilities); err != nil {
 			return err
 		}
-		if err := uniqueStrings(profile.Plugins); err != nil {
-			return err
+		seenPlugins := map[string]struct{}{}
+		for _, plugin := range profile.Plugins {
+			if !validName(plugin.Name) || !oneOf(plugin.When, "", "before-agent", "after-agent") || !oneOf(plugin.Restart, "", "never", "on-failure", "always") {
+				return fmt.Errorf("profile %q has an invalid plugin", name)
+			}
+			if _, duplicate := seenPlugins[plugin.Name]; duplicate {
+				return fmt.Errorf("profile %q has duplicate plugin %q", name, plugin.Name)
+			}
+			seenPlugins[plugin.Name] = struct{}{}
+			if err := validateConfig(plugin.Config, 0); err != nil {
+				return fmt.Errorf("profile %q plugin %q config: %w", name, plugin.Name, err)
+			}
+			if plugin.Egress != nil && (!has(m.Accounts, plugin.Egress.Provider) || !contains(profile.Accounts, plugin.Egress.Provider)) {
+				return fmt.Errorf("profile %q plugin %q has an invalid egress provider", name, plugin.Name)
+			}
 		}
 		if profile.Instructions != nil && !safeRelativePath(profile.Instructions.File, "") {
 			return fmt.Errorf("profile %q has unsafe instruction path", name)
@@ -358,6 +406,9 @@ func (m Manifest) Validate() error {
 		if !profileAllowsRepository(m.Profiles[workflow.Profile], m.Repositories[workflow.Repository]) {
 			return fmt.Errorf("workflow %q profile does not allow repository account", name)
 		}
+		if err := validateLifecycle(workflow.Lifecycle); err != nil {
+			return fmt.Errorf("workflow %q lifecycle: %w", name, err)
+		}
 	}
 	for name, profile := range m.Profiles {
 		repositoryAccounts := profileRepositoryAccounts(m, name)
@@ -394,6 +445,15 @@ func (m Manifest) Validate() error {
 		}
 		if producer.Preset == "github-comments" && (len(producer.PublicConfig) != 0 || len(producer.Secrets) != 0) {
 			return fmt.Errorf("built-in producer %q uses external-only fields", producer.Name)
+		}
+		if producer.Preset == "github-comments" {
+			for command, workflow := range producer.CommandWorkflows {
+				if !oneOf(command, "pr-create", "review", "run", "pr-continue") || !has(m.Workflows, workflow) {
+					return fmt.Errorf("built-in producer %q has invalid command workflow mapping", producer.Name)
+				}
+			}
+		} else if len(producer.CommandWorkflows) != 0 {
+			return fmt.Errorf("external producer %q uses built-in fields", producer.Name)
 		}
 		if producer.Image != "" && (producer.Account != "" || producer.Repository != "" || producer.Prefix != "" || len(producer.AllowedAuthors) != 0) {
 			return fmt.Errorf("external producer %q uses built-in fields", producer.Name)
@@ -663,6 +723,25 @@ func uniqueStrings(values []string) error {
 			return fmt.Errorf("duplicate value %q", v)
 		}
 		seen[v] = struct{}{}
+	}
+	return nil
+}
+
+func validateLifecycle(value Lifecycle) error {
+	if len(value.CompleteOn) > 128 || len(value.FailOn) > 128 {
+		return errors.New("too many lifecycle events")
+	}
+	seen := map[string]struct{}{}
+	for _, events := range [][]string{value.CompleteOn, value.FailOn} {
+		for _, event := range events {
+			if len(event) > 256 || !eventPattern.MatchString(event) {
+				return errors.New("invalid lifecycle event")
+			}
+			if _, exists := seen[event]; exists {
+				return errors.New("duplicate lifecycle event")
+			}
+			seen[event] = struct{}{}
+		}
 	}
 	return nil
 }
