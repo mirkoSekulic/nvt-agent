@@ -221,6 +221,80 @@ func TestToolOnlyPluginRunPluginsSkipsCleanly(t *testing.T) {
 	}
 }
 
+func TestMissingBuiltinManifestFailsEveryResolutionPath(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+plugins:
+  - name: stale-image-plugin
+    source: builtin
+    command: /bin/true
+    doctor:
+      command: /bin/true
+    exports:
+      tools: []
+`)
+	want := "builtin plugin stale-image-plugin manifest is missing"
+
+	if output := f.runExport(config, false); !strings.Contains(output, want) {
+		t.Fatalf("export failure did not identify missing builtin manifest:\n%s", output)
+	}
+	if output := f.runRunPlugins(config, "after-agent", false); !strings.Contains(output, want) {
+		t.Fatalf("execution failure did not identify missing builtin manifest:\n%s", output)
+	}
+	doctorOutput := f.runWithEnv(
+		"python3",
+		false,
+		[]string{"NVT_AGENT_CONFIG_FILE=" + config, "PYTHONPATH=" + f.root},
+		filepath.Join(f.root, "runtime", "core", "doctor.py"),
+		"--plugin",
+		"stale-image-plugin",
+	)
+	if !strings.Contains(doctorOutput, want) {
+		t.Fatalf("doctor failure did not identify missing builtin manifest:\n%s", doctorOutput)
+	}
+
+	statePath := filepath.Join(f.state, "plugins", "stale-image-plugin", "state.json")
+	if _, err := os.Stat(statePath); err == nil {
+		var state map[string]any
+		decodeJSONFile(t, statePath, &state)
+		if state["status"] == "skipped" || state["ready"] == true {
+			t.Fatalf("missing builtin was considered ready: %#v", state)
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestDoctorPrevalidatesAllBuiltinManifestsBeforeSelectionOrDispatch(t *testing.T) {
+	f := newFixture(t)
+	doctorRan := filepath.Join(f.home, "doctor-ran")
+	doctor := f.writeTool("valid-plugin-doctor", "#!/usr/bin/env bash\ntouch "+shellQuote(doctorRan)+"\n")
+	config := f.writeAgentConfig(fmt.Sprintf(`
+plugins:
+  - name: valid-plugin
+    source: custom
+    doctor:
+      command: %s
+  - name: stale-image-plugin
+    source: builtin
+`, quoteYAML(doctor)))
+
+	output := f.runWithEnv(
+		"python3",
+		false,
+		[]string{"NVT_AGENT_CONFIG_FILE=" + config, "PYTHONPATH=" + f.root},
+		filepath.Join(f.root, "runtime", "core", "doctor.py"),
+		"--plugin",
+		"valid-plugin",
+	)
+	if !strings.Contains(output, "builtin plugin stale-image-plugin manifest is missing") {
+		t.Fatalf("doctor did not prevalidate the unselected missing builtin:\n%s", output)
+	}
+	if _, err := os.Stat(doctorRan); !os.IsNotExist(err) {
+		t.Fatalf("doctor command ran before builtin prevalidation completed: %v", err)
+	}
+}
+
 func TestAfterAgentPluginsStartConcurrently(t *testing.T) {
 	f := newFixture(t)
 	firstStarted := filepath.Join(f.home, "first-after-started")

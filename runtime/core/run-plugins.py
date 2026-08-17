@@ -163,8 +163,20 @@ def plugin_when(plugin):
     return when
 
 
-def builtin_command(name):
-    manifest = load_yaml(BUILTIN_PLUGIN_DIR / name / "plugin.yaml")
+def builtin_manifest(name):
+    path = BUILTIN_PLUGIN_DIR / name / "plugin.yaml"
+    if not path.is_file():
+        fail(f"builtin plugin {name} manifest is missing: {path}")
+    return load_yaml(path)
+
+
+def validate_builtin_manifest(plugin):
+    if plugin_source(plugin) == "builtin":
+        name = string_value(plugin.get("name"), "plugin.name", required=True)
+        builtin_manifest(name)
+
+
+def builtin_command(name, manifest):
     command = string_value(manifest.get("command"), f"builtin plugin {name} command")
     if command:
         return command
@@ -177,6 +189,7 @@ def builtin_command(name):
 def plugin_command(plugin):
     source = plugin_source(plugin)
     name = string_value(plugin.get("name"), "plugin.name", required=True)
+    manifest = builtin_manifest(name) if source == "builtin" else None
 
     override = string_value(plugin.get("command"), "plugin.command")
     if override:
@@ -188,7 +201,7 @@ def plugin_command(plugin):
         return override
 
     if source == "builtin":
-        return builtin_command(name)
+        return builtin_command(name, manifest)
     if source == "custom":
         return None
     if source == "git":
@@ -374,11 +387,14 @@ def main():
 
     when = sys.argv[1]
     config_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("/nvt-agent/agent.yaml")
+    plugins = load_plugins(config_path)
+    for plugin in plugins:
+        if not isinstance(plugin, dict):
+            fail("plugins entries must be YAML objects")
+        validate_builtin_manifest(plugin)
 
     if when == "before-agent":
-        for plugin in load_plugins(config_path):
-            if not isinstance(plugin, dict):
-                fail("plugins entries must be YAML objects")
+        for plugin in plugins:
             try:
                 plugin_egress_provider(plugin)
                 plugin_egress_environment(plugin, os.environ)
@@ -389,9 +405,7 @@ def main():
         return
 
     plugins_to_run = []
-    for plugin in load_plugins(config_path):
-        if not isinstance(plugin, dict):
-            fail("plugins entries must be YAML objects")
+    for plugin in plugins:
         try:
             plugin_egress_provider(plugin)
             plugin_egress_environment(plugin, os.environ)
