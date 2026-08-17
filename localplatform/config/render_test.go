@@ -140,6 +140,9 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 			if strings.Join(grant.EgressHosts, ",") != "github.com:443,api.github.com:443" {
 				t.Fatalf("GitHub grant omitted the API injection route: %#v", grant)
 			}
+			if grant.Permissions["contents"] != "write" || grant.Permissions["workflows"] != "write" {
+				t.Fatalf("GitHub grant omitted repository or workflow write access: %#v", grant)
+			}
 		}
 	}
 	if !githubGrantFound {
