@@ -361,6 +361,33 @@ spec:
                               enum:
                                 - read
                                 - write
+                          authorization:
+                            type: object
+                            required:
+                              - defaultAction
+                            properties:
+                              defaultAction:
+                                type: string
+                                enum:
+                                  - allow
+                                  - deny
+                              rules:
+                                type: array
+                                maxItems: 256
+                                items:
+                                  type: object
+                                  required:
+                                    - operation
+                                    - resource
+                                  properties:
+                                    operation:
+                                      type: string
+                                      minLength: 1
+                                      maxLength: 4096
+                                    resource:
+                                      type: string
+                                      minLength: 1
+                                      maxLength: 8192
                           quota:
                             type: object
                             required:

@@ -375,6 +375,19 @@ func TestReconcileDeletingLegacyExternalAgentRunRetainsCleanupFinalizers(t *test
 	}
 }
 
+func TestBrokerAgentGrantsCarriesOperationAuthorization(t *testing.T) {
+	policy := &nvtv1alpha1.AgentRunBrokerGrantAuthorization{DefaultAction: "deny", Rules: []nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule{{Operation: "execute", Resource: "workflow/deploy"}}}
+	grants := BrokerAgentGrants(&nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{Provider: "automation", Authorization: policy}}})
+	policy.Rules[0].Resource = "workflow/mutated"
+	if len(grants) != 1 || grants[0].Authorization == nil || grants[0].Authorization.Rules[0].Resource != "workflow/deploy" {
+		t.Fatalf("broker policy dropped or aliased authorization: %#v", grants)
+	}
+	raw, err := RenderBrokerAgentsYAML(brokerAgentsPolicy{Agents: []brokerAgentEntry{{ID: "agent", TokenSHA256: validTestTokenHash("agent"), Grants: grants}}})
+	if err != nil || !strings.Contains(raw, "defaultAction: deny") || !strings.Contains(raw, "resource: workflow/deploy") {
+		t.Fatalf("rendered broker policy omitted authorization: %v\n%s", err, raw)
+	}
+}
+
 func TestReconcileCreatesAgentConfigMap(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)

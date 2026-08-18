@@ -504,6 +504,25 @@ func TestRepositoryExplicitIdentityRendersWithoutProviderPreparation(t *testing.
 	}
 }
 
+func TestBrokerOperationAuthorizationResolvesImmutably(t *testing.T) {
+	configuration := validConfiguration()
+	policy := &BrokerGrantAuthorization{DefaultAction: "deny", Rules: []BrokerGrantAuthorizationRule{{Operation: "execute", Resource: "workflow/deploy"}}}
+	configuration.Profiles[0].Broker.Grants[0].Authorization = policy
+	resolver, err := NewResolver(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Rules[0].Resource = "workflow/mutated"
+	run, err := resolver.Resolve(validAuthorization(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := run.Broker.Grants[0].Authorization
+	if got == nil || got.DefaultAction != "deny" || len(got.Rules) != 1 || got.Rules[0].Resource != "workflow/deploy" {
+		t.Fatalf("resolved authorization policy was not immutable: %#v", got)
+	}
+}
+
 func TestEgressTransportContractMatchesRuntime(t *testing.T) {
 	t.Parallel()
 	for _, transport := range []string{"redirect", "forward-proxy", "transparent"} {

@@ -427,6 +427,20 @@ func validateBrokerAndEgress(broker Broker, egress Egress) error {
 				return errors.New("broker grant permissions are invalid")
 			}
 		}
+		if grant.Authorization != nil {
+			if grant.Authorization.DefaultAction != "allow" && grant.Authorization.DefaultAction != "deny" {
+				return errors.New("broker grant authorization default action is invalid")
+			}
+			if len(grant.Authorization.Rules) > maxGrantValues {
+				return errors.New("broker grant authorization exceeds its limit")
+			}
+			for _, rule := range grant.Authorization.Rules {
+				if rule.Operation == "" || len(rule.Operation) > 4096 || !utf8.ValidString(rule.Operation) ||
+					rule.Resource == "" || len(rule.Resource) > 8192 || !utf8.ValidString(rule.Resource) {
+					return errors.New("broker grant authorization rule is invalid")
+				}
+			}
+		}
 		if grant.Quota != nil && (grant.Quota.Requests < 1 || grant.Quota.Requests > 1_000_000_000) {
 			return errors.New("broker grant quota is invalid")
 		}

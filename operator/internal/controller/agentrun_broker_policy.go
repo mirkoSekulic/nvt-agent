@@ -66,6 +66,7 @@ func BrokerAgentGrants(broker *nvtv1alpha1.AgentRunBroker) []brokerAgentGrantEnt
 			Materialization: string(AgentRunGrantMaterialization(grant)),
 			EgressHosts:     append([]string{}, grant.EgressHosts...),
 			Permissions:     permissions,
+			Authorization:   grant.Authorization.DeepCopy(),
 			Quota:           quota,
 		})
 	}

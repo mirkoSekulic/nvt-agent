@@ -184,12 +184,13 @@ type brokerAgentEntry struct {
 }
 
 type brokerAgentGrantEntry struct {
-	Provider        string            `json:"provider"`
-	Repositories    []string          `json:"repositories"`
-	Materialization string            `json:"materialization,omitempty"`
-	EgressHosts     []string          `json:"egress-hosts,omitempty"`
-	Permissions     map[string]string `json:"permissions,omitempty"`
-	Quota           *brokerAgentQuota `json:"quota,omitempty"`
+	Provider        string                                        `json:"provider"`
+	Repositories    []string                                      `json:"repositories"`
+	Materialization string                                        `json:"materialization,omitempty"`
+	EgressHosts     []string                                      `json:"egress-hosts,omitempty"`
+	Permissions     map[string]string                             `json:"permissions,omitempty"`
+	Authorization   *nvtv1alpha1.AgentRunBrokerGrantAuthorization `json:"authorization,omitempty"`
+	Quota           *brokerAgentQuota                             `json:"quota,omitempty"`
 }
 
 type brokerAgentQuota struct {

@@ -1196,6 +1196,22 @@ func TestBrokerRegistryPreservesNativeLinuxOwnership(t *testing.T) {
 	}
 }
 
+func TestBrokerRegistryCarriesResolvedOperationAuthorization(t *testing.T) {
+	backend, _, run, tokens := testBackend(t)
+	run.Broker.Grants[0].Authorization = &resolvedrun.BrokerGrantAuthorization{DefaultAction: "deny", Rules: []resolvedrun.BrokerGrantAuthorizationRule{{Operation: "execute", Resource: "workflow/deploy"}}}
+	registry := brokerRegistry{path: backend.config.BrokerAgentsPath}
+	if err := registry.upsert(context.Background(), run, strings.Repeat("a", 64), tokens); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte("defaultAction: deny")) || !bytes.Contains(raw, []byte("resource: workflow/deploy")) {
+		t.Fatalf("local broker policy omitted authorization:\n%s", raw)
+	}
+}
+
 func TestBrokerRegistryLockRespectsBackendOperationDeadline(t *testing.T) {
 	backend, _, run, _ := testBackend(t)
 	backend.config.OperationTimeout = 120 * time.Millisecond

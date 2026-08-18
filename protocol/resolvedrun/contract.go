@@ -96,16 +96,27 @@ type Broker struct {
 }
 
 type BrokerGrant struct {
-	Provider              string            `json:"provider"`
-	Repositories          []string          `json:"repositories,omitempty"`
-	Capabilities          []string          `json:"capabilities,omitempty"`
-	Preparations          []string          `json:"preparations,omitempty"`
-	Materialization       string            `json:"materialization,omitempty"`
-	EgressHosts           []string          `json:"egress_hosts,omitempty"`
-	Git                   bool              `json:"git,omitempty"`
-	Permissions           map[string]string `json:"permissions,omitempty"`
-	Quota                 *BrokerGrantQuota `json:"quota,omitempty"`
-	AllowInsecureUpstream bool              `json:"allow_insecure_upstream,omitempty"`
+	Provider              string                    `json:"provider"`
+	Repositories          []string                  `json:"repositories,omitempty"`
+	Capabilities          []string                  `json:"capabilities,omitempty"`
+	Preparations          []string                  `json:"preparations,omitempty"`
+	Materialization       string                    `json:"materialization,omitempty"`
+	EgressHosts           []string                  `json:"egress_hosts,omitempty"`
+	Git                   bool                      `json:"git,omitempty"`
+	Permissions           map[string]string         `json:"permissions,omitempty"`
+	Authorization         *BrokerGrantAuthorization `json:"authorization,omitempty"`
+	Quota                 *BrokerGrantQuota         `json:"quota,omitempty"`
+	AllowInsecureUpstream bool                      `json:"allow_insecure_upstream,omitempty"`
+}
+
+type BrokerGrantAuthorization struct {
+	DefaultAction string                         `json:"default_action"`
+	Rules         []BrokerGrantAuthorizationRule `json:"rules,omitempty"`
+}
+
+type BrokerGrantAuthorizationRule struct {
+	Operation string `json:"operation"`
+	Resource  string `json:"resource"`
 }
 
 type BrokerGrantQuota struct {
