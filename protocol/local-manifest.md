@@ -11,11 +11,19 @@ paths, unresolved references, mutable OCI image tags, and undeclared
 secret-bearing fields.
 
 The document defines logical secrets by file reference, provider accounts,
-reusable profiles, named provider-neutral repositories, persistent
-workstations, disposable or retained workflows, the built-in
+explicit named retention policies, reusable profiles, named provider-neutral
+repositories, persistent workstations, workflows, the built-in
 `github-comments` producer, and external digest-pinned OCI producers. The
 explicitly named `publicConfig` boundary described below is
 administrator-asserted public data.
+
+`retentionPolicies` is the sole source of local-run persistence and expiry
+behavior. Each policy declares optional `persistence` flags and TTL values in
+seconds (`activeSeconds`, `completedSeconds`, `failedSeconds`, and
+`runRetentionSeconds`). Workflows reference a declared policy by name. When
+workstations are configured, `persistent` must preserve workspace, runtime
+state, and Docker data without a TTL. No renderer-owned retention durations or
+fallback policies are applied.
 
 Profile, workflow, and producer names use the controller's 63-byte lower-case
 run-ID grammar. A manifest declares at most 64 producers because each producer

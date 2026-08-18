@@ -74,6 +74,10 @@ func Controller(compiled manifest.Compiled, instructions Instructions) ([]byte, 
 	if compiled.Version != manifest.APIVersion || compiled.Controller.Owner != "local-controller" {
 		return nil, errors.New("compiled controller intent is invalid")
 	}
+	retentionPolicies, retentionNames, err := renderRetentionPolicies(compiled.Controller.RetentionPolicies)
+	if err != nil {
+		return nil, err
+	}
 	profiles := map[string]manifest.ControllerProfileIntent{}
 	accounts := accountMap(compiled)
 	repositories := repositoryMap(compiled)
@@ -85,15 +89,11 @@ func Controller(compiled manifest.Compiled, instructions Instructions) ([]byte, 
 			AgentConfig: mustJSON(map[string]any{"runtime": map[string]any{"command": "bash", "args": []string{"-l"}, "resume": map[string]any{"command": "bash", "args": []string{"-l"}}}, "plugins": []any{}}),
 		},
 		ExecutionBackends: []resolvedrun.ExecutionBackend{{Name: "local-docker", Kind: "container"}},
-		RetentionPolicies: []resolvedrun.RetentionPolicy{
-			{Name: "persistent", Persistence: resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true}},
-			{Name: "retained", Persistence: resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true}, TTL: resolvedrun.TTL{ActiveSeconds: 86400}},
-			{Name: "disposable", TTL: resolvedrun.TTL{ActiveSeconds: 3600, CompletedSeconds: 300, FailedSeconds: 900, RunRetentionSeconds: 86400}},
-		},
+		RetentionPolicies: retentionPolicies,
 	}
 	for _, intent := range compiled.Controller.Profiles {
 		profiles[intent.Name] = intent
-		profile, err := renderProfile(intent, accounts, repositories, instructions[intent.Name])
+		profile, err := renderProfile(intent, accounts, repositories, retentionNames, instructions[intent.Name])
 		if err != nil {
 			return nil, err
 		}
@@ -225,7 +225,34 @@ func validateNativeProjection(configuration nativeConfiguration) error {
 	return nil
 }
 
-func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]manifest.Account, repositories map[string]manifest.ControllerRepositoryIntent, instructions string) (resolvedrun.Profile, error) {
+func renderRetentionPolicies(policies []manifest.NamedRetentionPolicy) ([]resolvedrun.RetentionPolicy, []string, error) {
+	if len(policies) == 0 {
+		return nil, nil, errors.New("compiled retention policies are missing")
+	}
+	result := make([]resolvedrun.RetentionPolicy, 0, len(policies))
+	names := make([]string, 0, len(policies))
+	previous := ""
+	for _, item := range policies {
+		if item.Name == "" || previous != "" && item.Name <= previous {
+			return nil, nil, errors.New("compiled retention policies are invalid")
+		}
+		previous = item.Name
+		names = append(names, item.Name)
+		result = append(result, resolvedrun.RetentionPolicy{
+			Name: item.Name,
+			Persistence: resolvedrun.Persistence{
+				Workspace: item.Policy.Persistence.Workspace, RuntimeState: item.Policy.Persistence.RuntimeState, DockerData: item.Policy.Persistence.DockerData,
+			},
+			TTL: resolvedrun.TTL{
+				ActiveSeconds: item.Policy.TTL.ActiveSeconds, CompletedSeconds: item.Policy.TTL.CompletedSeconds,
+				FailedSeconds: item.Policy.TTL.FailedSeconds, RunRetentionSeconds: item.Policy.TTL.RunRetentionSeconds,
+			},
+		})
+	}
+	return result, names, nil
+}
+
+func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]manifest.Account, repositories map[string]manifest.ControllerRepositoryIntent, retentionNames []string, instructions string) (resolvedrun.Profile, error) {
 	runtimeType := intent.Profile.Runtime.Preset
 	autonomy := ""
 	switch intent.Profile.Runtime.Autonomy {
@@ -306,7 +333,7 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 	})
 	profile := resolvedrun.Profile{
 		Name: intent.Name, Runtime: &resolvedrun.Runtime{Type: runtimeType, Autonomy: autonomy, User: "root", Container: &resolvedrun.RuntimeContainer{Capabilities: append([]string(nil), intent.Profile.Capabilities...)}, Docker: &resolvedrun.RuntimeDocker{}},
-		AgentConfig: agentConfig, WorkspaceInstructions: instructions, AllowedBackends: []string{"local-docker"}, DefaultBackend: "local-docker", AllowedRetentions: []string{"persistent", "retained", "disposable"},
+		AgentConfig: agentConfig, WorkspaceInstructions: instructions, AllowedBackends: []string{"local-docker"}, DefaultBackend: "local-docker", AllowedRetentions: append([]string(nil), retentionNames...),
 	}
 	grantProviders := map[string]struct{}{}
 	repositoryGrants := map[string]struct {

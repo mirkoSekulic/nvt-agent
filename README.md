@@ -96,8 +96,8 @@ http://nvt.agent.localhost:4090
 ```
 
 `nvt.local.yaml` is the only local configuration entry point. It defines
-profiles, repositories, persistent workstations, workflows, accounts, routes,
-broker grants, and producers. Secret files are referenced beneath the ignored
+profiles, repositories, retention policies, persistent workstations, workflows,
+accounts, routes, broker grants, and producers. Secret files are referenced beneath the ignored
 `.nvt-local/secrets/` directory; Codex and Claude OAuth accounts are enrolled
 through the local portal. See [Native local workstations](docs/local-development-agent.md).
 

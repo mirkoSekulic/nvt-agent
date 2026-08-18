@@ -40,7 +40,11 @@ func validStateCompiled() manifest.Compiled {
 		Version: manifest.APIVersion,
 		Broker:  manifest.BrokerIntent{Owner: "broker"},
 		Controller: manifest.ControllerIntent{
-			Owner:        "local-controller",
+			Owner: "local-controller",
+			RetentionPolicies: []manifest.NamedRetentionPolicy{
+				{Name: "disposable", Policy: manifest.RetentionPolicy{TTL: manifest.TTL{ActiveSeconds: 3600}}},
+				{Name: "persistent", Policy: manifest.RetentionPolicy{Persistence: manifest.Persistence{Workspace: true, RuntimeState: true, DockerData: true}}},
+			},
 			Profiles:     []manifest.ControllerProfileIntent{{Name: "profile", Profile: manifest.Profile{Runtime: manifest.Runtime{Preset: "shell", Autonomy: "approval-required"}}}},
 			Repositories: []manifest.ControllerRepositoryIntent{{Name: "repository", URL: "https://github.com/example/repository.git", CheckoutTarget: "github.com/example/repository"}},
 			Workflows:    []manifest.NamedWorkflow{{Name: "workflow", Workflow: manifest.Workflow{Profile: "profile", Repository: "repository", Retention: "disposable"}}},
@@ -441,10 +445,11 @@ func TestManagerPublishesInventoryBeforeCreatingOtherVolumes(t *testing.T) {
 
 func TestManagerRejectsExpandedGeneratedFileBeforeVolumeCreation(t *testing.T) {
 	document := manifest.Manifest{
-		APIVersion:   manifest.APIVersion,
-		Profiles:     map[string]manifest.Profile{},
-		Repositories: map[string]manifest.Repository{"repo": {GitHub: "owner/repo"}},
-		Workflows:    map[string]manifest.Workflow{"work": {Profile: "profile-000", Repository: "repo", Retention: "disposable"}},
+		APIVersion:        manifest.APIVersion,
+		RetentionPolicies: map[string]manifest.RetentionPolicy{"disposable": {}},
+		Profiles:          map[string]manifest.Profile{},
+		Repositories:      map[string]manifest.Repository{"repo": {GitHub: "owner/repo"}},
+		Workflows:         map[string]manifest.Workflow{"work": {Profile: "profile-000", Repository: "repo", Retention: "disposable"}},
 	}
 	instructionPath := "instructions/" + strings.Repeat("a", 3000)
 	for index := 0; index < manifest.MaxItems; index++ {

@@ -75,6 +75,16 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	if err := json.Unmarshal(controller, &trusted); err != nil {
 		t.Fatal(err)
 	}
+	retentionPolicies := map[string]resolvedrun.RetentionPolicy{}
+	for _, policy := range trusted.RetentionPolicies {
+		retentionPolicies[policy.Name] = policy
+	}
+	if got := retentionPolicies["disposable"].TTL; got != (resolvedrun.TTL{ActiveSeconds: 604800, CompletedSeconds: 300, FailedSeconds: 900, RunRetentionSeconds: 86400}) {
+		t.Fatalf("manifest retention TTL was not projected: %#v", got)
+	}
+	if got := retentionPolicies["persistent"].Persistence; got != (resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true}) {
+		t.Fatalf("manifest persistence was not projected: %#v", got)
+	}
 	resolver, err := resolvedrun.NewResolver(trusted)
 	if err != nil {
 		t.Fatalf("native controller policy is invalid: %v\n%s", err, controller)

@@ -27,6 +27,7 @@ type BrokerIntent struct {
 }
 type ControllerIntent struct {
 	Owner              string                       `json:"owner"`
+	RetentionPolicies  []NamedRetentionPolicy       `json:"retentionPolicies"`
 	Profiles           []ControllerProfileIntent    `json:"profiles"`
 	Repositories       []ControllerRepositoryIntent `json:"repositories"`
 	Workstations       []Workstation                `json:"workstations,omitempty"`
@@ -141,6 +142,10 @@ type NamedWorkflow struct {
 	Name     string   `json:"name"`
 	Workflow Workflow `json:"workflow"`
 }
+type NamedRetentionPolicy struct {
+	Name   string          `json:"name"`
+	Policy RetentionPolicy `json:"policy"`
+}
 
 // Compile normalizes every unordered collection and returns only references to
 // private inputs. It never reads files or embeds referenced private contents.
@@ -148,7 +153,10 @@ func Compile(m Manifest) (Compiled, error) {
 	if err := m.Validate(); err != nil {
 		return Compiled{}, err
 	}
-	result := Compiled{Version: APIVersion, Broker: BrokerIntent{Owner: "broker", Profiles: []BrokerProfileIntent{}, Repositories: []BrokerRepositoryIntent{}}, Controller: ControllerIntent{Owner: "local-controller", Profiles: []ControllerProfileIntent{}, Repositories: []ControllerRepositoryIntent{}, Workflows: []NamedWorkflow{}}, Gateway: GatewayIntent{Owner: "gateway"}}
+	result := Compiled{Version: APIVersion, Broker: BrokerIntent{Owner: "broker", Profiles: []BrokerProfileIntent{}, Repositories: []BrokerRepositoryIntent{}}, Controller: ControllerIntent{Owner: "local-controller", RetentionPolicies: []NamedRetentionPolicy{}, Profiles: []ControllerProfileIntent{}, Repositories: []ControllerRepositoryIntent{}, Workflows: []NamedWorkflow{}}, Gateway: GatewayIntent{Owner: "gateway"}}
+	for _, name := range SortedNames(m.RetentionPolicies) {
+		result.Controller.RetentionPolicies = append(result.Controller.RetentionPolicies, NamedRetentionPolicy{Name: name, Policy: m.RetentionPolicies[name]})
+	}
 	for _, name := range SortedNames(m.Accounts) {
 		account := m.Accounts[name]
 		account.Installations = sortedMap(account.Installations)

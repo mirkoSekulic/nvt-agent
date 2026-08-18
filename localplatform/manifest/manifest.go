@@ -29,6 +29,7 @@ const (
 	MaxProducers     = 64
 	MaxNameBytes     = 63
 	MaxStringBytes   = 4096
+	MaxTTLSeconds    = 365 * 24 * 60 * 60
 )
 
 var (
@@ -41,14 +42,33 @@ var (
 )
 
 type Manifest struct {
-	APIVersion   string                `json:"apiVersion"`
-	Secrets      map[string]Secret     `json:"secrets,omitempty"`
-	Accounts     map[string]Account    `json:"accounts,omitempty"`
-	Profiles     map[string]Profile    `json:"profiles"`
-	Repositories map[string]Repository `json:"repositories"`
-	Workstations []Workstation         `json:"workstations,omitempty"`
-	Workflows    map[string]Workflow   `json:"workflows"`
-	Producers    []Producer            `json:"producers,omitempty"`
+	APIVersion        string                     `json:"apiVersion"`
+	Secrets           map[string]Secret          `json:"secrets,omitempty"`
+	Accounts          map[string]Account         `json:"accounts,omitempty"`
+	RetentionPolicies map[string]RetentionPolicy `json:"retentionPolicies"`
+	Profiles          map[string]Profile         `json:"profiles"`
+	Repositories      map[string]Repository      `json:"repositories"`
+	Workstations      []Workstation              `json:"workstations,omitempty"`
+	Workflows         map[string]Workflow        `json:"workflows"`
+	Producers         []Producer                 `json:"producers,omitempty"`
+}
+
+type RetentionPolicy struct {
+	Persistence Persistence `json:"persistence,omitempty"`
+	TTL         TTL         `json:"ttl,omitempty"`
+}
+
+type Persistence struct {
+	Workspace    bool `json:"workspace,omitempty"`
+	RuntimeState bool `json:"runtimeState,omitempty"`
+	DockerData   bool `json:"dockerData,omitempty"`
+}
+
+type TTL struct {
+	ActiveSeconds       int64 `json:"activeSeconds,omitempty"`
+	CompletedSeconds    int64 `json:"completedSeconds,omitempty"`
+	FailedSeconds       int64 `json:"failedSeconds,omitempty"`
+	RunRetentionSeconds int64 `json:"runRetentionSeconds,omitempty"`
 }
 
 type Secret struct {
@@ -276,10 +296,10 @@ func (m Manifest) Validate() error {
 	if m.APIVersion != APIVersion {
 		return fmt.Errorf("apiVersion must be %q", APIVersion)
 	}
-	if len(m.Profiles) == 0 || len(m.Workflows) == 0 {
-		return errors.New("profiles and workflows are required")
+	if len(m.RetentionPolicies) == 0 || len(m.Profiles) == 0 || len(m.Workflows) == 0 {
+		return errors.New("retentionPolicies, profiles, and workflows are required")
 	}
-	for label, count := range map[string]int{"secrets": len(m.Secrets), "accounts": len(m.Accounts), "profiles": len(m.Profiles), "repositories": len(m.Repositories), "workstations": len(m.Workstations), "workflows": len(m.Workflows), "producers": len(m.Producers)} {
+	for label, count := range map[string]int{"secrets": len(m.Secrets), "accounts": len(m.Accounts), "retentionPolicies": len(m.RetentionPolicies), "profiles": len(m.Profiles), "repositories": len(m.Repositories), "workstations": len(m.Workstations), "workflows": len(m.Workflows), "producers": len(m.Producers)} {
 		if count > MaxItems {
 			return fmt.Errorf("too many %s", label)
 		}
@@ -326,6 +346,22 @@ func (m Manifest) Validate() error {
 			if _, err := positiveID(installation); err != nil {
 				return fmt.Errorf("account %q has an invalid installation ID", name)
 			}
+		}
+	}
+	for name, policy := range m.RetentionPolicies {
+		if !validRunIDName(name) {
+			return fmt.Errorf("invalid retention policy %q", name)
+		}
+		for _, seconds := range []int64{policy.TTL.ActiveSeconds, policy.TTL.CompletedSeconds, policy.TTL.FailedSeconds, policy.TTL.RunRetentionSeconds} {
+			if seconds < 0 || seconds > MaxTTLSeconds {
+				return fmt.Errorf("retention policy %q has an invalid TTL", name)
+			}
+		}
+	}
+	if len(m.Workstations) > 0 {
+		persistent, ok := m.RetentionPolicies["persistent"]
+		if !ok || !persistent.Persistence.Workspace || !persistent.Persistence.RuntimeState || !persistent.Persistence.DockerData || persistent.TTL != (TTL{}) {
+			return errors.New("workstations require a non-expiring persistent retention policy")
 		}
 	}
 	for name, profile := range m.Profiles {
@@ -405,7 +441,7 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, workflow := range m.Workflows {
-		if !validRunIDName(name) || !has(m.Profiles, workflow.Profile) || !has(m.Repositories, workflow.Repository) || !oneOf(workflow.Retention, "disposable", "retained") {
+		if !validRunIDName(name) || !has(m.Profiles, workflow.Profile) || !has(m.Repositories, workflow.Repository) || !has(m.RetentionPolicies, workflow.Retention) {
 			return fmt.Errorf("invalid workflow %q", name)
 		}
 		if !profileAllowsRepository(m.Profiles[workflow.Profile], m.Repositories[workflow.Repository]) {

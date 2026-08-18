@@ -1,4 +1,23 @@
 apiVersion: nvt.dev/local/v1
+retentionPolicies:
+  persistent:
+    persistence:
+      workspace: true
+      runtimeState: true
+      dockerData: true
+  retained:
+    persistence:
+      workspace: true
+      runtimeState: true
+      dockerData: true
+    ttl:
+      activeSeconds: 86400
+  disposable:
+    ttl:
+      activeSeconds: 604800
+      completedSeconds: 300
+      failedSeconds: 900
+      runRetentionSeconds: 86400
 secrets:
   github-key:
     file: ./.nvt-local/secrets/github/main-app.pem

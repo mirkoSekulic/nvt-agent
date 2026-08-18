@@ -10,6 +10,14 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
+func cloneMap[K comparable, V any](source map[K]V) map[K]V {
+	result := make(map[K]V, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
 func TestValidFixtureCompilesDeterministically(t *testing.T) {
 	raw, err := os.ReadFile("testdata/valid.yaml")
 	if err != nil {
@@ -141,6 +149,9 @@ func TestCompiledSectionsAreOwnerSufficient(t *testing.T) {
 		t.Fatal(err)
 	}
 	controllerProfile := compiled.Controller.Profiles[0]
+	if len(compiled.Controller.RetentionPolicies) != 3 || compiled.Controller.RetentionPolicies[0].Name != "disposable" || compiled.Controller.RetentionPolicies[0].Policy.TTL.ActiveSeconds != 604800 {
+		t.Fatalf("controller retention policy projection is incomplete: %#v", compiled.Controller.RetentionPolicies)
+	}
 	if len(compiled.Controller.Profiles) != 1 || controllerProfile.Profile.Runtime.Preset != "codex" || controllerProfile.RuntimeProvider == nil || controllerProfile.RuntimeProvider.Name != "codex" || controllerProfile.DefaultCredentialProvider != "github" || controllerProfile.EgressProxyProvider != "codex" || len(controllerProfile.CredentialProviders) != 2 || len(controllerProfile.BrokerGrants) != 3 || controllerProfile.BrokerGrants[0].Purpose != "runtime-injection" || len(compiled.Controller.Repositories) != 2 {
 		t.Fatalf("controller projection is incomplete: %#v", compiled.Controller)
 	}
@@ -172,6 +183,56 @@ func TestCompiledSectionsAreOwnerSufficient(t *testing.T) {
 	}
 	if len(compiled.Gateway.CredentialPortalAccounts) != 1 || compiled.Gateway.CredentialPortalAccounts[0] != (PortalAccountIntent{"codex", "codex-oauth"}) {
 		t.Fatalf("gateway credential portal projection is incomplete: %#v", compiled.Gateway)
+	}
+}
+
+func TestRetentionPoliciesAreExplicitAndReferenced(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decoded.RetentionPolicies["disposable"].TTL.ActiveSeconds; got != 604800 {
+		t.Fatalf("disposable active TTL = %d, want 604800", got)
+	}
+
+	unknown := decoded
+	unknown.Workflows = cloneMap(decoded.Workflows)
+	workflow := unknown.Workflows["nvt-development"]
+	workflow.Retention = "missing"
+	unknown.Workflows["nvt-development"] = workflow
+	if err := unknown.Validate(); err == nil {
+		t.Fatal("workflow referencing an unknown retention policy was accepted")
+	}
+
+	for name, mutate := range map[string]func(*Manifest){
+		"negative TTL": func(value *Manifest) {
+			policy := value.RetentionPolicies["disposable"]
+			policy.TTL.ActiveSeconds = -1
+			value.RetentionPolicies["disposable"] = policy
+		},
+		"oversized TTL": func(value *Manifest) {
+			policy := value.RetentionPolicies["disposable"]
+			policy.TTL.ActiveSeconds = MaxTTLSeconds + 1
+			value.RetentionPolicies["disposable"] = policy
+		},
+		"expiring workstation policy": func(value *Manifest) {
+			policy := value.RetentionPolicies["persistent"]
+			policy.TTL.ActiveSeconds = 1
+			value.RetentionPolicies["persistent"] = policy
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := decoded
+			value.RetentionPolicies = cloneMap(decoded.RetentionPolicies)
+			mutate(&value)
+			if err := value.Validate(); err == nil {
+				t.Fatal("invalid retention policy was accepted")
+			}
+		})
 	}
 }
 
