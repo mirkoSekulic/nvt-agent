@@ -139,7 +139,7 @@ successful result contains:
 ```
 
 The only capability strings are `http.request`, `token`, `identity`, `headers`,
-`files`, `placeholder-files`, and `injection.headers`. Unknown or duplicate
+`files`, `placeholder-files`, `injection.authorization`, and `injection.headers`. Unknown or duplicate
 values fail initialization. Metadata defaults are an empty `injection_hosts`
 list, false `injection_git`, and null `bundle_ttl_seconds`; a non-null TTL is a
 positive integer. Injection metadata requires `injection.headers`. Providers
@@ -183,6 +183,14 @@ the sole audit writer; provider-generated audit records are not supported.
   `append_headers` contains only non-secret, comma-separated feature tokens;
   credential headers belong in `headers`. Providers that do not need additive
   composition may omit it.
+- `injection.authorization`: `{host,method,path,agent_id,request_id,grant}` →
+  `{allowed,operation,resource}`. `operation` and `resource` are bounded,
+  non-empty opaque strings defined by the provider. A provider declaring this
+  capability classifies the request and intersects its administrator-owned
+  ceiling with `grant.authorization`; `allowed` is the resulting decision.
+  Broker core never interprets either vocabulary. If a grant contains
+  operation authorization, an executable provider that did not negotiate this
+  capability fails closed before `injection.headers` is invoked.
 - `shutdown`: `{}` → any JSON result. The broker bounds this request, then
   terminates and reaps the child if it does not exit.
 
@@ -190,6 +198,12 @@ Field shapes match the corresponding HTTP endpoints in [broker.md](broker.md).
 The provider must enforce its configured ceiling. Broker core continues to
 enforce agent identity, grant/materialization rules, effective repositories,
 injection host routing, expiry capping, and all audit semantics.
+
+Operation authorization always precedes credential materialization. Unknown,
+ambiguous, or unclassified requests fail closed when either provider or grant
+policy is restrictive. Existing providers and grants remain compatible when
+operation authorization is absent. Provider policy is an administrator-owned
+ceiling; the immutable grant policy may narrow but cannot widen it.
 
 ## Failure, restart, and health
 

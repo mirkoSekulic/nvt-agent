@@ -84,6 +84,14 @@ class InProcessProviderAdapter(ProviderAdapter):
     def placeholder_files(self, agent_id, audit, request_id, grant):
         return self._provider.placeholder_files(agent_id, audit, request_id, grant)
 
+    def authorize_injection(self, host, method, path, agent_id, request_id, grant):
+        operation = getattr(self._provider, "authorize_injection", None)
+        if callable(operation):
+            return operation(host, method, path, agent_id, request_id, grant)
+        if grant.get("authorization") is not None:
+            raise ProviderError("operation-authorization-not-supported", status=403)
+        return None
+
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant):
         result = self._provider.injection_headers(host, method, path, agent_id, audit, request_id, grant)
         if len(result) == 3:

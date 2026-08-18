@@ -172,6 +172,35 @@ Rules:
   role mismatch, missing pairing, capability not granted to the paired agent,
   host not allowed for the capability, and materialization mode mismatch.
 
+### Operation and resource authorization
+
+An injection-capable provider may classify `(host, method, path)` into its own
+normalized `operation` and `resource` vocabulary. A grant can carry:
+
+```yaml
+authorization:
+  defaultAction: deny
+  rules:
+    - operation: execute
+      resource: repository/example/service/workflow/deploy-staging.yml
+```
+
+Core validates only bounded, non-empty opaque strings. The provider owns
+classification and intersects the grant with its configured `allow.authorization`
+ceiling. Both layers must allow the request; a grant can never widen the
+provider. Restrictive policy makes unknown, ambiguous, and unclassified paths
+fail closed. Authorization runs before `injection.headers`, so denied requests
+cannot mint or receive injectable material. Audit records contain normalized
+operation/resource decisions but never credentials, bodies, sensitive query
+values, or raw authorization headers.
+
+The first iteration classifies only method and normalized path. It cannot
+restrict JSON request-body fields such as a workflow dispatch `ref` or inputs;
+such fields require a separate bounded, streaming-safe classification contract.
+Each egress process is scoped to one immutable AgentRun grant, and its existing
+material cache remains keyed by method and path, preventing reuse across a
+different request classification or authorization scope.
+
 ### POST /v1/injection/routing
 
 Agent or egress role. Returns non-secret routing metadata for a capability.

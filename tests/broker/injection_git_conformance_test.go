@@ -85,6 +85,57 @@ func mintedPermissions(t *testing.T, request map[string]any) map[string]any {
 	return permissions
 }
 
+func TestGithubWorkflowOperationAuthorizationFailsClosed(t *testing.T) {
+	f := newBrokerFixture(t)
+	identities := gitIdentities(map[string]string{"workflows": "write"})
+	identities["frontend"].Grants[0].Authorization = map[string]any{
+		"defaultAction": "deny",
+		"rules": []any{map[string]any{
+			"operation": "execute",
+			"resource":  "repository/my-user/my-repo/workflow/deploy-staging.yml",
+		}},
+	}
+	f.writeRoleIdentities(identities)
+
+	request := func(path string) map[string]any {
+		return map[string]any{"capability": "git-app", "host": "api.github.com", "method": "POST", "path": path}
+	}
+	allowedPath := "/repos/my-user/my-repo/actions/workflows/deploy-staging.yml/dispatches"
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request(allowedPath))
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("configured workflow dispatch denied: status=%d body=%v", status, body)
+	}
+	mintedAfterAllow := len(f.fake.tokenRequests)
+
+	deniedPaths := []string{
+		"/repos/my-user/my-repo/actions/workflows/other.yml/dispatches",
+		"/repos/my-user/other-repo/actions/workflows/deploy-staging.yml/dispatches",
+		"/repos/my-user/my-repo/pulls",
+		"/graphql",
+		"/repos/my-user/my-repo/actions/workflows/deploy%2Fstaging.yml/dispatches",
+		"/repos/my-user/my-repo/actions/workflows/../deploy-staging.yml/dispatches",
+	}
+	for _, path := range deniedPaths {
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request(path))
+		if status == http.StatusOK || body["ok"] == true {
+			t.Errorf("bypass path received credentials: %q status=%d body=%v", path, status, body)
+		}
+	}
+	if len(f.fake.tokenRequests) != mintedAfterAllow {
+		t.Fatalf("denied requests minted or reused credential material: before=%d after=%d", mintedAfterAllow, len(f.fake.tokenRequests))
+	}
+
+	var decision map[string]any
+	for _, entry := range readAudit(t, f.audit) {
+		if entry["path"] == allowedPath && entry["allowed"] == true {
+			decision = entry
+		}
+	}
+	if decision == nil || decision["normalized_operation"] != "execute" || decision["normalized_resource"] != "repository/my-user/my-repo/workflow/deploy-staging.yml" {
+		t.Fatalf("normalized operation decision missing from audit: %v", decision)
+	}
+}
+
 // TestGitInjectionFetchMintsScopedBasicAuth pins the fetch path: info/refs
 // and git-upload-pack mint a single-repo installation token, delivered as
 // Basic x-access-token credentials, scoped to contents: read even though the

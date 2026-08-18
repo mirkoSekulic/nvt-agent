@@ -165,6 +165,9 @@ class AgentRegistry:
                 # (protocol/injection.md).
                 quota = self._grant_quota(grant.get("quota"), index, grant_index)
                 grant_entry = {"provider": provider, "repositories": repositories, "materialization": materialization, "permissions": permissions}
+                authorization = self._grant_authorization(grant.get("authorization"), index, grant_index)
+                if authorization is not None:
+                    grant_entry["authorization"] = authorization
                 if quota is not None:
                     grant_entry["quota"] = quota
                 grants.append(grant_entry)
@@ -184,6 +187,27 @@ class AgentRegistry:
             if roles_by_id.get(paired_agent) != "agent":
                 fail(f"agents[{index}] ({agent_id}): paired-agent must reference an agent-role identity")
         return output
+
+    def _grant_authorization(self, value, index, grant_index):
+        if value is None:
+            return None
+        where = f"agents[{index}].grants[{grant_index}].authorization"
+        if not isinstance(value, dict) or set(value) - {"defaultAction", "rules"}:
+            fail(f"{where} must be an object containing only defaultAction and rules")
+        default = value.get("defaultAction", "deny")
+        if default not in ("allow", "deny"):
+            fail(f"{where}.defaultAction must be allow or deny")
+        rules = []
+        for rule_index, rule in enumerate(list_value(value.get("rules"), f"{where}.rules")):
+            if not isinstance(rule, dict) or set(rule) != {"operation", "resource"}:
+                fail(f"{where}.rules[{rule_index}] must contain exactly operation and resource")
+            operation, resource = rule.get("operation"), rule.get("resource")
+            if not isinstance(operation, str) or not operation or len(operation.encode()) > 4096:
+                fail(f"{where}.rules[{rule_index}].operation must be a bounded non-empty string")
+            if not isinstance(resource, str) or not resource or len(resource.encode()) > 8192:
+                fail(f"{where}.rules[{rule_index}].resource must be a bounded non-empty string")
+            rules.append({"operation": operation, "resource": resource})
+        return {"defaultAction": default, "rules": rules}
 
     def _grant_quota(self, raw_quota, index, grant_index):
         if raw_quota is None:

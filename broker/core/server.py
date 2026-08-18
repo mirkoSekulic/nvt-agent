@@ -463,6 +463,15 @@ class Broker:
         provider, hosts = self._injection_provider(capability)
         if host not in hosts:
             raise ProviderError("host-not-allowed", f"host {host} is not allowed for {capability}", 403)
+        decision = provider.authorize_injection(host, method, path, paired["id"], request_id, grant)
+        if decision is not None and not decision.get("allowed", True):
+            self.audit.write(
+                request_id=request_id, agent=identity["id"], paired_agent=paired["id"],
+                provider=capability, operation="injection.headers", host=host,
+                method=method, path=path.split("?", 1)[0], allowed=False, reason="operation-not-allowed",
+                normalized_operation=decision["operation"], normalized_resource=decision["resource"],
+            )
+            raise ProviderError("operation-not-allowed", status=403)
         headers, expires_at, strip, append_headers = provider.injection_headers(
             host, method, path, paired["id"], self.audit, request_id, grant
         )
@@ -483,7 +492,9 @@ class Broker:
             operation="injection.headers",
             host=host,
             method=method,
-            path=path,
+            path=path.split("?", 1)[0],
+            normalized_operation=decision.get("operation") if decision else None,
+            normalized_resource=decision.get("resource") if decision else None,
             allowed=True,
             expires_at=expires_at,
         )
@@ -613,6 +624,8 @@ class Broker:
             for key in ("host", "method", "path", "target"):
                 value = payload.get(key)
                 if isinstance(value, str) and value:
+                    if operation == "injection.headers" and key == "path":
+                        value = value.split("?", 1)[0]
                     context[key] = value
         self.audit.write(
             request_id=request_id,

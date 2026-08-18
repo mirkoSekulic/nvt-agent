@@ -523,6 +523,14 @@ provider/app-level and cached by the provider process.
 
 The GitHub App provider validates before injecting auth:
 
+- Optional `allow.authorization` and per-AgentRun `grant.authorization`
+  policies are intersected before token minting. Canonical
+  `POST /repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches` requests
+  classify as `execute` on
+  `repository/{owner}/{repo}/workflow/{workflow}`. With restrictive policy,
+  GraphQL, unrelated writes, other repositories/workflows, query variants, and
+  malformed or encoded path variants are unclassified or denied.
+
 - request method must be allowed, and v1 should use `GET` for HTTP execution
 - request scheme and host must exactly match configured `api-url`
 - no URL userinfo

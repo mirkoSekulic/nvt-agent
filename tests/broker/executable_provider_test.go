@@ -299,6 +299,48 @@ func TestExecutableProviderUsesTheSameNamedInjectionContract(t *testing.T) {
 	}
 }
 
+func TestExecutableProviderOperationAuthorizationContract(t *testing.T) {
+	f := newExecutableBrokerFixture(t)
+	hash := func(value string) string { sum := sha256.Sum256([]byte(value)); return fmt.Sprintf("%x", sum[:]) }
+	agents := fmt.Sprintf(`agents:
+  - id: fixture-agent
+    token-sha256: sha256:%s
+    grants:
+      - provider: fixture-inject
+        materialization: header-inject
+        repositories: ["*"]
+        authorization:
+          defaultAction: deny
+          rules:
+            - operation: execute
+              resource: job/deploy-staging
+  - id: fixture-egress
+    role: egress
+    paired-agent: fixture-agent
+    token-sha256: sha256:%s
+`, hash(f.agent), hash(f.egress))
+	if err := os.WriteFile(f.agents, []byte(agents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(f.agents, time.Now().Add(time.Second), time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	call := func(path string) (int, map[string]any) {
+		return f.post(f.egress, "/v1/injection/headers", map[string]any{
+			"capability": "fixture-inject", "host": "api.example.test", "method": "POST", "path": path,
+		})
+	}
+	status, body := call("/jobs/deploy-staging")
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("provider-neutral authorized operation denied: status=%d body=%#v", status, body)
+	}
+	status, body = call("/jobs/other")
+	if status != http.StatusForbidden || body["error"] != "operation-not-allowed" {
+		t.Fatalf("provider-neutral denied operation received material: status=%d body=%#v", status, body)
+	}
+}
+
 func TestInjectionRejectsOverlappingAppendHeaders(t *testing.T) {
 	f := newExecutableBrokerFixture(t)
 	status, body := f.post(f.egress, "/v1/injection/headers", map[string]any{
