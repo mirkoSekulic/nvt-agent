@@ -11,7 +11,9 @@ import (
 )
 
 func TestGeneratedLocalManifestConfigurationLoadsWithRealValidator(t *testing.T) {
-	const raw = `apiVersion: nvt.dev/local/v1
+const raw = `apiVersion: nvt.dev/local/v1
+retentionPolicies:
+  disposable: {ttl: {activeSeconds: 604800}}
 secrets:
   github-key: {file: ./.nvt-local/secrets/github/key.pem}
 accounts:
