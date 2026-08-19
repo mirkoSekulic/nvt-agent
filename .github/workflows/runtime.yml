@@ -51,8 +51,10 @@ jobs:
           python-version: "3.x"
       - name: Install agentd test dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y tmux
+          if ! command -v tmux >/dev/null 2>&1; then
+            timeout 180 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+            timeout 180 sudo apt-get -o Acquire::Retries=3 -y install tmux
+          fi
           python3 -m pip install PyYAML
       - name: Run agentd conformance suite
         working-directory: tests/agentd
@@ -79,8 +81,10 @@ jobs:
           python-version: "3.x"
       - name: Install runtime test dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y tmux
+          if ! command -v tmux >/dev/null 2>&1; then
+            timeout 180 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+            timeout 180 sudo apt-get -o Acquire::Retries=3 -y install tmux
+          fi
           python3 -m pip install PyYAML
       - name: Run runtime conformance suite
         working-directory: tests/runtime
