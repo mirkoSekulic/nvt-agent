@@ -262,7 +262,7 @@ class Broker:
         grants = self.agents.grants(agent, provider_name)
         if not grants:
             raise ProviderError("provider-not-granted")
-        result, repo = provider.http_request(method, url, headers, paginate, grants)
+        result, repo, decision = provider.http_request(method, url, headers, paginate, grants)
         self.audit.write(
             request_id=request_id,
             agent=agent["id"],
@@ -274,6 +274,8 @@ class Broker:
             allowed=True,
             status=result["status"],
             response_size=len(result["body"].encode("utf-8")),
+            normalized_operation=decision.get("operation") if decision else None,
+            normalized_resource=decision.get("resource") if decision else None,
         )
         return {"ok": True, **result}
 
@@ -463,6 +465,17 @@ class Broker:
         provider, hosts = self._injection_provider(capability)
         if host not in hosts:
             raise ProviderError("host-not-allowed", f"host {host} is not allowed for {capability}", 403)
+        decision = provider.authorize_injection(host, method, path, paired["id"], request_id, grant)
+        if decision is not None and not decision.get("allowed", True):
+            raise ProviderError(
+                "operation-not-allowed",
+                status=403,
+                audit_context={
+                    "paired_agent": paired["id"],
+                    "normalized_operation": decision["operation"],
+                    "normalized_resource": decision["resource"],
+                },
+            )
         headers, expires_at, strip, append_headers = provider.injection_headers(
             host, method, path, paired["id"], self.audit, request_id, grant
         )
@@ -483,7 +496,9 @@ class Broker:
             operation="injection.headers",
             host=host,
             method=method,
-            path=path,
+            path=path.split("?", 1)[0],
+            normalized_operation=decision.get("operation") if decision else None,
+            normalized_resource=decision.get("resource") if decision else None,
             allowed=True,
             expires_at=expires_at,
         )
@@ -597,7 +612,7 @@ class Broker:
             "status": status,
         }
 
-    def denied(self, request_id, payload, reason, message=None, authorization=None, operation=None):
+    def denied(self, request_id, payload, reason, message=None, authorization=None, operation=None, audit_context=None):
         agent_id = None
         try:
             agent_id = self.agents.authenticate(authorization)["id"] if authorization else None
@@ -612,6 +627,13 @@ class Broker:
             # paths where audit matters most.
             for key in ("host", "method", "path", "target"):
                 value = payload.get(key)
+                if isinstance(value, str) and value:
+                    if operation == "injection.headers" and key == "path":
+                        value = value.split("?", 1)[0]
+                    context[key] = value
+        if isinstance(audit_context, dict):
+            for key in ("paired_agent", "normalized_operation", "normalized_resource"):
+                value = audit_context.get(key)
                 if isinstance(value, str) and value:
                     context[key] = value
         self.audit.write(
@@ -778,7 +800,7 @@ def make_handler(broker):
                         broker.dynamic_account_denied(request_id, self.path, error.reason, principal),
                     )
                 else:
-                    self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message, self.headers.get("authorization"), operation_from_path(self.path)))
+                    self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message, self.headers.get("authorization"), operation_from_path(self.path), error.audit_context))
             except Exception as error:
                 message = "internal-error" if self.path in DYNAMIC_ACCOUNT_API_PATHS else str(error)
                 if self.path in DYNAMIC_ACCOUNT_API_PATHS:

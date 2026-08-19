@@ -22,6 +22,8 @@ const schedulingTestToken = "LOCAL-SCHEDULING-TOKEN-0123456789abcdef"
 
 func TestLocalManifestProducerNameMatchesScheduleValidator(t *testing.T) {
 	const raw = `apiVersion: nvt.dev/local/v1
+retentionPolicies:
+  disposable: {ttl: {activeSeconds: 604800}}
 profiles:
   engineering:
     runtime: {preset: shell, autonomy: approval-required}

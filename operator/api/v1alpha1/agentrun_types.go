@@ -248,6 +248,8 @@ type AgentRunBrokerGrant struct {
 	// Permissions narrows the provider-level permission ceiling per grant,
 	// mirroring GitHub App permission keys (values: read or write).
 	Permissions map[string]string `json:"permissions,omitempty"`
+	// Authorization is an immutable provider-defined operation/resource policy.
+	Authorization *AgentRunBrokerGrantAuthorization `json:"authorization,omitempty"`
 	// AllowInsecureUpstream lets egressd reach this grant's upstream over
 	// plain HTTP instead of re-originating TLS. Dev/test only — it exists so
 	// hermetic in-cluster fixtures (which cannot present a publicly-trusted
@@ -261,6 +263,34 @@ type AgentRunBrokerGrant struct {
 	// restart resets it — so it is a soft resource guard, not a security
 	// boundary (protocol/injection.md).
 	Quota *AgentRunGrantQuota `json:"quota,omitempty"`
+}
+
+// AgentRunBrokerGrantAuthorization narrows the provider's administrator-owned ceiling.
+type AgentRunBrokerGrantAuthorization struct {
+	// +kubebuilder:validation:Enum=allow;deny
+	DefaultAction string `json:"defaultAction"`
+	// +kubebuilder:validation:MaxItems=256
+	Rules []AgentRunBrokerGrantAuthorizationRule `json:"rules,omitempty"`
+}
+
+type AgentRunBrokerGrantAuthorizationRule struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	Operation string `json:"operation"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=8192
+	Resource string `json:"resource"`
+}
+
+func (in *AgentRunBrokerGrantAuthorization) DeepCopy() *AgentRunBrokerGrantAuthorization {
+	if in == nil {
+		return nil
+	}
+	out := &AgentRunBrokerGrantAuthorization{DefaultAction: in.DefaultAction}
+	if in.Rules != nil {
+		out.Rules = append([]AgentRunBrokerGrantAuthorizationRule{}, in.Rules...)
+	}
+	return out
 }
 
 // AgentRunBrokerPreparationOperation is a bounded non-secret provider operation.
@@ -554,6 +584,9 @@ func (in *AgentRunBrokerGrant) DeepCopy() *AgentRunBrokerGrant {
 		for key, value := range in.Permissions {
 			out.Permissions[key] = value
 		}
+	}
+	if in.Authorization != nil {
+		out.Authorization = in.Authorization.DeepCopy()
 	}
 	if in.Quota != nil {
 		out.Quota = &AgentRunGrantQuota{Requests: in.Quota.Requests}

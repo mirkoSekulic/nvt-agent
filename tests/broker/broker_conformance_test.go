@@ -258,6 +258,8 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	mux.HandleFunc("/users/local-agent[bot]", fake.handleUser)
 	mux.HandleFunc("/repos/my-user/my-repo/pulls/123", fake.handleAPI)
 	mux.HandleFunc("/repos/my-user/my-repo/issues/123/comments", fake.handleComments)
+	mux.HandleFunc("/repos/my-user/my-repo/actions/workflows/deploy-staging.yml/dispatches", fake.handleAPI)
+	mux.HandleFunc("/repos/my-user/my-repo/actions/workflows/other.yml/dispatches", fake.handleAPI)
 	mux.HandleFunc("/repos/my-user/my-repo/redirect", fake.handleRedirect)
 	mux.HandleFunc("/repos/my-user/other-repo/pulls/1", fake.handleAPI)
 	fake.server = httptest.NewServer(mux)

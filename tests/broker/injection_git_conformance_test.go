@@ -85,6 +85,118 @@ func mintedPermissions(t *testing.T, request map[string]any) map[string]any {
 	return permissions
 }
 
+func TestGithubWorkflowOperationAuthorizationFailsClosed(t *testing.T) {
+	f := newBrokerFixture(t)
+	identities := gitIdentities(map[string]string{"workflows": "write"})
+	identities["frontend"].Grants[0].Authorization = map[string]any{
+		"defaultAction": "deny",
+		"rules": []any{map[string]any{
+			"operation": "execute",
+			"resource":  "repository/my-user/my-repo/workflow/deploy-staging.yml",
+		}},
+	}
+	f.writeRoleIdentities(identities)
+
+	request := func(path string) map[string]any {
+		return map[string]any{"capability": "git-app", "host": "api.github.com", "method": "POST", "path": path}
+	}
+	allowedPath := "/repos/my-user/my-repo/actions/workflows/deploy-staging.yml/dispatches"
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request(allowedPath))
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("configured workflow dispatch denied: status=%d body=%v", status, body)
+	}
+	mintedAfterAllow := len(f.fake.tokenRequests)
+	auditBeforeDeny := len(readAudit(t, f.audit))
+
+	deniedPaths := []string{
+		"/repos/my-user/my-repo/actions/workflows/other.yml/dispatches",
+		"/repos/my-user/other-repo/actions/workflows/deploy-staging.yml/dispatches",
+		"/repos/my-user/my-repo/pulls",
+		"/graphql",
+		"/repos/my-user/my-repo/actions/workflows/deploy%2Fstaging.yml/dispatches",
+		"/repos/my-user/my-repo/actions/workflows/../deploy-staging.yml/dispatches",
+	}
+	for _, path := range deniedPaths {
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request(path))
+		if status == http.StatusOK || body["ok"] == true {
+			t.Errorf("bypass path received credentials: %q status=%d body=%v", path, status, body)
+		}
+	}
+	if len(f.fake.tokenRequests) != mintedAfterAllow {
+		t.Fatalf("denied requests minted or reused credential material: before=%d after=%d", mintedAfterAllow, len(f.fake.tokenRequests))
+	}
+
+	audit := readAudit(t, f.audit)
+	if len(audit) != auditBeforeDeny+len(deniedPaths) {
+		t.Fatalf("policy denials wrote %d audit records, want %d: %v", len(audit)-auditBeforeDeny, len(deniedPaths), audit[auditBeforeDeny:])
+	}
+	var decision map[string]any
+	for _, entry := range audit {
+		if entry["path"] == allowedPath && entry["allowed"] == true {
+			decision = entry
+		}
+	}
+	if decision == nil || decision["normalized_operation"] != "execute" || decision["normalized_resource"] != "repository/my-user/my-repo/workflow/deploy-staging.yml" {
+		t.Fatalf("normalized operation decision missing from audit: %v", decision)
+	}
+}
+
+func TestGithubWorkflowOperationAuthorizationCoversDirectHTTPRequest(t *testing.T) {
+	f := newBrokerFixture(t)
+	identities := gitIdentities(map[string]string{"workflows": "write"})
+	identities["frontend"].Grants[0].Authorization = map[string]any{
+		"defaultAction": "deny",
+		"rules": []any{map[string]any{
+			"operation": "execute",
+			"resource":  "repository/my-user/my-repo/workflow/deploy-staging.yml",
+		}},
+	}
+	f.writeRoleIdentities(identities)
+
+	request := func(workflow string) map[string]any {
+		return map[string]any{
+			"provider": "git-app",
+			"method":   "POST",
+			"url":      f.fake.server.URL + "/repos/my-user/my-repo/actions/workflows/" + workflow + "/dispatches",
+		}
+	}
+	status, body := f.postJSONWithToken("frontend-token", "/v1/http/request", request("deploy-staging.yml"))
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("configured direct workflow dispatch denied: status=%d body=%v", status, body)
+	}
+	var allowedAudit map[string]any
+	for _, entry := range readAudit(t, f.audit) {
+		if entry["operation"] == "http.request" && entry["allowed"] == true {
+			allowedAudit = entry
+		}
+	}
+	if allowedAudit == nil || allowedAudit["normalized_operation"] != "execute" ||
+		allowedAudit["normalized_resource"] != "repository/my-user/my-repo/workflow/deploy-staging.yml" {
+		t.Fatalf("direct allow audit lacks normalized decision: %v", allowedAudit)
+	}
+	mintedAfterAllow := len(f.fake.tokenRequests)
+	auditBeforeDeny := len(readAudit(t, f.audit))
+
+	status, body = f.postJSONWithToken("frontend-token", "/v1/http/request", request("other.yml"))
+	if status != http.StatusForbidden || body["error"] != "operation-not-allowed" {
+		t.Fatalf("alternate direct workflow dispatch was not denied: status=%d body=%v", status, body)
+	}
+	if len(f.fake.tokenRequests) != mintedAfterAllow {
+		t.Fatalf("denied direct request minted credential material: before=%d after=%d", mintedAfterAllow, len(f.fake.tokenRequests))
+	}
+
+	audit := readAudit(t, f.audit)
+	if len(audit) != auditBeforeDeny+1 {
+		t.Fatalf("direct policy denial wrote %d audit records, want one: %v", len(audit)-auditBeforeDeny, audit[auditBeforeDeny:])
+	}
+	denial := audit[len(audit)-1]
+	if denial["operation"] != "http.request" || denial["reason"] != "operation-not-allowed" ||
+		denial["normalized_operation"] != "execute" ||
+		denial["normalized_resource"] != "repository/my-user/my-repo/workflow/other.yml" {
+		t.Fatalf("direct policy denial audit lacks normalized decision: %v", denial)
+	}
+}
+
 // TestGitInjectionFetchMintsScopedBasicAuth pins the fetch path: info/refs
 // and git-upload-pack mint a single-repo installation token, delivered as
 // Basic x-access-token credentials, scoped to contents: read even though the

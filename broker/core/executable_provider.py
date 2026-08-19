@@ -32,6 +32,7 @@ CAPABILITIES = {
     "files",
     "placeholder-files",
     "injection.headers",
+    "injection.authorization",
 }
 SAFE_ENVIRONMENT = {
     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -163,6 +164,8 @@ class ExecutableProviderAdapter(ProviderAdapter):
 
     def http_request(self, method, url, headers, paginate, grants):
         self._ensure_capability("http.request")
+        if any(grant.get("authorization") is not None for grant in grants):
+            raise ProviderError("operation-authorization-not-supported", status=403)
         if any(grant.get("permissions") for grant in grants):
             raise ProviderError(
                 "permissions-not-supported",
@@ -187,7 +190,7 @@ class ExecutableProviderAdapter(ProviderAdapter):
         self._string_map(result["headers"], "http.request headers")
         if not isinstance(result["body"], str) or len(result["body"].encode("utf-8")) > MAX_PROTOCOL_LINE_BYTES:
             self._protocol_error("http.request body is invalid")
-        return result, ExecutableTarget("", audit_target)
+        return result, ExecutableTarget("", audit_target), None
 
     def token_for_repo(self, repo, effective_repositories):
         self._ensure_capability("token")
@@ -261,6 +264,23 @@ class ExecutableProviderAdapter(ProviderAdapter):
         self._optional_string(result["expires_at"], "injection.headers result expires_at")
         self._string_list(result["strip_request_headers"], "injection.headers result strip_request_headers")
         return result["headers"], result["expires_at"], result["strip_request_headers"], append_headers
+
+    def authorize_injection(self, host, method, path, agent_id, request_id, grant):
+        if "injection.authorization" not in self._capabilities:
+            if grant.get("authorization") is not None:
+                raise ProviderError("operation-authorization-not-supported", status=403)
+            return None
+        result = self._request("injection.authorization", {
+            "host": host, "method": method, "path": path, "agent_id": agent_id,
+            "request_id": request_id, "grant": grant,
+        })
+        result = self._object(result, "injection.authorization result")
+        self._require_keys(result, {"allowed", "operation", "resource"}, "injection.authorization result")
+        if not isinstance(result["allowed"], bool):
+            self._protocol_error("injection.authorization result allowed is invalid")
+        self._bounded_string(result["operation"], "injection.authorization result operation", MAX_TEXT_LENGTH)
+        self._bounded_string(result["resource"], "injection.authorization result resource", MAX_TARGET_LENGTH)
+        return result
 
     def close(self):
         with self._lock:

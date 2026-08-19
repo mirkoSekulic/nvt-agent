@@ -76,7 +76,7 @@ func (s *server) handle(req request) {
 			s.failure(req.ID, "initialize-retry", 503, "safe retry")
 			return
 		}
-		capabilities := []string{"http.request", "token", "identity", "headers", "files", "placeholder-files", "injection.headers"}
+		capabilities := []string{"http.request", "token", "identity", "headers", "files", "placeholder-files", "injection.headers", "injection.authorization"}
 		if mode == "token-only" {
 			capabilities = []string{"token"}
 		}
@@ -159,6 +159,27 @@ func (s *server) handle(req request) {
 	}
 
 	switch req.Method {
+	case "injection.authorization":
+		path, _ := req.Params["path"].(string)
+		operation, resource := "execute", "job/"+strings.TrimPrefix(path, "/jobs/")
+		grant, _ := req.Params["grant"].(map[string]any)
+		if policy, ok := grant["authorization"].(map[string]any); ok {
+			allowed := policy["defaultAction"] == "allow"
+			if rules, ok := policy["rules"].([]any); ok {
+				for _, raw := range rules {
+					rule, _ := raw.(map[string]any)
+					if rule["operation"] == operation && rule["resource"] == resource {
+						allowed = true
+					}
+				}
+			}
+			if !strings.HasPrefix(path, "/jobs/") {
+				allowed = false
+			}
+			s.success(req.ID, map[string]any{"allowed": allowed, "operation": operation, "resource": resource})
+			return
+		}
+		s.success(req.ID, map[string]any{"allowed": true, "operation": operation, "resource": resource})
 	case "target.normalize":
 		if s.stateFile != "" {
 			_ = os.WriteFile(s.stateFile+".normalized", []byte("called"), 0o600)

@@ -2,6 +2,7 @@ import base64
 import fnmatch
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -47,6 +48,7 @@ class GithubAppProvider:
         self.allowed_repositories = self._allowed_strings("repositories")
         self.allowed_methods = {method.upper() for method in self._allowed_strings("methods") or ["GET"]}
         self.permissions = self._permissions()
+        self.operation_authorization = self._operation_policy(self.allow.get("authorization"), "allow.authorization")
         self.max_response_bytes = self._int_config("max-response-bytes", DEFAULT_MAX_RESPONSE_BYTES)
         self.max_pages = self._int_config("max-pages", DEFAULT_MAX_PAGES)
         self.per_page = self._int_config("per-page", DEFAULT_PER_PAGE)
@@ -85,6 +87,57 @@ class GithubAppProvider:
         if not isinstance(value, int) or value <= 0:
             fail(f"provider {self.name} config.{key} must be a positive integer")
         return value
+
+    def _operation_policy(self, value, field):
+        if value is None:
+            return None
+        if not isinstance(value, dict) or set(value) - {"defaultAction", "rules"}:
+            fail(f"provider {self.name} {field} must contain only defaultAction and rules")
+        default = value.get("defaultAction", "deny")
+        if default not in ("allow", "deny"):
+            fail(f"provider {self.name} {field}.defaultAction must be allow or deny")
+        rules = value.get("rules") or []
+        if not isinstance(rules, list):
+            fail(f"provider {self.name} {field}.rules must be a list")
+        normalized = []
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, dict) or set(rule) != {"operation", "resource"}:
+                fail(f"provider {self.name} {field}.rules[{index}] must contain exactly operation and resource")
+            if not all(isinstance(rule[key], str) and rule[key] for key in ("operation", "resource")):
+                fail(f"provider {self.name} {field}.rules[{index}] values must be non-empty strings")
+            if len(rule["operation"].encode()) > 4096 or len(rule["resource"].encode()) > 8192:
+                fail(f"provider {self.name} {field}.rules[{index}] values exceed protocol bounds")
+            normalized.append((rule["operation"], rule["resource"]))
+        return (default, frozenset(normalized))
+
+    def _policy_allows(self, policy, operation, resource):
+        if policy is None:
+            return True
+        default, rules = policy
+        return default == "allow" or (operation, resource) in rules
+
+    def _authorize_operation(self, method, path, grant):
+        raw_grant_policy = (grant or {}).get("authorization")
+        grant_policy = self._operation_policy(raw_grant_policy, "grant.authorization")
+        if self.operation_authorization is None and grant_policy is None:
+            return None
+        # Deliberately accept only the canonical REST spelling. Encoded slashes,
+        # dot segments, query variants, GraphQL, and unrelated writes remain
+        # unclassified and therefore fail closed under either restrictive layer.
+        match = re.fullmatch(r"/repos/([^/%]+)/([^/%]+)/actions/workflows/([^/%]+)/dispatches", path)
+        if method != "POST" or match is None:
+            raise ProviderError("operation-unclassified", status=403)
+        owner, repository, workflow = match.groups()
+        repo = f"{owner}/{repository}"
+        self._ensure_repo_allowed(repo, (grant or {}).get("repositories"))
+        operation = "execute"
+        resource = f"repository/{repo}/workflow/{workflow}"
+        allowed = self._policy_allows(self.operation_authorization, operation, resource)
+        allowed = allowed and self._policy_allows(grant_policy, operation, resource)
+        return {"allowed": allowed, "operation": operation, "resource": resource}
+
+    def authorize_injection(self, host, method, path, agent_id, request_id, grant):
+        return self._authorize_operation(method, path, grant)
 
     def _provider_value(self, key):
         value = self.config.get(key)
@@ -496,11 +549,24 @@ class GithubAppProvider:
         grant = matching[0]
         effective_repositories = grant.get("repositories")
         parsed, repo = self._validate_url(url, method, effective_repositories)
+        authorization_path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        decision = self._authorize_operation(method, authorization_path, grant)
+        if decision is not None and not decision["allowed"]:
+            raise ProviderError(
+                "operation-not-allowed",
+                status=403,
+                audit_context={
+                    "normalized_operation": decision["operation"],
+                    "normalized_resource": decision["resource"],
+                },
+            )
         permissions = self._effective_permissions(grant)
         token, _expires_at = self.token_for_repo(repo, effective_repositories, permissions)
         if paginate:
-            return self._paginated_request(parsed, token, headers)
-        return self._single_request(url, method, token, headers, self.max_response_bytes), repo
+            result, repo = self._paginated_request(parsed, token, headers)
+        else:
+            result, repo = self._single_request(url, method, token, headers, self.max_response_bytes), repo
+        return result, repo, decision
 
     def _single_request(self, url, method, token, headers, cap):
         request_headers = {

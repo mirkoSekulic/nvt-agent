@@ -34,20 +34,31 @@ type brokerAgent struct {
 }
 
 type brokerGrant struct {
-	Provider              string            `yaml:"provider"`
-	Repositories          []string          `yaml:"repositories,omitempty"`
-	Capabilities          []string          `yaml:"capabilities,omitempty"`
-	Preparations          []string          `yaml:"preparations,omitempty"`
-	Materialization       string            `yaml:"materialization,omitempty"`
-	EgressHosts           []string          `yaml:"egress-hosts,omitempty"`
-	Git                   bool              `yaml:"git,omitempty"`
-	Permissions           map[string]string `yaml:"permissions,omitempty"`
-	Quota                 *brokerGrantQuota `yaml:"quota,omitempty"`
-	AllowInsecureUpstream bool              `yaml:"allow-insecure-upstream,omitempty"`
+	Provider              string                    `yaml:"provider"`
+	Repositories          []string                  `yaml:"repositories,omitempty"`
+	Capabilities          []string                  `yaml:"capabilities,omitempty"`
+	Preparations          []string                  `yaml:"preparations,omitempty"`
+	Materialization       string                    `yaml:"materialization,omitempty"`
+	EgressHosts           []string                  `yaml:"egress-hosts,omitempty"`
+	Git                   bool                      `yaml:"git,omitempty"`
+	Permissions           map[string]string         `yaml:"permissions,omitempty"`
+	Authorization         *brokerGrantAuthorization `yaml:"authorization,omitempty"`
+	Quota                 *brokerGrantQuota         `yaml:"quota,omitempty"`
+	AllowInsecureUpstream bool                      `yaml:"allow-insecure-upstream,omitempty"`
 }
 
 type brokerGrantQuota struct {
 	Requests int64 `yaml:"requests"`
+}
+
+type brokerGrantAuthorization struct {
+	DefaultAction string                         `yaml:"defaultAction"`
+	Rules         []brokerGrantAuthorizationRule `yaml:"rules,omitempty"`
+}
+
+type brokerGrantAuthorizationRule struct {
+	Operation string `yaml:"operation"`
+	Resource  string `yaml:"resource"`
 }
 
 func loadIdentityKey(path string) ([]byte, error) {
@@ -89,6 +100,12 @@ func (registry brokerRegistry) upsert(ctx context.Context, run resolvedrun.Resol
 			Capabilities: append([]string(nil), grant.Capabilities...), Preparations: append([]string(nil), grant.Preparations...),
 			Materialization: grant.Materialization, EgressHosts: append([]string(nil), grant.EgressHosts...), Git: grant.Git,
 			AllowInsecureUpstream: grant.AllowInsecureUpstream,
+		}
+		if grant.Authorization != nil {
+			entry.Authorization = &brokerGrantAuthorization{DefaultAction: grant.Authorization.DefaultAction}
+			for _, rule := range grant.Authorization.Rules {
+				entry.Authorization.Rules = append(entry.Authorization.Rules, brokerGrantAuthorizationRule{Operation: rule.Operation, Resource: rule.Resource})
+			}
 		}
 		if len(grant.Permissions) != 0 {
 			entry.Permissions = make(map[string]string, len(grant.Permissions))

@@ -335,6 +335,19 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 				return fmt.Errorf("broker grant %s permissions must map permission names to read or write", grant.Provider)
 			}
 		}
+		if grant.Authorization != nil {
+			if grant.Authorization.DefaultAction != "allow" && grant.Authorization.DefaultAction != "deny" {
+				return fmt.Errorf("broker grant %s authorization.defaultAction must be allow or deny", grant.Provider)
+			}
+			if len(grant.Authorization.Rules) > 256 {
+				return fmt.Errorf("broker grant %s authorization.rules exceeds 256 entries", grant.Provider)
+			}
+			for _, rule := range grant.Authorization.Rules {
+				if rule.Operation == "" || len(rule.Operation) > 4096 || rule.Resource == "" || len(rule.Resource) > 8192 {
+					return fmt.Errorf("broker grant %s authorization rules require bounded operation and resource", grant.Provider)
+				}
+			}
+		}
 		if grant.Quota != nil && grant.Quota.Requests <= 0 {
 			return fmt.Errorf("broker grant %s quota.requests must be a positive integer", grant.Provider)
 		}
