@@ -164,6 +164,8 @@ class ExecutableProviderAdapter(ProviderAdapter):
 
     def http_request(self, method, url, headers, paginate, grants):
         self._ensure_capability("http.request")
+        if any(grant.get("authorization") is not None for grant in grants):
+            raise ProviderError("operation-authorization-not-supported", status=403)
         if any(grant.get("permissions") for grant in grants):
             raise ProviderError(
                 "permissions-not-supported",
@@ -188,7 +190,7 @@ class ExecutableProviderAdapter(ProviderAdapter):
         self._string_map(result["headers"], "http.request headers")
         if not isinstance(result["body"], str) or len(result["body"].encode("utf-8")) > MAX_PROTOCOL_LINE_BYTES:
             self._protocol_error("http.request body is invalid")
-        return result, ExecutableTarget("", audit_target)
+        return result, ExecutableTarget("", audit_target), None
 
     def token_for_repo(self, repo, effective_repositories):
         self._ensure_capability("token")

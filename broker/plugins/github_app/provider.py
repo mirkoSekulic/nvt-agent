@@ -116,7 +116,7 @@ class GithubAppProvider:
         default, rules = policy
         return default == "allow" or (operation, resource) in rules
 
-    def authorize_injection(self, host, method, path, agent_id, request_id, grant):
+    def _authorize_operation(self, method, path, grant):
         raw_grant_policy = (grant or {}).get("authorization")
         grant_policy = self._operation_policy(raw_grant_policy, "grant.authorization")
         if self.operation_authorization is None and grant_policy is None:
@@ -135,6 +135,9 @@ class GithubAppProvider:
         allowed = self._policy_allows(self.operation_authorization, operation, resource)
         allowed = allowed and self._policy_allows(grant_policy, operation, resource)
         return {"allowed": allowed, "operation": operation, "resource": resource}
+
+    def authorize_injection(self, host, method, path, agent_id, request_id, grant):
+        return self._authorize_operation(method, path, grant)
 
     def _provider_value(self, key):
         value = self.config.get(key)
@@ -546,11 +549,24 @@ class GithubAppProvider:
         grant = matching[0]
         effective_repositories = grant.get("repositories")
         parsed, repo = self._validate_url(url, method, effective_repositories)
+        authorization_path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        decision = self._authorize_operation(method, authorization_path, grant)
+        if decision is not None and not decision["allowed"]:
+            raise ProviderError(
+                "operation-not-allowed",
+                status=403,
+                audit_context={
+                    "normalized_operation": decision["operation"],
+                    "normalized_resource": decision["resource"],
+                },
+            )
         permissions = self._effective_permissions(grant)
         token, _expires_at = self.token_for_repo(repo, effective_repositories, permissions)
         if paginate:
-            return self._paginated_request(parsed, token, headers)
-        return self._single_request(url, method, token, headers, self.max_response_bytes), repo
+            result, repo = self._paginated_request(parsed, token, headers)
+        else:
+            result, repo = self._single_request(url, method, token, headers, self.max_response_bytes), repo
+        return result, repo, decision
 
     def _single_request(self, url, method, token, headers, cap):
         request_headers = {
