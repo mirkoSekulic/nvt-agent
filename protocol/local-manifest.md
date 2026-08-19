@@ -117,17 +117,30 @@ repositories:
 A static Git credential uses a provider-neutral `brokerProviders` entry. Its
 `plugin` and bounded public `config` pass through to the existing broker
 provider document. `secrets` maps a provider config key to a logical manifest
-secret; the compiler replaces that name with a broker-private in-container
-path. Filesystem paths, secret-like keys, references to declared secrets, and
-compiler-owned mediation keys are rejected in public config.
+secret; the compiler replaces that binding with a broker-private in-container
+path. Filesystem paths and references to declared secrets are rejected in
+public config. Apart from resolving those explicit bindings, the compiler does
+not interpret or mutate plugin config.
 
 `mediation` is the generic zero-secret contract: exact upstream hosts,
 `header-inject` materialization, Git smart-HTTP routing, the inert Basic
 username used by the agent-side placeholder, and the provider target mode. The
-compiler derives broker injection config and exact agent grants from these
-fields. A repository must name the provider, use one of its exact hosts, and
-declare the exact normalized broker repository identity. No provider is
-selected from a host and no vendor preset is implied.
+compiler derives exact agent mappings and grants from these fields. A
+repository must name the provider, use one of its exact hosts, and declare the
+repository identity normalized by `targetMode` (`host/path` for `literal`, or
+`owner/repository` for `github`). No provider is selected from a host and no
+vendor preset is implied. Plugin-owned injection settings remain explicit in
+`config`, matching the Helm provider contract.
+
+The local renderer currently emits no `provider-plugins` acquisition entries.
+Consequently, `plugin` may select only an implementation already installed in
+the broker image; external provider-plugin acquisition and registration are
+outside this local static-provider contract.
+
+NVT enforces the exact mediated host and repository boundary. Its Git
+smart-HTTP grant includes both upload-pack and receive-pack routing, so
+pull-only authority is not an operation-level NVT policy here; it depends on
+the upstream credential being scoped read-only.
 
 The same declaration works for Azure-shaped and self-hosted repositories. This
 self-hosted example uses the generic broker `token` plugin without a Gitea
@@ -140,6 +153,11 @@ secrets:
 brokerProviders:
   studio:
     plugin: token
+    config:
+      injection-hosts: [altinn.studio]
+      injection-git: true
+      injection-basic-username: oauth2
+      target-mode: literal
     secrets:
       token-file: studio-token
     mediation:

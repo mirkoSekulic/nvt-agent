@@ -600,10 +600,6 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 			}
 			config[configKey] = plancontract.PrivateTarget(secretName)
 		}
-		config["injection-hosts"] = append([]string(nil), provider.Mediation.Hosts...)
-		config["injection-git"] = provider.Mediation.Git
-		config["injection-basic-username"] = provider.Mediation.Username
-		config["target-mode"] = provider.Mediation.TargetMode
 		providers = append(providers, map[string]any{"name": named.Name, "plugin": provider.Plugin, "config": config, "allow": map[string]any{"repositories": brokerRepositoriesFor(compiled, named.Name, "")}})
 	}
 	providerNames := make(map[string]struct{}, len(providers))

@@ -506,7 +506,7 @@ func TestGenericStaticGitProviderCompilesExactSelfHostedGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	decoded.Secrets["studio-token"] = Secret{File: "./.nvt-local/secrets/studio/token"}
-	decoded.BrokerProviders["studio"] = BrokerProvider{Plugin: "token", Secrets: map[string]string{"token-file": "studio-token"}, Mediation: BrokerProviderMediation{Hosts: []string{"altinn.studio"}, Materialization: "header-inject", Git: true, Username: "oauth2", TargetMode: "literal"}}
+	decoded.BrokerProviders["studio"] = BrokerProvider{Plugin: "token", Config: map[string]any{"injection-hosts": []any{"altinn.studio"}, "injection-git": true, "injection-basic-username": "oauth2", "target-mode": "literal"}, Secrets: map[string]string{"token-file": "studio-token"}, Mediation: BrokerProviderMediation{Hosts: []string{"altinn.studio"}, Materialization: "header-inject", Git: true, Username: "oauth2", TargetMode: "literal"}}
 	profile := decoded.Profiles["development"]
 	profile.CredentialProviders = append(profile.CredentialProviders, "studio")
 	decoded.Profiles["development"] = profile
@@ -522,6 +522,35 @@ func TestGenericStaticGitProviderCompilesExactSelfHostedGrant(t *testing.T) {
 				t.Fatalf("generic repository grant = %#v", grant)
 			}
 		}
+	}
+}
+
+func TestGenericStaticGitProviderValidatesTargetModeRepositoryIdentity(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.Secrets["github-token"] = Secret{File: "./.nvt-local/secrets/github/token"}
+	base.BrokerProviders["github-token"] = BrokerProvider{Plugin: "token", Config: map[string]any{"injection-hosts": []any{"github.com"}, "injection-git": true, "injection-basic-username": "git", "target-mode": "github"}, Secrets: map[string]string{"token-file": "github-token"}, Mediation: BrokerProviderMediation{Hosts: []string{"github.com"}, Materialization: "header-inject", Git: true, Username: "git", TargetMode: "github"}}
+	profile := base.Profiles["development"]
+	profile.CredentialProviders = append(profile.CredentialProviders, "github-token")
+	base.Profiles["development"] = profile
+	base.Repositories["github-static"] = Repository{URL: "https://github.com/example/project.git", CheckoutTarget: "github.com/example/project", BrokerRepository: "example/project", CredentialProvider: "github-token"}
+	base.Workstations[0].Repositories = append(base.Workstations[0].Repositories, "github-static")
+	if _, err := Compile(base); err != nil {
+		t.Fatalf("GitHub-normalized repository was rejected: %v", err)
+	}
+	invalid := base
+	invalid.Repositories = cloneMap(base.Repositories)
+	repository := invalid.Repositories["github-static"]
+	repository.BrokerRepository = "github.com/example/project"
+	invalid.Repositories["github-static"] = repository
+	if _, err := Compile(invalid); err == nil || !strings.Contains(err.Error(), "normalized checkout target") {
+		t.Fatalf("literal identity was accepted for GitHub target mode: %v", err)
 	}
 }
 
@@ -551,9 +580,9 @@ func TestGenericStaticGitProviderValidationFailsClosed(t *testing.T) {
 			provider.Config = map[string]any{"helper": "/home/user/token"}
 			value.BrokerProviders["azure"] = provider
 		},
-		"compiler-owned public config": func(value *Manifest) {
+		"invalid public config key": func(value *Manifest) {
 			provider := value.BrokerProviders["azure"]
-			provider.Config = map[string]any{"target-mode": "literal"}
+			provider.Config = map[string]any{"not a key": "literal"}
 			value.BrokerProviders["azure"] = provider
 		},
 		"ambiguous provider namespace": func(value *Manifest) {

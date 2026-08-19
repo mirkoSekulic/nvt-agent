@@ -37,6 +37,11 @@ accounts:
 brokerProviders:
   studio:
     plugin: token
+    config:
+      injection-hosts: [altinn.studio]
+      injection-git: true
+      injection-basic-username: oauth2
+      target-mode: literal
     secrets:
       token-file: studio-token
     mediation:

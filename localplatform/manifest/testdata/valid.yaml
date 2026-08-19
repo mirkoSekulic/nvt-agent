@@ -35,6 +35,11 @@ accounts:
 brokerProviders:
   azure:
     plugin: token
+    config:
+      injection-hosts: [dev.azure.com]
+      injection-git: true
+      injection-basic-username: git
+      target-mode: literal
     secrets:
       token-file: azure-token
     mediation:

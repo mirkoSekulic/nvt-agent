@@ -372,7 +372,7 @@ func TestGenericStaticGitProviderRendersSelfHostedWithoutSecretDisclosure(t *tes
 		t.Fatal(err)
 	}
 	decoded.Secrets["studio-token"] = manifest.Secret{File: "./.nvt-local/secrets/studio/token"}
-	decoded.BrokerProviders["studio"] = manifest.BrokerProvider{Plugin: "token", Config: map[string]any{"label": "studio-readonly"}, Secrets: map[string]string{"token-file": "studio-token"}, Mediation: manifest.BrokerProviderMediation{Hosts: []string{"altinn.studio"}, Materialization: "header-inject", Git: true, Username: "oauth2", TargetMode: "literal"}}
+	decoded.BrokerProviders["studio"] = manifest.BrokerProvider{Plugin: "token", Config: map[string]any{"label": "studio-provider", "injection-hosts": []any{"altinn.studio"}, "injection-git": true, "injection-basic-username": "oauth2", "target-mode": "literal"}, Secrets: map[string]string{"token-file": "studio-token"}, Mediation: manifest.BrokerProviderMediation{Hosts: []string{"altinn.studio"}, Materialization: "header-inject", Git: true, Username: "oauth2", TargetMode: "literal"}}
 	profile := decoded.Profiles["development"]
 	profile.CredentialProviders = append(profile.CredentialProviders, "studio")
 	decoded.Profiles["development"] = profile
@@ -383,7 +383,7 @@ func TestGenericStaticGitProviderRendersSelfHostedWithoutSecretDisclosure(t *tes
 		t.Fatal(err)
 	}
 	broker, err := serviceconfig.Broker(compiled)
-	for _, expected := range [][]byte{[]byte(`"name":"studio"`), []byte(`"plugin":"token"`), []byte(`"label":"studio-readonly"`), []byte(`"token-file":"` + plancontract.PrivateTarget("studio-token") + `"`), []byte(`"injection-hosts":["altinn.studio"]`), []byte(`"injection-basic-username":"oauth2"`), []byte(`"target-mode":"literal"`), []byte(`"repositories":["altinn.studio/repos/digdir/oed"]`)} {
+	for _, expected := range [][]byte{[]byte(`"name":"studio"`), []byte(`"plugin":"token"`), []byte(`"label":"studio-provider"`), []byte(`"token-file":"` + plancontract.PrivateTarget("studio-token") + `"`), []byte(`"injection-hosts":["altinn.studio"]`), []byte(`"injection-basic-username":"oauth2"`), []byte(`"target-mode":"literal"`), []byte(`"repositories":["altinn.studio/repos/digdir/oed"]`)} {
 		if err != nil || !bytes.Contains(broker, expected) {
 			t.Fatalf("generic provider omitted %s: %v %s", expected, err, broker)
 		}
@@ -418,6 +418,92 @@ func TestGenericStaticGitProviderRendersSelfHostedWithoutSecretDisclosure(t *tes
 	if !foundRepository {
 		t.Fatal("self-hosted repository was not rendered")
 	}
+}
+
+func TestGenericStaticGitProviderRendersGitHubTargetIdentity(t *testing.T) {
+	raw, err := os.ReadFile("../manifest/testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := manifest.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Secrets["github-token"] = manifest.Secret{File: "./.nvt-local/secrets/github/token"}
+	decoded.BrokerProviders["github-token"] = manifest.BrokerProvider{
+		Plugin:    "token",
+		Config:    map[string]any{"injection-hosts": []any{"github.com"}, "injection-git": true, "injection-basic-username": "git", "target-mode": "github"},
+		Secrets:   map[string]string{"token-file": "github-token"},
+		Mediation: manifest.BrokerProviderMediation{Hosts: []string{"github.com"}, Materialization: "header-inject", Git: true, Username: "git", TargetMode: "github"},
+	}
+	profile := decoded.Profiles["development"]
+	profile.CredentialProviders = append(profile.CredentialProviders, "github-token")
+	decoded.Profiles["development"] = profile
+	decoded.Repositories["github-static"] = manifest.Repository{URL: "https://github.com/example/project.git", CheckoutTarget: "github.com/example/project", BrokerRepository: "example/project", Path: "github-static", CredentialProvider: "github-token"}
+	decoded.Workstations[0].Repositories = append(decoded.Workstations[0].Repositories, "github-static")
+	compiled, err := manifest.Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker, err := serviceconfig.Broker(compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range [][]byte{[]byte(`"name":"github-token"`), []byte(`"target-mode":"github"`), []byte(`"repositories":["example/project"]`)} {
+		if !bytes.Contains(broker, expected) {
+			t.Fatalf("GitHub provider omitted %s: %s", expected, broker)
+		}
+	}
+	controller, err := serviceconfig.Controller(compiled, serviceconfig.Instructions{"development": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(controller, []byte(`"broker_repository":"example/project"`)) || !bytes.Contains(controller, []byte(`"repositories":["example/project"]`)) {
+		t.Fatalf("controller did not preserve normalized GitHub identity: %s", controller)
+	}
+}
+
+func TestGenericBrokerProviderConfigPassesThroughWithoutPluginSchemaMutation(t *testing.T) {
+	raw, err := os.ReadFile("../manifest/testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := manifest.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := decoded.BrokerProviders["azure"]
+	provider.Plugin = "installed-custom"
+	provider.Config = map[string]any{"public-option": "unchanged"}
+	decoded.BrokerProviders["azure"] = provider
+	compiled, err := manifest.Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := serviceconfig.Broker(compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Providers []struct {
+			Name   string         `json:"name"`
+			Plugin string         `json:"plugin"`
+			Config map[string]any `json:"config"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(rendered, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range document.Providers {
+		if candidate.Name != "azure" {
+			continue
+		}
+		if candidate.Plugin != "installed-custom" || candidate.Config["public-option"] != "unchanged" || candidate.Config["token-file"] != plancontract.PrivateTarget("azure-token") || len(candidate.Config) != 2 {
+			t.Fatalf("provider config was interpreted or mutated: %#v", candidate)
+		}
+		return
+	}
+	t.Fatal("generic provider was not rendered")
 }
 
 func TestBrokerRejectsDerivedProviderNameCollision(t *testing.T) {

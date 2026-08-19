@@ -766,11 +766,27 @@ func validateRepository(value Repository, accounts map[string]Account, providers
 		if parsed.Host != parsed.Hostname() || !contains(provider.Mediation.Hosts, parsed.Hostname()) {
 			return errors.New("repository host is not mediated by its credential provider")
 		}
-		if value.BrokerRepository != repositoryTarget(value.URL) {
+		expected, ok := brokerRepositoryTarget(value, provider.Mediation.TargetMode)
+		if !ok || value.BrokerRepository != expected {
 			return errors.New("broker repository must exactly match the normalized checkout target")
 		}
 	}
 	return nil
+}
+
+func brokerRepositoryTarget(repository Repository, targetMode string) (string, bool) {
+	if targetMode == "literal" {
+		value := repositoryTarget(repository.URL)
+		return value, value != ""
+	}
+	if targetMode == "github" {
+		owner, name, ok := githubCoordinates(repository)
+		if !ok {
+			return "", false
+		}
+		return owner + "/" + name, true
+	}
+	return "", false
 }
 
 func validGitHubProducer(producer Producer, accounts map[string]Account, repositories map[string]Repository) bool {
@@ -953,7 +969,7 @@ func validateConfig(value any, depth int) error {
 }
 
 func validateBrokerProvider(name string, provider BrokerProvider, secrets map[string]Secret) error {
-	if err := validateConfig(provider.Config, 0); err != nil {
+	if err := validateProviderConfig(provider.Config, 0); err != nil {
 		return fmt.Errorf("broker provider %q config: %w", name, err)
 	}
 	if containsUnsafePublicPath(provider.Config) {
@@ -961,12 +977,6 @@ func validateBrokerProvider(name string, provider BrokerProvider, secrets map[st
 	}
 	if containsSecretReference(provider.Config, secrets) {
 		return fmt.Errorf("broker provider %q config contains an undeclared secret reference", name)
-	}
-	reserved := map[string]struct{}{"injection-hosts": {}, "injection-git": {}, "injection-basic-username": {}, "target-mode": {}}
-	for key := range provider.Config {
-		if _, exists := reserved[key]; exists {
-			return fmt.Errorf("broker provider %q config uses compiler-owned key %q", name, key)
-		}
 	}
 	if len(provider.Secrets) == 0 {
 		return fmt.Errorf("broker provider %q must declare secret bindings", name)
@@ -991,6 +1001,48 @@ func validateBrokerProvider(name string, provider BrokerProvider, secrets map[st
 		if err != nil || parsed.Host != host || parsed.Hostname() != host || parsed.Port() != "" || strings.ToLower(host) != host {
 			return fmt.Errorf("broker provider %q has invalid mediated host", name)
 		}
+	}
+	return nil
+}
+
+func validateProviderConfig(value any, depth int) error {
+	if depth > 16 {
+		return errors.New("config is too deep")
+	}
+	switch typed := value.(type) {
+	case nil, bool, string:
+		if value, ok := typed.(string); ok && len(value) > MaxStringBytes {
+			return errors.New("value too large")
+		}
+		return nil
+	case json.Number:
+		if !integerPattern.MatchString(typed.String()) {
+			return errors.New("config numbers must be canonical integers")
+		}
+		return nil
+	case []any:
+		if len(typed) > MaxItems {
+			return errors.New("too many values")
+		}
+		for _, item := range typed {
+			if err := validateProviderConfig(item, depth+1); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		if len(typed) > MaxItems {
+			return errors.New("too many keys")
+		}
+		for key, item := range typed {
+			if !validConfigKey(key) {
+				return fmt.Errorf("invalid key %q", key)
+			}
+			if err := validateProviderConfig(item, depth+1); err != nil {
+				return err
+			}
+		}
+	default:
+		return errors.New("unsupported config value")
 	}
 	return nil
 }
