@@ -87,6 +87,8 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 		"built-in public config":                     strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    publicConfig: {mode: public}", 1),
 		"built-in manual secret":                     strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    secrets: {key: github-key}", 1),
 		"missing runtime account":                    strings.Replace(string(valid), "      account: codex", "      account: github", 1),
+		"unsupported runtime effort":                 strings.Replace(string(valid), "      effort: high", "      effort: max", 1),
+		"runtime model with surrounding whitespace":  strings.Replace(string(valid), "      model: gpt-5.6-sol", "      model: ' gpt-5.6-sol'", 1),
 		"GitHub App missing checkout installation":   strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent", "github: Altinn/nvt-agent", 1),
 		"external producer missing issuer":           strings.Replace(string(valid), "    allowedPrincipalIssuers: [https://chat.example]\n", "", 1),
 		"external producer unsafe issuer":            strings.Replace(string(valid), "https://chat.example", "http://chat.example", 1),
@@ -152,7 +154,7 @@ func TestCompiledSectionsAreOwnerSufficient(t *testing.T) {
 	if len(compiled.Controller.RetentionPolicies) != 3 || compiled.Controller.RetentionPolicies[0].Name != "disposable" || compiled.Controller.RetentionPolicies[0].Policy.TTL.ActiveSeconds != 604800 {
 		t.Fatalf("controller retention policy projection is incomplete: %#v", compiled.Controller.RetentionPolicies)
 	}
-	if len(compiled.Controller.Profiles) != 1 || controllerProfile.Profile.Runtime.Preset != "codex" || controllerProfile.RuntimeProvider == nil || controllerProfile.RuntimeProvider.Name != "codex" || controllerProfile.DefaultCredentialProvider != "github" || controllerProfile.EgressProxyProvider != "codex" || len(controllerProfile.CredentialProviders) != 2 || len(controllerProfile.BrokerGrants) != 3 || controllerProfile.BrokerGrants[0].Purpose != "runtime-injection" || len(compiled.Controller.Repositories) != 2 {
+	if len(compiled.Controller.Profiles) != 1 || controllerProfile.Profile.Runtime.Preset != "codex" || controllerProfile.Profile.Runtime.Model != "gpt-5.6-sol" || controllerProfile.Profile.Runtime.Effort != "high" || controllerProfile.RuntimeProvider == nil || controllerProfile.RuntimeProvider.Name != "codex" || controllerProfile.DefaultCredentialProvider != "github" || controllerProfile.EgressProxyProvider != "codex" || len(controllerProfile.CredentialProviders) != 2 || len(controllerProfile.BrokerGrants) != 3 || controllerProfile.BrokerGrants[0].Purpose != "runtime-injection" || len(compiled.Controller.Repositories) != 2 {
 		t.Fatalf("controller projection is incomplete: %#v", compiled.Controller)
 	}
 	if len(compiled.Broker.Profiles) != 1 || len(compiled.Broker.Profiles[0].Accounts) != 3 || len(compiled.Broker.Repositories) != 2 {
@@ -351,6 +353,31 @@ func TestReadOnlyAutonomyIsRejected(t *testing.T) {
 	decoded.Profiles["development"] = profile
 	if err := decoded.Validate(); err == nil {
 		t.Fatal("manifest accepted unsupported read-only autonomy")
+	}
+}
+
+func TestRuntimeModelAndEffortAreOptionalAndPresetSpecific(t *testing.T) {
+	tests := []struct {
+		name    string
+		runtime Runtime
+		valid   bool
+	}{
+		{name: "codex omitted", runtime: Runtime{Preset: "codex"}, valid: true},
+		{name: "codex model only", runtime: Runtime{Preset: "codex", Model: "gpt-5.6-sol"}, valid: true},
+		{name: "codex effort only", runtime: Runtime{Preset: "codex", Effort: "xhigh"}, valid: true},
+		{name: "claude omitted", runtime: Runtime{Preset: "claude"}, valid: true},
+		{name: "claude model and effort", runtime: Runtime{Preset: "claude", Model: "claude-opus", Effort: "max"}, valid: true},
+		{name: "codex rejects claude max", runtime: Runtime{Preset: "codex", Effort: "max"}},
+		{name: "claude rejects codex minimal", runtime: Runtime{Preset: "claude", Effort: "minimal"}},
+		{name: "shell rejects model", runtime: Runtime{Preset: "shell", Model: "custom"}},
+		{name: "shell rejects effort", runtime: Runtime{Preset: "shell", Effort: "high"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validRuntimeSelection(test.runtime); got != test.valid {
+				t.Fatalf("validRuntimeSelection(%#v) = %t, want %t", test.runtime, got, test.valid)
+			}
+		})
 	}
 }
 

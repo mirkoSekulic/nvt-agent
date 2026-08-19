@@ -332,7 +332,7 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		"plugins":     plugins,
 	})
 	profile := resolvedrun.Profile{
-		Name: intent.Name, Runtime: &resolvedrun.Runtime{Type: runtimeType, Autonomy: autonomy, User: "root", Container: &resolvedrun.RuntimeContainer{Capabilities: append([]string(nil), intent.Profile.Capabilities...)}, Docker: &resolvedrun.RuntimeDocker{}},
+		Name: intent.Name, Runtime: &resolvedrun.Runtime{Type: runtimeType, Autonomy: autonomy, Model: intent.Profile.Runtime.Model, Effort: intent.Profile.Runtime.Effort, User: "root", Container: &resolvedrun.RuntimeContainer{Capabilities: append([]string(nil), intent.Profile.Capabilities...)}, Docker: &resolvedrun.RuntimeDocker{}},
 		AgentConfig: agentConfig, WorkspaceInstructions: instructions, AllowedBackends: []string{"local-docker"}, DefaultBackend: "local-docker", AllowedRetentions: append([]string(nil), retentionNames...),
 	}
 	grantProviders := map[string]struct{}{}

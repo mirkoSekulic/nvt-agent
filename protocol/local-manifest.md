@@ -44,6 +44,12 @@ local bypass flags, or `approval-required`, which renders the native
 interactive policy. `read-only` is not accepted because the unchanged runtime
 contract has no enforceable read-only boundary for a root agent with workspace
 and nested-Docker access; silently weakening it to interactive is forbidden.
+Codex and Claude runtimes may also select an optional opaque `model` and a
+runtime-supported `effort`. Both are projected through the shared resolved-run
+contract into fresh and resume commands. Omitting either preserves that CLI's
+default. Codex accepts `minimal`, `low`, `medium`, `high`, or `xhigh`; Claude
+accepts `low`, `medium`, `high`, `xhigh`, or `max`. Shell profiles reject both
+fields.
 
 Profile plugins use a string shorthand for an ordinary builtin plugin, or a
 structured builtin policy with `name`, optional `when`, `restart`, bounded

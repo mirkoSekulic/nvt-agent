@@ -125,6 +125,8 @@ type Runtime struct {
 	Preset   string `json:"preset"`
 	Autonomy string `json:"autonomy"`
 	Account  string `json:"account,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Effort   string `json:"effort,omitempty"`
 }
 type Tools struct {
 	Packages []string `json:"packages,omitempty"`
@@ -368,6 +370,9 @@ func (m Manifest) Validate() error {
 		if !validRunIDName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required") {
 			return fmt.Errorf("invalid profile %q", name)
 		}
+		if !validRuntimeSelection(profile.Runtime) {
+			return fmt.Errorf("profile %q has an invalid runtime model or effort", name)
+		}
 		if err := uniqueRefs(profile.Accounts, m.Accounts, "account"); err != nil {
 			return fmt.Errorf("profile %q: %w", name, err)
 		}
@@ -596,6 +601,22 @@ func validRuntimeAccount(profile Profile, accounts map[string]Account) bool {
 		}
 	}
 	return false
+}
+func validRuntimeSelection(runtime Runtime) bool {
+	if runtime.Model != "" && (len(runtime.Model) > 256 || runtime.Model != strings.TrimSpace(runtime.Model) ||
+		!utf8.ValidString(runtime.Model) || strings.ContainsAny(runtime.Model, "\x00\r\n")) {
+		return false
+	}
+	switch runtime.Preset {
+	case "codex":
+		return runtime.Effort == "" || oneOf(runtime.Effort, "minimal", "low", "medium", "high", "xhigh")
+	case "claude":
+		return runtime.Effort == "" || oneOf(runtime.Effort, "low", "medium", "high", "xhigh", "max")
+	case "shell":
+		return runtime.Model == "" && runtime.Effort == ""
+	default:
+		return false
+	}
 }
 func profileAllowsRepository(profile Profile, repository Repository) bool {
 	if repository.Account == "" {

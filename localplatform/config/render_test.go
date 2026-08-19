@@ -140,6 +140,9 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		trusted.Profiles[0].Egress.Transport != "transparent" || !trusted.Profiles[0].Egress.AllowInsecureBroker || trusted.Profiles[0].DefaultCredentialProvider != "github" {
 		t.Fatalf("local Docker or mediated transport policy missing: %#v", trusted.Profiles)
 	}
+	if trusted.Profiles[0].Runtime.Model != "gpt-5.6-sol" || trusted.Profiles[0].Runtime.Effort != "high" {
+		t.Fatalf("runtime model and effort policy missing: %#v", trusted.Profiles[0].Runtime)
+	}
 	githubGrantFound, codexGrantFound := false, false
 	for _, grant := range trusted.Profiles[0].Broker.Grants {
 		if grant.Provider == "codex" {
