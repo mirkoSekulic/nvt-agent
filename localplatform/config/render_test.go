@@ -39,6 +39,8 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 		[]byte(`"private-key-file":"` + plancontract.PrivateTarget("github-key") + `"`),
 		[]byte(`"injection-hosts":["github.com","api.github.com"]`),
 		[]byte(`"token-file":"` + plancontract.PrivateTarget("azure-token") + `"`),
+		[]byte(`"injection-basic-username":"git"`),
+		[]byte(`"target-mode":"literal"`),
 		[]byte(`"app-id":3912708`),
 		[]byte(`"installation-id":123`),
 		[]byte(`"auth-file":"/private/portal/` + plancontract.CredentialSlotName("codex") + `"`),
@@ -143,7 +145,7 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	if trusted.Profiles[0].Runtime.Model != "gpt-5.6-sol" || trusted.Profiles[0].Runtime.Effort != "high" {
 		t.Fatalf("runtime model and effort policy missing: %#v", trusted.Profiles[0].Runtime)
 	}
-	githubGrantFound, codexGrantFound := false, false
+	githubGrantFound, codexGrantFound, azureGrantFound := false, false, false
 	for _, grant := range trusted.Profiles[0].Broker.Grants {
 		if grant.Provider == "codex" {
 			codexGrantFound = true
@@ -160,12 +162,21 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 				t.Fatalf("GitHub grant did not preserve the least-privilege repository access: %#v", grant)
 			}
 		}
+		if grant.Provider == "azure" {
+			azureGrantFound = true
+			if grant.Materialization != "header-inject" || !grant.Git || strings.Join(grant.EgressHosts, ",") != "dev.azure.com:443" || strings.Join(grant.Repositories, ",") != "dev.azure.com/example/platform/_git/infrastructure" {
+				t.Fatalf("generic Azure-shaped grant is not exact: %#v", grant)
+			}
+		}
 	}
 	if !githubGrantFound {
 		t.Fatalf("GitHub repository grant is missing: %#v", trusted.Profiles[0].Broker.Grants)
 	}
 	if !codexGrantFound {
 		t.Fatalf("Codex runtime grant is missing: %#v", trusted.Profiles[0].Broker.Grants)
+	}
+	if !azureGrantFound || bytes.Contains(controller, []byte("azure-token")) || bytes.Contains(controller, []byte("/private/")) {
+		t.Fatalf("generic static Git mediation exposed or omitted broker-only state: %s", controller)
 	}
 	var agentConfig struct {
 		Plugins []struct {
@@ -351,28 +362,34 @@ func TestExplicitWorkflowWriteRendersForGitHubApp(t *testing.T) {
 	}
 }
 
-func TestPATRepositoryRendersWithoutGranularPermissionClaim(t *testing.T) {
+func TestGenericStaticGitProviderRendersSelfHostedWithoutSecretDisclosure(t *testing.T) {
 	raw, err := os.ReadFile("../manifest/testdata/valid.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := strings.Replace(string(raw), "  github-key:\n    file: ./.nvt-local/secrets/github/main-app.pem", "  github-key:\n    file: ./.nvt-local/secrets/github/main-app.pem\n  github-token:\n    file: ./.nvt-local/secrets/github/token", 1)
-	input = strings.Replace(input, "  codex:\n", "  github-pat:\n    preset: github-pat\n    tokenSecret: github-token\n  codex:\n", 1)
-	input = strings.Replace(input, "accounts: [github, codex, azure]", "accounts: [github, github-pat, codex, azure]", 1)
-	input = strings.Replace(input, "defaultRepositoryAccount: github", "defaultRepositoryAccount: github-pat", 1)
-	input = strings.Replace(input, "          provider: github", "          provider: github-pat", 1)
-	input = strings.Replace(input, "    account: github\n  infrastructure:", "    account: github-pat\n  infrastructure:", 1)
-	decoded, err := manifest.Decode(strings.NewReader(input))
+	decoded, err := manifest.Decode(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
+	decoded.Secrets["studio-token"] = manifest.Secret{File: "./.nvt-local/secrets/studio/token"}
+	decoded.BrokerProviders["studio"] = manifest.BrokerProvider{Plugin: "token", Config: map[string]any{"label": "studio-readonly"}, Secrets: map[string]string{"token-file": "studio-token"}, Mediation: manifest.BrokerProviderMediation{Hosts: []string{"altinn.studio"}, Materialization: "header-inject", Git: true, Username: "oauth2", TargetMode: "literal"}}
+	profile := decoded.Profiles["development"]
+	profile.CredentialProviders = append(profile.CredentialProviders, "studio")
+	decoded.Profiles["development"] = profile
+	decoded.Repositories["studio"] = manifest.Repository{URL: "https://altinn.studio/repos/digdir/oed.git", CheckoutTarget: "altinn.studio/repos/digdir/oed", BrokerRepository: "altinn.studio/repos/digdir/oed", Path: "studio", CredentialProvider: "studio"}
+	decoded.Workstations[0].Repositories = append(decoded.Workstations[0].Repositories, "studio")
 	compiled, err := manifest.Compile(decoded)
 	if err != nil {
 		t.Fatal(err)
 	}
 	broker, err := serviceconfig.Broker(compiled)
-	if err != nil || !bytes.Contains(broker, []byte(`"name":"github-pat"`)) || !bytes.Contains(broker, []byte(`"plugin":"token"`)) || !bytes.Contains(broker, []byte(`"repositories":["mirkoSekulic/nvt-agent"]`)) {
-		t.Fatalf("PAT provider did not render the repository fence: %v %s", err, broker)
+	for _, expected := range [][]byte{[]byte(`"name":"studio"`), []byte(`"plugin":"token"`), []byte(`"label":"studio-readonly"`), []byte(`"token-file":"` + plancontract.PrivateTarget("studio-token") + `"`), []byte(`"injection-hosts":["altinn.studio"]`), []byte(`"injection-basic-username":"oauth2"`), []byte(`"target-mode":"literal"`), []byte(`"repositories":["altinn.studio/repos/digdir/oed"]`)} {
+		if err != nil || !bytes.Contains(broker, expected) {
+			t.Fatalf("generic provider omitted %s: %v %s", expected, err, broker)
+		}
+	}
+	if bytes.Contains(broker, []byte("./.nvt-local")) || bytes.Contains(broker, []byte("studio-readonly-token")) {
+		t.Fatalf("host path or secret entered broker config: %s", broker)
 	}
 	controller, err := serviceconfig.Controller(compiled, serviceconfig.Instructions{"development": "test"})
 	if err != nil {
@@ -383,9 +400,23 @@ func TestPATRepositoryRendersWithoutGranularPermissionClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, grant := range trusted.Profiles[0].Broker.Grants {
-		if grant.Provider == "github-pat" && len(grant.Permissions) != 0 {
-			t.Fatalf("PAT grant claimed granular enforcement: %#v", grant)
+		if grant.Provider == "studio" && (len(grant.Permissions) != 0 || strings.Join(grant.Repositories, ",") != "altinn.studio/repos/digdir/oed" || strings.Join(grant.EgressHosts, ",") != "altinn.studio:443") {
+			t.Fatalf("generic grant is not exact: %#v", grant)
 		}
+	}
+	foundRepository := false
+	for _, workflow := range trusted.Workflows {
+		for _, repository := range workflow.Repositories {
+			if repository.BrokerRepository == "altinn.studio/repos/digdir/oed" {
+				foundRepository = true
+				if repository.CredentialProvider != "studio" || repository.CredentialUsername != "oauth2" {
+					t.Fatalf("self-hosted repository omitted provider-scoped placeholder identity: %#v", repository)
+				}
+			}
+		}
+	}
+	if !foundRepository {
+		t.Fatal("self-hosted repository was not rendered")
 	}
 }
 
@@ -403,7 +434,7 @@ func TestBrokerRejectsDerivedProviderNameCollision(t *testing.T) {
 	github.Installations = map[string]string{"mirkoSekulic": "123", "owner-one": "456", "owner-two": "789"}
 	decoded.Accounts["github"] = github
 	decoded.Secrets["collision-token"] = manifest.Secret{File: "./.nvt-local/secrets/collision-token"}
-	decoded.Accounts["github-70864727"] = manifest.Account{Preset: "github-pat", TokenSecret: "collision-token"}
+	decoded.BrokerProviders["github-70864727"] = manifest.BrokerProvider{Plugin: "token", Secrets: map[string]string{"token-file": "collision-token"}, Mediation: manifest.BrokerProviderMediation{Hosts: []string{"git.example"}, Materialization: "header-inject", Git: true, Username: "git", TargetMode: "literal"}}
 	compiled, err := manifest.Compile(decoded)
 	if err != nil {
 		t.Fatalf("collision fixture is not schema-valid: %v", err)

@@ -38,6 +38,7 @@ var (
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	integerPattern    = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)$`)
 	eventPattern      = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
+	configKeyPattern  = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 	secretKeyPattern  = regexp.MustCompile(`(?i)(secret|token|password|passwd|private.?key|credential|api.?key)`)
 )
 
@@ -45,6 +46,7 @@ type Manifest struct {
 	APIVersion        string                     `json:"apiVersion"`
 	Secrets           map[string]Secret          `json:"secrets,omitempty"`
 	Accounts          map[string]Account         `json:"accounts,omitempty"`
+	BrokerProviders   map[string]BrokerProvider  `json:"brokerProviders,omitempty"`
 	RetentionPolicies map[string]RetentionPolicy `json:"retentionPolicies"`
 	Profiles          map[string]Profile         `json:"profiles"`
 	Repositories      map[string]Repository      `json:"repositories"`
@@ -79,19 +81,37 @@ type Account struct {
 	Preset           string            `json:"preset"`
 	AppID            string            `json:"appId,omitempty"`
 	PrivateKeySecret string            `json:"privateKeySecret,omitempty"`
-	TokenSecret      string            `json:"tokenSecret,omitempty"`
 	Installations    map[string]string `json:"installations,omitempty"`
 }
 
+// BrokerProvider is an opaque broker plugin instance plus compiler-owned
+// secret and mediation metadata. Config is public; secret bindings are
+// resolved to broker-private paths only after validation.
+type BrokerProvider struct {
+	Plugin    string                  `json:"plugin"`
+	Config    map[string]any          `json:"config,omitempty"`
+	Secrets   map[string]string       `json:"secrets,omitempty"`
+	Mediation BrokerProviderMediation `json:"mediation"`
+}
+
+type BrokerProviderMediation struct {
+	Hosts           []string `json:"hosts"`
+	Materialization string   `json:"materialization"`
+	Git             bool     `json:"git"`
+	Username        string   `json:"username"`
+	TargetMode      string   `json:"targetMode"`
+}
+
 type Profile struct {
-	Runtime                  Runtime  `json:"runtime"`
-	Accounts                 []string `json:"accounts,omitempty"`
-	DefaultRepositoryAccount string   `json:"defaultRepositoryAccount,omitempty"`
-	Tools                    Tools    `json:"tools,omitempty"`
-	Capabilities             []string `json:"capabilities,omitempty"`
-	Instructions             *FileRef `json:"instructions,omitempty"`
-	Editor                   Editor   `json:"editor,omitempty"`
-	Plugins                  []Plugin `json:"plugins,omitempty"`
+	Runtime                   Runtime  `json:"runtime"`
+	Accounts                  []string `json:"accounts,omitempty"`
+	CredentialProviders       []string `json:"credentialProviders,omitempty"`
+	DefaultCredentialProvider string   `json:"defaultCredentialProvider,omitempty"`
+	Tools                     Tools    `json:"tools,omitempty"`
+	Capabilities              []string `json:"capabilities,omitempty"`
+	Instructions              *FileRef `json:"instructions,omitempty"`
+	Editor                    Editor   `json:"editor,omitempty"`
+	Plugins                   []Plugin `json:"plugins,omitempty"`
 }
 
 type Plugin struct {
@@ -149,14 +169,15 @@ type Workstation struct {
 // Repository is provider-neutral checkout intent. GitHub is an optional
 // shorthand expanded by Compile; otherwise URL and CheckoutTarget are exact.
 type Repository struct {
-	GitHub           string            `json:"github,omitempty"`
-	URL              string            `json:"url,omitempty"`
-	CheckoutTarget   string            `json:"checkoutTarget,omitempty"`
-	BrokerRepository string            `json:"brokerRepository,omitempty"`
-	Path             string            `json:"path,omitempty"`
-	Upstream         string            `json:"upstream,omitempty"`
-	Account          string            `json:"account,omitempty"`
-	Access           *RepositoryAccess `json:"access,omitempty"`
+	GitHub             string            `json:"github,omitempty"`
+	URL                string            `json:"url,omitempty"`
+	CheckoutTarget     string            `json:"checkoutTarget,omitempty"`
+	BrokerRepository   string            `json:"brokerRepository,omitempty"`
+	Path               string            `json:"path,omitempty"`
+	Upstream           string            `json:"upstream,omitempty"`
+	Account            string            `json:"account,omitempty"`
+	CredentialProvider string            `json:"credentialProvider,omitempty"`
+	Access             *RepositoryAccess `json:"access,omitempty"`
 }
 
 type RepositoryAccess struct {
@@ -301,7 +322,7 @@ func (m Manifest) Validate() error {
 	if len(m.RetentionPolicies) == 0 || len(m.Profiles) == 0 || len(m.Workflows) == 0 {
 		return errors.New("retentionPolicies, profiles, and workflows are required")
 	}
-	for label, count := range map[string]int{"secrets": len(m.Secrets), "accounts": len(m.Accounts), "retentionPolicies": len(m.RetentionPolicies), "profiles": len(m.Profiles), "repositories": len(m.Repositories), "workstations": len(m.Workstations), "workflows": len(m.Workflows), "producers": len(m.Producers)} {
+	for label, count := range map[string]int{"secrets": len(m.Secrets), "accounts": len(m.Accounts), "brokerProviders": len(m.BrokerProviders), "retentionPolicies": len(m.RetentionPolicies), "profiles": len(m.Profiles), "repositories": len(m.Repositories), "workstations": len(m.Workstations), "workflows": len(m.Workflows), "producers": len(m.Producers)} {
 		if count > MaxItems {
 			return fmt.Errorf("too many %s", label)
 		}
@@ -315,10 +336,10 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, account := range m.Accounts {
-		if !validName(name) || !oneOf(account.Preset, "codex-oauth", "claude-oauth", "github-app", "github-pat", "azure-devops-pat") {
+		if !validName(name) || !oneOf(account.Preset, "codex-oauth", "claude-oauth", "github-app") {
 			return fmt.Errorf("invalid account %q", name)
 		}
-		if account.PrivateKeySecret != "" && !has(m.Secrets, account.PrivateKeySecret) || account.TokenSecret != "" && !has(m.Secrets, account.TokenSecret) {
+		if account.PrivateKeySecret != "" && !has(m.Secrets, account.PrivateKeySecret) {
 			return fmt.Errorf("account %q references an unknown secret", name)
 		}
 		if account.Preset == "github-app" && (account.AppID == "" || account.PrivateKeySecret == "" || len(account.Installations) == 0) {
@@ -331,9 +352,6 @@ func (m Manifest) Validate() error {
 		}
 		if account.Preset != "github-app" && (account.AppID != "" || account.PrivateKeySecret != "" || len(account.Installations) != 0) {
 			return fmt.Errorf("account %q has fields not valid for its preset", name)
-		}
-		if (account.Preset == "github-pat" || account.Preset == "azure-devops-pat") != (account.TokenSecret != "") {
-			return fmt.Errorf("account %q has invalid tokenSecret", name)
 		}
 		seenOwners := map[string]struct{}{}
 		for owner, installation := range account.Installations {
@@ -348,6 +366,14 @@ func (m Manifest) Validate() error {
 			if _, err := positiveID(installation); err != nil {
 				return fmt.Errorf("account %q has an invalid installation ID", name)
 			}
+		}
+	}
+	for name, provider := range m.BrokerProviders {
+		if !validName(name) || has(m.Accounts, name) || !validName(provider.Plugin) {
+			return fmt.Errorf("invalid broker provider %q", name)
+		}
+		if err := validateBrokerProvider(name, provider, m.Secrets); err != nil {
+			return err
 		}
 	}
 	for name, policy := range m.RetentionPolicies {
@@ -374,6 +400,9 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("profile %q has an invalid runtime model or effort", name)
 		}
 		if err := uniqueRefs(profile.Accounts, m.Accounts, "account"); err != nil {
+			return fmt.Errorf("profile %q: %w", name, err)
+		}
+		if err := uniqueRefs(profile.CredentialProviders, m.BrokerProviders, "credential provider"); err != nil {
 			return fmt.Errorf("profile %q: %w", name, err)
 		}
 		if !validRuntimeAccount(profile, m.Accounts) {
@@ -405,7 +434,7 @@ func (m Manifest) Validate() error {
 			if err := validateConfig(plugin.Config, 0); err != nil {
 				return fmt.Errorf("profile %q plugin %q config: %w", name, plugin.Name, err)
 			}
-			if plugin.Egress != nil && (!has(m.Accounts, plugin.Egress.Provider) || !contains(profile.Accounts, plugin.Egress.Provider)) {
+			if plugin.Egress != nil && !((has(m.Accounts, plugin.Egress.Provider) && contains(profile.Accounts, plugin.Egress.Provider)) || (has(m.BrokerProviders, plugin.Egress.Provider) && contains(profile.CredentialProviders, plugin.Egress.Provider))) {
 				return fmt.Errorf("profile %q plugin %q has an invalid egress provider", name, plugin.Name)
 			}
 		}
@@ -423,7 +452,7 @@ func (m Manifest) Validate() error {
 		if !validName(name) {
 			return fmt.Errorf("invalid repository %q", name)
 		}
-		if err := validateRepository(repository, m.Accounts); err != nil {
+		if err := validateRepository(repository, m.Accounts, m.BrokerProviders); err != nil {
 			return fmt.Errorf("invalid repository %q: %w", name, err)
 		}
 	}
@@ -457,14 +486,14 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, profile := range m.Profiles {
-		repositoryAccounts := profileRepositoryAccounts(m, name)
-		if profile.DefaultRepositoryAccount != "" && !contains(repositoryAccounts, profile.DefaultRepositoryAccount) || len(repositoryAccounts) > 1 && profile.DefaultRepositoryAccount == "" || len(repositoryAccounts) == 0 && profile.DefaultRepositoryAccount != "" {
-			return fmt.Errorf("profile %q has an invalid default repository account", name)
+		repositoryProviders := profileRepositoryProviders(m, name)
+		if profile.DefaultCredentialProvider != "" && !contains(repositoryProviders, profile.DefaultCredentialProvider) || len(repositoryProviders) > 1 && profile.DefaultCredentialProvider == "" || len(repositoryProviders) == 0 && profile.DefaultCredentialProvider != "" {
+			return fmt.Errorf("profile %q has an invalid default credential provider", name)
 		}
 		accessByProvider := map[string]string{}
 		checkAccess := func(repositoryName string) error {
 			repository := m.Repositories[repositoryName]
-			if repository.Account == "" || !oneOf(m.Accounts[repository.Account].Preset, "github-app", "github-pat") {
+			if repository.Account == "" || m.Accounts[repository.Account].Preset != "github-app" {
 				return nil
 			}
 			provider := repository.Account
@@ -619,21 +648,30 @@ func validRuntimeSelection(runtime Runtime) bool {
 	}
 }
 func profileAllowsRepository(profile Profile, repository Repository) bool {
-	if repository.Account == "" {
+	if repository.Account == "" && repository.CredentialProvider == "" {
 		return true
 	}
 	for _, account := range profile.Accounts {
-		if account == repository.Account {
+		if repository.Account != "" && account == repository.Account {
+			return true
+		}
+	}
+	for _, provider := range profile.CredentialProviders {
+		if repository.CredentialProvider != "" && provider == repository.CredentialProvider {
 			return true
 		}
 	}
 	return false
 }
-func profileRepositoryAccounts(m Manifest, profileName string) []string {
+func profileRepositoryProviders(m Manifest, profileName string) []string {
 	seen := map[string]struct{}{}
 	add := func(repositoryName string) {
-		if account := m.Repositories[repositoryName].Account; account != "" {
-			seen[account] = struct{}{}
+		repository := m.Repositories[repositoryName]
+		if repository.Account != "" {
+			seen[repository.Account] = struct{}{}
+		}
+		if repository.CredentialProvider != "" {
+			seen[repository.CredentialProvider] = struct{}{}
 		}
 	}
 	for _, workflow := range m.Workflows {
@@ -658,12 +696,12 @@ func contains(values []string, target string) bool {
 	}
 	return false
 }
-func validateRepository(value Repository, accounts map[string]Account) error {
-	if value.Account != "" && !has(accounts, value.Account) || value.Path != "" && !safeRelativePath(value.Path, "") {
+func validateRepository(value Repository, accounts map[string]Account, providers map[string]BrokerProvider) error {
+	if value.Account != "" && !has(accounts, value.Account) || value.CredentialProvider != "" && !has(providers, value.CredentialProvider) || value.Account != "" && value.CredentialProvider != "" || value.Path != "" && !safeRelativePath(value.Path, "") {
 		return errors.New("invalid repository account or path")
 	}
 	if value.Access != nil {
-		if value.Account == "" || !oneOf(accounts[value.Account].Preset, "github-app", "github-pat") {
+		if value.Account == "" || accounts[value.Account].Preset != "github-app" || value.CredentialProvider != "" {
 			return errors.New("repository access requires a GitHub account")
 		}
 		if len(value.Access.Permissions) == 0 {
@@ -682,13 +720,13 @@ func validateRepository(value Repository, accounts map[string]Account) error {
 		}
 	}
 	if value.GitHub != "" {
-		if !repositoryPattern.MatchString(value.GitHub) || value.URL != "" || value.CheckoutTarget != "" || value.BrokerRepository != "" {
+		if !repositoryPattern.MatchString(value.GitHub) || value.URL != "" || value.CheckoutTarget != "" || value.BrokerRepository != "" || value.CredentialProvider != "" {
 			return errors.New("invalid GitHub shorthand")
 		}
 		if value.Upstream != "" && !validHTTPSRepositoryURL(value.Upstream) {
 			return errors.New("invalid upstream")
 		}
-		if value.Account != "" && !oneOf(accounts[value.Account].Preset, "github-app", "github-pat") {
+		if value.Account != "" && accounts[value.Account].Preset != "github-app" {
 			return errors.New("GitHub repository requires a GitHub account")
 		}
 		if value.Account != "" && accounts[value.Account].Preset == "github-app" {
@@ -702,37 +740,34 @@ func validateRepository(value Repository, accounts map[string]Account) error {
 	if !validHTTPSRepositoryURL(value.URL) || repositoryTarget(value.URL) != value.CheckoutTarget || value.CheckoutTarget == "" {
 		return errors.New("invalid repository URL or checkout target")
 	}
-	if value.Account == "" && value.BrokerRepository != "" || value.Account != "" && value.BrokerRepository == "" {
-		return errors.New("broker repository requires an account")
+	credentialed := value.Account != "" || value.CredentialProvider != ""
+	if !credentialed && value.BrokerRepository != "" || credentialed && value.BrokerRepository == "" {
+		return errors.New("broker repository requires a credential provider")
 	}
 	if value.BrokerRepository != "" && !validRepositoryID(value.BrokerRepository) || value.Upstream != "" && !validHTTPSRepositoryURL(value.Upstream) {
 		return errors.New("invalid broker repository or upstream")
 	}
 	if value.Account != "" {
 		parsed, _ := url.Parse(value.URL)
-		switch parsed.Host {
-		case "github.com":
-			if !oneOf(accounts[value.Account].Preset, "github-app", "github-pat") {
-				return errors.New("github.com repository requires a GitHub account")
-			}
-			owner, repository, coordinatesOK := githubCoordinates(value)
-			if !coordinatesOK || value.BrokerRepository != owner+"/"+repository {
-				return errors.New("GitHub broker repository must match the URL coordinates")
-			}
-			if accounts[value.Account].Preset == "github-app" {
-				if _, err := githubInstallationID(accounts[value.Account], owner); err != nil {
-					return errors.New("GitHub App repository owner has no installation")
-				}
-			}
-		case "dev.azure.com":
-			if accounts[value.Account].Preset != "azure-devops-pat" {
-				return errors.New("dev.azure.com repository requires an Azure DevOps account")
-			}
-			if value.BrokerRepository != repositoryTarget(value.URL) {
-				return errors.New("Azure DevOps broker repository must match the normalized checkout target")
-			}
-		default:
-			return errors.New("credentialed custom repositories require a supported host preset")
+		if parsed.Host != "github.com" || accounts[value.Account].Preset != "github-app" {
+			return errors.New("account-backed repository requires a GitHub App on github.com")
+		}
+		owner, repository, coordinatesOK := githubCoordinates(value)
+		if !coordinatesOK || value.BrokerRepository != owner+"/"+repository {
+			return errors.New("GitHub broker repository must match the URL coordinates")
+		}
+		if _, err := githubInstallationID(accounts[value.Account], owner); err != nil {
+			return errors.New("GitHub App repository owner has no installation")
+		}
+	}
+	if value.CredentialProvider != "" {
+		parsed, _ := url.Parse(value.URL)
+		provider := providers[value.CredentialProvider]
+		if parsed.Host != parsed.Hostname() || !contains(provider.Mediation.Hosts, parsed.Hostname()) {
+			return errors.New("repository host is not mediated by its credential provider")
+		}
+		if value.BrokerRepository != repositoryTarget(value.URL) {
+			return errors.New("broker repository must exactly match the normalized checkout target")
 		}
 	}
 	return nil
@@ -915,6 +950,93 @@ func validateConfig(value any, depth int) error {
 		return errors.New("unsupported config value")
 	}
 	return nil
+}
+
+func validateBrokerProvider(name string, provider BrokerProvider, secrets map[string]Secret) error {
+	if err := validateConfig(provider.Config, 0); err != nil {
+		return fmt.Errorf("broker provider %q config: %w", name, err)
+	}
+	if containsUnsafePublicPath(provider.Config) {
+		return fmt.Errorf("broker provider %q config contains a filesystem path", name)
+	}
+	if containsSecretReference(provider.Config, secrets) {
+		return fmt.Errorf("broker provider %q config contains an undeclared secret reference", name)
+	}
+	reserved := map[string]struct{}{"injection-hosts": {}, "injection-git": {}, "injection-basic-username": {}, "target-mode": {}}
+	for key := range provider.Config {
+		if _, exists := reserved[key]; exists {
+			return fmt.Errorf("broker provider %q config uses compiler-owned key %q", name, key)
+		}
+	}
+	if len(provider.Secrets) == 0 {
+		return fmt.Errorf("broker provider %q must declare secret bindings", name)
+	}
+	for configKey, secretName := range provider.Secrets {
+		if !validConfigKey(configKey) || !secretKeyPattern.MatchString(configKey) || !has(secrets, secretName) {
+			return fmt.Errorf("broker provider %q has an invalid secret binding", name)
+		}
+		if _, exists := provider.Config[configKey]; exists {
+			return fmt.Errorf("broker provider %q config duplicates secret binding %q", name, configKey)
+		}
+	}
+	mediation := provider.Mediation
+	if len(mediation.Hosts) == 0 || mediation.Materialization != "header-inject" || !mediation.Git || mediation.Username == "" || strings.ContainsAny(mediation.Username, ":\x00\r\n") || !oneOf(mediation.TargetMode, "github", "literal") {
+		return fmt.Errorf("broker provider %q has invalid static Git mediation", name)
+	}
+	if err := uniqueStrings(mediation.Hosts); err != nil {
+		return fmt.Errorf("broker provider %q hosts: %w", name, err)
+	}
+	for _, host := range mediation.Hosts {
+		parsed, err := url.Parse("https://" + host)
+		if err != nil || parsed.Host != host || parsed.Hostname() != host || parsed.Port() != "" || strings.ToLower(host) != host {
+			return fmt.Errorf("broker provider %q has invalid mediated host", name)
+		}
+	}
+	return nil
+}
+
+func containsUnsafePublicPath(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return strings.HasPrefix(typed, "/") || strings.HasPrefix(typed, "./") || strings.HasPrefix(typed, "../")
+	case []any:
+		for _, item := range typed {
+			if containsUnsafePublicPath(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range typed {
+			if containsUnsafePublicPath(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsSecretReference(value any, secrets map[string]Secret) bool {
+	switch typed := value.(type) {
+	case string:
+		return has(secrets, typed)
+	case []any:
+		for _, item := range typed {
+			if containsSecretReference(item, secrets) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range typed {
+			if containsSecretReference(item, secrets) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func validConfigKey(value string) bool {
+	return value != "" && len(value) <= MaxNameBytes && configKeyPattern.MatchString(value)
 }
 
 // SortedNames returns map keys in the canonical compiler order.

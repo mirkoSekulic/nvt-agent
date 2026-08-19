@@ -10,7 +10,8 @@ scalar tags, excessive depth/node/byte counts, invalid names and enums, unsafe
 paths, unresolved references, mutable OCI image tags, and undeclared
 secret-bearing fields.
 
-The document defines logical secrets by file reference, provider accounts,
+The document defines logical secrets by file reference, runtime/dynamic accounts,
+generic static broker providers,
 explicit named retention policies, reusable profiles, named provider-neutral
 repositories, persistent workstations, workflows, the built-in
 `github-comments` producer, and external digest-pinned OCI producers. The
@@ -33,8 +34,10 @@ Every Codex or Claude profile explicitly selects one compatible runtime account
 from its account list. Shell profiles select none. The controller projection
 keeps that selection separate as the runtime/egress provider and emits its
 required injection grant. Git credential mappings are derived only from
-repository accounts. When multiple repository accounts are selected, the
-profile must declare `defaultRepositoryAccount`; it is never inferred from the
+repository `account` or `credentialProvider` bindings. Static providers are
+selected through the profile's `credentialProviders` list. When multiple
+repository providers are selected, the profile must declare
+`defaultCredentialProvider`; it is never inferred from the
 runtime account. The projection duplicates preset identities and exact grants,
 allowing local preset packaging to render the existing resolved-run profile
 without consulting the broker-owned section.
@@ -54,23 +57,25 @@ fields.
 Profile plugins use a string shorthand for an ordinary builtin plugin, or a
 structured builtin policy with `name`, optional `when`, `restart`, bounded
 public `config`, and `egress.provider`. The egress provider names one account
-allowed by the profile. The controller projection resolves that account to one
+or generic broker provider allowed by the profile. The controller projection
+resolves that name to one
 exact broker grant and rejects missing or ambiguous provider bindings. The
 runtime then supplies the plugin process with its provider-scoped mediated
 HTTPS proxy and `NVT_PLUGIN_EGRESS_PROVIDER`; transparent egress never guesses
 which credential provider should authorize a request.
 
 Each repository supplies an HTTPS URL, exact checkout target, optional checkout
-path and upstream, broker repository identity, and optional credential account.
+path and upstream, broker repository identity, and exactly one optional
+credential account or generic `credentialProvider`.
 `github: owner/repository` is shorthand expanded into those exact fields. A
-workstation or workflow references repository names, so GitHub and Azure DevOps
-checkouts use the same selection contract and account choice is unambiguous.
+workstation or workflow references repository names, so hosted and self-hosted
+checkouts use the same selection contract and provider choice is unambiguous.
 Workflows also declare provider-neutral `lifecycle.completeOn` and
 `lifecycle.failOn` event-name sets. These are projected unchanged into the
 immutable resolved run; an event may not appear in both sets.
 For explicit credentialed repositories, the broker identity is canonical and
-must match the URL: GitHub uses `owner/repository`, while Azure DevOps literal
-mode uses the complete `dev.azure.com/organization/project/_git/repository`
+must match the URL: GitHub App accounts use `owner/repository`, while generic
+literal-mode providers use the complete normalized `host/path/repository`
 target. GitHub App installation provider names are therefore derived from the
 same URL-validated owner in both broker and controller projections.
 
@@ -109,35 +114,55 @@ repositories:
         workflows: write
 ```
 
-A PAT uses the same repository declaration and profile/workflow selection; only
-the account changes. The broker enforces the exact repository fence, while the
-PAT's scopes are the outer authority ceiling. Because GitHub PATs do not offer
-per-request installation-token permissions, NVT does not put granular
-permission claims in a PAT-backed agent grant or claim to enforce them. An
-insufficient PAT therefore fails at GitHub without exposing the token to the
-agent. PAT values remain named secret-file inputs under `.nvt-local`:
+A static Git credential uses a provider-neutral `brokerProviders` entry. Its
+`plugin` and bounded public `config` pass through to the existing broker
+provider document. `secrets` maps a provider config key to a logical manifest
+secret; the compiler replaces that name with a broker-private in-container
+path. Filesystem paths, secret-like keys, references to declared secrets, and
+compiler-owned mediation keys are rejected in public config.
+
+`mediation` is the generic zero-secret contract: exact upstream hosts,
+`header-inject` materialization, Git smart-HTTP routing, the inert Basic
+username used by the agent-side placeholder, and the provider target mode. The
+compiler derives broker injection config and exact agent grants from these
+fields. A repository must name the provider, use one of its exact hosts, and
+declare the exact normalized broker repository identity. No provider is
+selected from a host and no vendor preset is implied.
+
+The same declaration works for Azure-shaped and self-hosted repositories. This
+self-hosted example uses the generic broker `token` plugin without a Gitea
+preset or vendor-specific compiler code:
 
 ```yaml
 secrets:
-  github-token:
-    file: ./.nvt-local/secrets/github/token
-accounts:
-  github:
-    preset: github-pat
-    tokenSecret: github-token
+  studio-token:
+    file: ./.nvt-local/secrets/studio/token
+brokerProviders:
+  studio:
+    plugin: token
+    secrets:
+      token-file: studio-token
+    mediation:
+      hosts: [altinn.studio]
+      materialization: header-inject
+      git: true
+      username: oauth2
+      targetMode: literal
+profiles:
+  development:
+    credentialProviders: [studio]
+    defaultCredentialProvider: studio
 repositories:
   project:
-    github: example/project
-    account: github
-    access:
-      permissions:
-        contents: write
-        pull_requests: write
+    url: https://altinn.studio/repos/digdir/oed.git
+    checkoutTarget: altinn.studio/repos/digdir/oed
+    brokerRepository: altinn.studio/repos/digdir/oed
+    credentialProvider: studio
 ```
 
 Producer authentication is separate. The built-in `github-comments` producer
-continues to select a GitHub App account even when an agent repository selects
-a PAT-backed account.
+continues to select a GitHub App account independently of any static provider
+used by an agent repository.
 
 ## Canonical compilation and ownership
 
@@ -150,7 +175,7 @@ network protocol. Its sections establish these exclusive rendering boundaries:
 
 | Section | Output owner | Existing contract eventually rendered |
 | --- | --- | --- |
-| `broker` | broker generator | account and exact per-profile repository-grant projections |
+| `broker` | broker generator | account/provider instances and exact per-profile repository-grant projections |
 | `localController` | local-controller generator | execution profiles, repositories, workstations, and workflows |
 | `gateway` | gateway generator | routes and typed Codex/Claude credential-portal slots |
 | `producers[]` | the named producer generator | existing bounded schedule-admission client configuration |
@@ -167,7 +192,7 @@ owns its copy of that same logical key.
 Broker rendering validates the final provider namespace before publishing any
 managed state. This includes provider names derived for individual GitHub App
 installations: a derived name may not collide with another derived provider or
-with any user-authored account name.
+with any user-authored account or broker-provider name.
 
 Reconciliation preflights the bounded union of the current volume plan and the
 validated historical ownership inventory before creating any missing volume.
