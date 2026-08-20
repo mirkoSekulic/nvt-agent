@@ -34,10 +34,15 @@ func NewProcessReconcileOwner(resourceOwner string) (string, error) {
 // execution backend. SnapshotDigest binds every owned backend resource to the
 // durable controller record.
 type BackendRun struct {
-	Resolved        resolvedrun.ResolvedAgentRun
-	SnapshotDigest  string
-	DeleteRequested bool
-	LifecycleCursor string
+	Resolved         resolvedrun.ResolvedAgentRun
+	PreviousResolved *resolvedrun.ResolvedAgentRun
+	// SnapshotDigest is the stable exact-ownership revision. DesiredDigest is
+	// the staged configuration revision and changes only for safe workstation rollouts.
+	SnapshotDigest       string
+	DesiredDigest        string
+	ConfigurationRollout bool
+	DeleteRequested      bool
+	LifecycleCursor      string
 }
 
 // BackendObservation contains only the portable state needed by the lifecycle
@@ -246,6 +251,9 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 		if ensureErr == nil && !observation.Ready {
 			return ErrBackendRetryable
 		}
+		if ensureErr != nil && backendRun.ConfigurationRollout {
+			return reconciler.store.abortPendingConfiguration(ctx, run.RunID, reconciler.owner, claimed.Revision)
+		}
 		if ensureErr != nil {
 			_, updateErr := reconciler.store.UpdateStatus(ctx, StatusInput{
 				RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
@@ -256,6 +264,8 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 		reason := "backend-ready"
 		if run.LastReason == "backend-recovery-requested" {
 			reason = "backend-recovered"
+		} else if backendRun.ConfigurationRollout {
+			reason = "configuration-applied"
 		}
 		_, err = reconciler.store.UpdateStatus(ctx, StatusInput{
 			RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
@@ -335,13 +345,25 @@ func (reconciler *Reconciler) claim(ctx context.Context, run Run) (Run, error) {
 }
 
 func (reconciler *Reconciler) backendRun(ctx context.Context, run Run) (BackendRun, error) {
-	snapshot, digest, cursor, err := reconciler.store.backendSnapshot(ctx, run.RunID)
+	snapshot, desiredDigest, ownershipDigest, cursor, rollout, err := reconciler.store.backendSnapshot(ctx, run.RunID)
 	if err != nil {
 		return BackendRun{}, err
 	}
 	resolved, err := resolvedrun.DecodeResolvedAgentRun(json.RawMessage(snapshot))
-	if err != nil || digest != run.SnapshotDigest {
+	if err != nil || desiredDigest == "" || ownershipDigest == "" {
 		return BackendRun{}, ErrStoreUnavailable
 	}
-	return BackendRun{Resolved: resolved, SnapshotDigest: digest, DeleteRequested: run.DeleteRequested, LifecycleCursor: cursor}, nil
+	result := BackendRun{Resolved: resolved, SnapshotDigest: ownershipDigest, DesiredDigest: desiredDigest, ConfigurationRollout: rollout, DeleteRequested: run.DeleteRequested, LifecycleCursor: cursor}
+	if rollout {
+		active, _, activeErr := reconciler.store.ResolvedSnapshot(ctx, run.RunID)
+		if activeErr != nil {
+			return BackendRun{}, activeErr
+		}
+		previous, decodeErr := resolvedrun.DecodeResolvedAgentRun(active)
+		if decodeErr != nil {
+			return BackendRun{}, ErrStoreUnavailable
+		}
+		result.PreviousResolved = &previous
+	}
+	return result, nil
 }

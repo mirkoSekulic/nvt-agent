@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -161,6 +162,95 @@ func TestConfiguredWorkstationsBootstrapIdempotentlyAndRejectDrift(t *testing.T)
 	}
 	if err := drifted.BootstrapWorkstations(context.Background()); !errors.Is(err, ErrConflict) {
 		t.Fatalf("configuration drift = %v, want conflict", err)
+	}
+}
+
+func TestPersistentWorkstationDesiredConfigurationRollsOutAtomically(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
+	path := filepath.Join(t.TempDir(), "local-controller.yaml")
+	if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := LoadScheduler(path, store)
+	if err != nil || scheduler.BootstrapWorkstations(context.Background()) != nil {
+		t.Fatalf("initial bootstrap: %v", err)
+	}
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	activeRaw, activeDigest, err := store.ResolvedSnapshot(context.Background(), "nvt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := resolvedrun.DecodeResolvedAgentRun(activeRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := active
+	desired.Repositories = []resolvedrun.Repository{{URL: "https://git.example/acme/project.git", CheckoutTarget: "git.example/acme/project", BrokerRepository: "git.example/acme/project", CredentialProvider: "git", CredentialUsername: "git"}}
+	desired.CredentialProviders = []resolvedrun.CredentialProviderMapping{{Name: "git", BrokerProvider: "git", CredentialKind: "mediated", MatchTargets: []string{"git.example/acme/project"}}}
+	desired.DefaultCredentialProvider = "git"
+	desired.Broker.Grants = []resolvedrun.BrokerGrant{{Provider: "git", Repositories: []string{"git.example/acme/project"}, Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: []string{"git.example:443"}, Git: true}}
+	desired.Egress = resolvedrun.Egress{Mode: "mediated", Transport: "transparent", Enforced: true, ProxyProvider: "git", PairedEgressRequired: true, AllowInsecureBroker: true, MaxConcurrentTunnels: 128}
+	desired.WorkspaceInstructions.Workflow = "updated instructions"
+	desiredRaw := mustJSON(t, desired)
+	updated := &Scheduler{store: store, workstations: []CreateInput{{IdempotencyKey: scheduler.workstations[0].IdempotencyKey, ResolvedRun: desiredRaw}}}
+	if err := updated.BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatalf("stage desired configuration: %v", err)
+	}
+	staged, _ := store.Get(context.Background(), "nvt")
+	currentRaw, currentDigest, _ := store.ResolvedSnapshot(context.Background(), "nvt")
+	if staged.State != StatePreparing || currentDigest != activeDigest || !bytes.Equal(currentRaw, activeRaw) {
+		t.Fatalf("staging exposed partial desired state: %#v", staged)
+	}
+	backend.ensureErr = ErrBackendDesiredRunInvalid
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rejected, _ := store.Get(context.Background(), "nvt")
+	rejectedRaw, rejectedDigest, _ := store.ResolvedSnapshot(context.Background(), "nvt")
+	if rejected.State != StateRunning || rejectedDigest != activeDigest || !bytes.Equal(rejectedRaw, activeRaw) {
+		t.Fatalf("failed rollout changed active desired state: %#v", rejected)
+	}
+	backend.ensureErr = nil
+	if err := updated.BootstrapWorkstations(context.Background()); err != nil || reconciler.Reconcile(context.Background()) != nil {
+		t.Fatalf("successful rollout: %v", err)
+	}
+	appliedRaw, appliedDigest, _ := store.ResolvedSnapshot(context.Background(), "nvt")
+	applied, decodeErr := resolvedrun.DecodeResolvedAgentRun(appliedRaw)
+	if decodeErr != nil || appliedDigest == activeDigest || len(applied.Repositories) != 1 || len(applied.Broker.Grants) != 1 || applied.WorkspaceInstructions.Workflow != "updated instructions" {
+		t.Fatalf("desired configuration was not applied: %#v %v", applied, decodeErr)
+	}
+	backend.mu.Lock()
+	lastEnsure := backend.ensuredRuns[len(backend.ensuredRuns)-1]
+	backend.mu.Unlock()
+	if lastEnsure.SnapshotDigest != activeDigest || lastEnsure.DesiredDigest != appliedDigest || lastEnsure.PreviousResolved == nil || !lastEnsure.ConfigurationRollout {
+		t.Fatalf("rollout did not retain stable ownership/session identity: %#v", lastEnsure)
+	}
+	removed := desired
+	removed.Repositories = nil
+	removed.CredentialProviders = nil
+	removed.DefaultCredentialProvider = ""
+	removed.Broker.Grants = nil
+	removed.Egress = active.Egress
+	removed.AgentConfig = active.AgentConfig
+	removed.WorkspaceInstructions = active.WorkspaceInstructions
+	removal := &Scheduler{store: store, workstations: []CreateInput{{IdempotencyKey: scheduler.workstations[0].IdempotencyKey, ResolvedRun: mustJSON(t, removed)}}}
+	if err := removal.BootstrapWorkstations(context.Background()); err != nil || reconciler.Reconcile(context.Background()) != nil {
+		t.Fatalf("repository removal rollout: %v", err)
+	}
+	finalRaw, _, _ := store.ResolvedSnapshot(context.Background(), "nvt")
+	final, _ := resolvedrun.DecodeResolvedAgentRun(finalRaw)
+	if len(final.Repositories) != 0 || len(final.CredentialProviders) != 0 || len(final.Broker.Grants) != 0 {
+		t.Fatalf("repository removal retained authorization: %#v", final)
 	}
 }
 

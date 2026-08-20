@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,26 +27,27 @@ import (
 )
 
 type fakeDocker struct {
-	mu              sync.Mutex
-	objects         map[string]map[string]string
-	objectSubnets   map[string]string
-	networkMembers  map[string]map[string]bool
-	containers      map[string]map[string]string
-	commands        [][]string
-	inputs          [][]byte
-	seedCount       int
-	agentAbsent     bool
-	agentStatus     string
-	agentExitCode   int
-	agentOOM        bool
-	gatewayStatus   string
-	gatewayHealth   string
-	failComposeUp   int
-	caRenewal       bool
-	failRemove      string
-	lifecycleEvents []string
-	lifecycleCursor string
-	lifecycleErr    error
+	mu                      sync.Mutex
+	objects                 map[string]map[string]string
+	objectSubnets           map[string]string
+	networkMembers          map[string]map[string]bool
+	containers              map[string]map[string]string
+	commands                [][]string
+	inputs                  [][]byte
+	seedCount               int
+	agentAbsent             bool
+	agentStatus             string
+	agentExitCode           int
+	agentOOM                bool
+	gatewayStatus           string
+	gatewayHealth           string
+	failComposeUp           int
+	failComposeUpAfterStart int
+	caRenewal               bool
+	failRemove              string
+	lifecycleEvents         []string
+	lifecycleCursor         string
+	lifecycleErr            error
 }
 
 func newFakeDocker() *fakeDocker {
@@ -94,7 +96,7 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		name := argumentAfter(arguments, "--name")
 		if name == "" {
 			docker.seedCount++
-			name = strings.Repeat("a", 63) + string(rune('0'+docker.seedCount))
+			name = fmt.Sprintf("%064x", docker.seedCount)
 		}
 		labels := parsedLabels(arguments)
 		if _, exists := docker.containers[name]; exists {
@@ -106,9 +108,19 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 	if arguments[0] == "cp" {
 		return nil, nil
 	}
+	if arguments[0] == "start" {
+		return nil, nil
+	}
 	if arguments[0] == "rm" && len(arguments) >= 3 {
 		delete(docker.containers, arguments[len(arguments)-1])
 		return nil, nil
+	}
+	if arguments[0] == "stop" && len(arguments) == 2 {
+		if _, exists := docker.containers[arguments[1]]; !exists {
+			return nil, errors.New("missing")
+		}
+		docker.agentStatus = "stopped"
+		return []byte(arguments[1] + "\n"), nil
 	}
 	if arguments[0] == "ps" {
 		values := []string{}
@@ -179,6 +191,7 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 		return nil, nil
 	}
 	if contains(arguments, "stop") {
+		docker.agentStatus = "stopped"
 		return nil, nil
 	}
 	if contains(arguments, "up") {
@@ -201,6 +214,11 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 			labels[agentConfinementRevisionLabel] = agentConfinementRevision
 		}
 		docker.containers["fake-agent-id"] = labels
+		docker.agentStatus = ""
+		if docker.failComposeUpAfterStart > 0 {
+			docker.failComposeUpAfterStart--
+			return nil, errors.New("Docker reported a failure after partial start")
+		}
 		return nil, nil
 	}
 	if contains(arguments, "ps") {
@@ -1288,6 +1306,170 @@ func TestDockerBackendPreservesPersistentVolumesUntilExplicitDelete(t *testing.T
 		if _, exists := docker.objects["volume:"+name]; exists {
 			t.Fatalf("explicit delete retained volume %s", name)
 		}
+	}
+}
+
+func TestPersistentConfigurationRolloutRetainsVolumesAndReplacesRuntime(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	run.Persistence = resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true}
+	run.Retention = "persistent"
+	run.TTL = resolvedrun.TTL{}
+	ownership := strings.Repeat("d", 64)
+	initial := controller.BackendRun{Resolved: run, SnapshotDigest: ownership, DesiredDigest: ownership}
+	if _, err := backend.Ensure(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	names := namesFor(backend.config, run.RunID, ownership)
+	previous := run
+	encodedRun, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var desiredRun resolvedrun.ResolvedAgentRun
+	if err := json.Unmarshal(encodedRun, &desiredRun); err != nil {
+		t.Fatal(err)
+	}
+	desiredRun.Repositories = append(desiredRun.Repositories, resolvedrun.Repository{
+		CheckoutTarget: "github.example/org/other", BrokerRepository: "org/other", URL: "https://github.example/org/other.git",
+		CredentialProvider: "git-provider", Identity: &resolvedrun.RepositoryIdentity{Mode: "provider"},
+	})
+	desiredRun.CredentialProviders[0].MatchTargets = append(desiredRun.CredentialProviders[0].MatchTargets, "github.example/org/other")
+	desiredRun.Broker.Grants[1].Repositories = append(desiredRun.Broker.Grants[1].Repositories, "org/other")
+	if err := resolvedrun.ValidateResolvedAgentRun(desiredRun); err != nil {
+		t.Fatal(err)
+	}
+	beforeCommands := len(docker.commands)
+	rollout := controller.BackendRun{Resolved: desiredRun, PreviousResolved: &previous, SnapshotDigest: ownership, DesiredDigest: strings.Repeat("e", 64), ConfigurationRollout: true}
+	if _, err := backend.Ensure(context.Background(), rollout); err != nil {
+		t.Fatal(err)
+	}
+	for _, volume := range []string{names.workspace, names.home, names.dockerData} {
+		labels, exists := docker.objects["volume:"+volume]
+		if !exists || labels[digestLabel] != ownership {
+			t.Fatalf("persistent volume identity changed during rollout: %s %#v", volume, labels)
+		}
+	}
+	commands := docker.commands[beforeCommands:]
+	stopIndex, recreateIndex := -1, -1
+	for index, command := range commands {
+		if command[0] == "stop" {
+			stopIndex = index
+		}
+		if command[0] == "compose" && contains(command, "up") && contains(command, "--force-recreate") {
+			recreateIndex = index
+		}
+	}
+	if stopIndex < 0 || recreateIndex <= stopIndex {
+		t.Fatalf("runtime was not stopped and recreated for desired rollout: %v", commands)
+	}
+	policy, err := os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil || !bytes.Contains(policy, []byte("org/other")) {
+		t.Fatalf("new authorization was not committed: %v %s", err, policy)
+	}
+	docker.failComposeUp = 1
+	failedRun := desiredRun
+	failedRun.Broker.Grants = append([]resolvedrun.BrokerGrant(nil), desiredRun.Broker.Grants...)
+	failedRun.Broker.Grants[1].Repositories = append(append([]string(nil), desiredRun.Broker.Grants[1].Repositories...), "org/rejected")
+	failed := controller.BackendRun{Resolved: failedRun, PreviousResolved: &desiredRun, SnapshotDigest: ownership, DesiredDigest: strings.Repeat("f", 64), ConfigurationRollout: true}
+	if _, err := backend.Ensure(context.Background(), failed); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("failed rollout = %v", err)
+	}
+	policy, err = os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil || !bytes.Contains(policy, []byte("org/other")) || bytes.Contains(policy, []byte("org/rejected")) {
+		t.Fatalf("failed rollout partially changed grants: %v %s", err, policy)
+	}
+	removal := controller.BackendRun{Resolved: run, PreviousResolved: &desiredRun, SnapshotDigest: ownership, DesiredDigest: strings.Repeat("1", 64), ConfigurationRollout: true}
+	docker.failComposeUpAfterStart = 1
+	commandsBeforePartialStart := len(docker.commands)
+	if _, err := backend.Ensure(context.Background(), removal); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("partial-start rollout = %v", err)
+	}
+	policy, err = os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil || !bytes.Contains(policy, []byte("org/other")) {
+		t.Fatalf("partial-start rollback did not restore prior grants: %v %s", err, policy)
+	}
+	if docker.agentStatus != "stopped" {
+		t.Fatalf("prior grants were restored while desired agent remained running: %q", docker.agentStatus)
+	}
+	partialCommands := docker.commands[commandsBeforePartialStart:]
+	lastUp, lastStop := -1, -1
+	for index, command := range partialCommands {
+		if command[0] == "compose" && contains(command, "up") {
+			lastUp = index
+		}
+		if command[0] == "stop" {
+			lastStop = index
+		}
+	}
+	if lastUp < 0 || lastStop <= lastUp {
+		t.Fatalf("partial-start rollback did not stop desired runtime before restoring grants: %v", partialCommands)
+	}
+	if _, err := backend.Ensure(context.Background(), removal); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil || bytes.Contains(policy, []byte("org/other")) {
+		t.Fatalf("repository removal retained stale authorization: %v %s", err, policy)
+	}
+}
+
+func TestPostStopPermanentRolloutErrorRemainsRetryable(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	ownership := strings.Repeat("a", 64)
+	initial := controller.BackendRun{Resolved: run, SnapshotDigest: ownership, DesiredDigest: ownership}
+	if _, err := backend.Ensure(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := deriveTokens(backend.key, run.RunID, ownership)
+	corrupted := bytes.Replace(policy, []byte(tokenHash(tokens.agent)), []byte("sha256:"+strings.Repeat("0", 64)), 1)
+	if bytes.Equal(corrupted, policy) || os.WriteFile(backend.config.BrokerAgentsPath, corrupted, 0o600) != nil {
+		t.Fatal("could not install identity-collision fixture")
+	}
+	desired := run
+	desired.WorkspaceInstructions.Workflow = "changed"
+	rollout := controller.BackendRun{Resolved: desired, PreviousResolved: &run, SnapshotDigest: ownership, DesiredDigest: strings.Repeat("b", 64), ConfigurationRollout: true}
+	if _, err := backend.Ensure(context.Background(), rollout); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("post-stop permanent error was exposed as rollout rejection: %v", err)
+	}
+	if docker.agentStatus != "stopped" {
+		t.Fatalf("post-stop rejection falsely left the previous runtime healthy: %q", docker.agentStatus)
+	}
+}
+
+func TestMediatedToDirectRolloutRetriesAfterDesiredPlanWasWritten(t *testing.T) {
+	backend, docker, mediated, _ := testBackend(t)
+	ownership := strings.Repeat("c", 64)
+	if _, err := backend.Ensure(context.Background(), controller.BackendRun{Resolved: mediated, SnapshotDigest: ownership, DesiredDigest: ownership}); err != nil {
+		t.Fatal(err)
+	}
+	direct := mediated
+	direct.Repositories = nil
+	direct.CredentialProviders = nil
+	direct.DefaultCredentialProvider = ""
+	direct.Broker = resolvedrun.Broker{}
+	direct.Egress = resolvedrun.Egress{Mode: "direct"}
+	if err := resolvedrun.ValidateResolvedAgentRun(direct); err != nil {
+		t.Fatal(err)
+	}
+	rollout := controller.BackendRun{Resolved: direct, PreviousResolved: &mediated, SnapshotDigest: ownership, DesiredDigest: strings.Repeat("d", 64), ConfigurationRollout: true}
+	docker.failComposeUpAfterStart = 1
+	if _, err := backend.Ensure(context.Background(), rollout); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("crash-after-plan-write fixture = %v", err)
+	}
+	plan, err := os.ReadFile(namesFor(backend.config, mediated.RunID, ownership).composeFile)
+	if err != nil || bytes.Contains(plan, []byte("egressd:")) {
+		t.Fatalf("fixture did not leave the desired direct plan on disk: %v\n%s", err, plan)
+	}
+	if _, err := backend.Ensure(context.Background(), rollout); err != nil {
+		t.Fatalf("retry depended on removed egressd Compose declaration: %v", err)
+	}
+	policy, err := os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil || bytes.Contains(policy, []byte("git-provider")) || bytes.Contains(policy, []byte("provider-a")) {
+		t.Fatalf("direct retry retained mediated grants: %v %s", err, policy)
 	}
 }
 

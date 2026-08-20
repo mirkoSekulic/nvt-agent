@@ -226,7 +226,7 @@ func TestLifecycleCursorIsBoundedDurableAndAbsentFromAPIState(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	_, _, durable, err := restarted.backendSnapshot(context.Background(), run.RunID)
+	_, _, _, durable, _, err := restarted.backendSnapshot(context.Background(), run.RunID)
 	if err != nil || durable != cursor {
 		t.Fatalf("durable cursor = %q, %v", durable, err)
 	}
@@ -472,7 +472,7 @@ VALUES(?,?,?,?,?,'stopping',2,?,?,?,'migrated-stop')`, item.id, "idempotency-key
 	if cancelled.TerminalTarget != StateFailed || deleting.TerminalTarget != StateCompleted {
 		t.Fatalf("migration targets = cancel:%q delete:%q", cancelled.TerminalTarget, deleting.TerminalTarget)
 	}
-	if _, _, cursor, err := store.backendSnapshot(context.Background(), "cancel-migrated"); err != nil || cursor != "" {
+	if _, _, _, cursor, _, err := store.backendSnapshot(context.Background(), "cancel-migrated"); err != nil || cursor != "" {
 		t.Fatalf("migrated lifecycle cursor = %q, %v", cursor, err)
 	}
 }

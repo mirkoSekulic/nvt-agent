@@ -319,7 +319,8 @@ func validateYAMLNode(node *yaml.Node, depth int, nodes *int) error {
 }
 
 // BootstrapWorkstations atomically installs the administrator-owned persistent
-// inventory. Replay is idempotent; immutable drift and tombstones fail closed.
+// inventory. Replay is idempotent; compatible persistent configuration changes
+// are staged for backend rollout, while immutable drift and tombstones fail closed.
 // Removing an entry is deliberately non-destructive because only the explicit
 // authenticated delete API owns destructive lifecycle intent.
 func (scheduler *Scheduler) BootstrapWorkstations(ctx context.Context) error {
