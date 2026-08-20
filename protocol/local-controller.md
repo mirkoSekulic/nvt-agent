@@ -155,7 +155,12 @@ containers before the staged snapshot is committed. Persistent workspace,
 home/runtime-state, and Docker-data volumes retain their stable ownership
 revision and are never deleted by this rollout. Failed preparation keeps the
 old snapshot authoritative and restores the old broker grants; retryable
-failures leave the runtime stopped and the desired change staged.
+failures leave the runtime stopped and the desired change staged. Prior grants
+are restored only after a successful stop of the desired agent and paired
+egress services. Errors that become permanent only after the prior runtime was
+stopped remain retryable rather than falsely returning that runtime to
+`running`. Cancel, DELETE, and terminal backend observations transactionally
+discard the staged snapshot before entering the normal stopping cleanup path.
 
 Run ID, principal identity, profile, image/runtime, execution backend and kind,
 persistence/retention ownership, resource limits, lifecycle, and other fields

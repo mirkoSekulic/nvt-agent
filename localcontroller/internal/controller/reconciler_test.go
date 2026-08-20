@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -10,12 +11,15 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 type fakeBackend struct {
 	mu            sync.Mutex
 	resources     map[string]bool
 	ensureErr     error
+	ensureTarget  State
 	inspectErr    error
 	inspectTarget State
 	inspectCursor string
@@ -51,7 +55,74 @@ func (backend *fakeBackend) Ensure(_ context.Context, run BackendRun) (BackendOb
 	if err != nil {
 		return BackendObservation{}, err
 	}
+	if backend.ensureTarget != "" {
+		return BackendObservation{TerminalTarget: backend.ensureTarget, LifecycleCursor: run.LifecycleCursor}, nil
+	}
 	return BackendObservation{Ready: true, LifecycleCursor: run.LifecycleCursor}, nil
+}
+
+func TestStagedWorkstationStopTransitionsDiscardPendingSnapshot(t *testing.T) {
+	for _, action := range []string{"cancel", "delete", "terminal-observation"} {
+		t.Run(action, func(t *testing.T) {
+			clock := &fakeClock{value: time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)}
+			store, _ := openTestStore(t, clock, 4)
+			backend := newFakeBackend()
+			reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+			raw := testResolvedRun(t, "workstation", true)
+			var active resolvedrun.ResolvedAgentRun
+			if err := json.Unmarshal(raw, &active); err != nil {
+				t.Fatal(err)
+			}
+			active.Persistence.DockerData = true
+			active.Runtime.Docker = &resolvedrun.RuntimeDocker{}
+			active.TTL = resolvedrun.TTL{}
+			if err := resolvedrun.ValidateResolvedAgentRun(active); err != nil {
+				t.Fatalf("workstation fixture: %v", err)
+			}
+			activeRaw, _ := json.Marshal(active)
+			created, err := store.CreateBatch(context.Background(), []CreateInput{{IdempotencyKey: "workstation-idempotency-key", ResolvedRun: activeRaw}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconcileToRunning(t, reconciler, store, created[0].Run.RunID)
+			desired := active
+			desired.WorkspaceInstructions.Workflow = "changed"
+			desiredRaw, _ := json.Marshal(desired)
+			if _, err := store.CreateBatch(context.Background(), []CreateInput{{IdempotencyKey: "workstation-idempotency-key", ResolvedRun: desiredRaw}}); err != nil {
+				t.Fatal(err)
+			}
+			switch action {
+			case "cancel":
+				if _, err := store.Cancel(context.Background(), "workstation"); err != nil {
+					t.Fatal(err)
+				}
+			case "delete":
+				if _, deleted, err := store.Delete(context.Background(), "workstation"); err != nil || deleted {
+					t.Fatalf("delete request = %v %v", deleted, err)
+				}
+			case "terminal-observation":
+				backend.ensureTarget = StateFailed
+				if err := reconciler.Reconcile(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stopping, err := store.Get(context.Background(), "workstation")
+			if err != nil || stopping.State != StateStopping {
+				t.Fatalf("staged stop corrupted row: %#v %v", stopping, err)
+			}
+			if err := reconciler.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			_, err = store.Get(context.Background(), "workstation")
+			if action == "delete" {
+				if !errors.Is(err, ErrNotFound) {
+					t.Fatalf("explicit delete did not finish: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("cleanup did not finish: %v", err)
+			}
+		})
+	}
 }
 
 func TestTwoControllerProcessesWithSameStableResourceOwnerCannotEnterBackendTogether(t *testing.T) {

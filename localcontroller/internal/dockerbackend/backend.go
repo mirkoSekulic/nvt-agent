@@ -216,6 +216,7 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	tokens := deriveTokens(backend.key, run.RunID, desired.SnapshotDigest)
+	runtimeStopped := false
 	if rollout {
 		stopArguments := []string{"compose", "-p", names.project, "-f", names.composeFile, "stop", "agent"}
 		if desired.PreviousResolved.Egress.Mode == "mediated" {
@@ -224,24 +225,40 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		if _, err := backend.docker.Run(operationContext, nil, stopArguments...); err != nil {
 			return controller.BackendObservation{}, controller.ErrBackendRetryable
 		}
+		runtimeStopped = true
 	}
+	registryUpdated := false
+	defer func() {
+		if resultErr == nil || !runtimeStopped {
+			return
+		}
+		if errors.Is(resultErr, controller.ErrBackendDesiredRunInvalid) {
+			resultErr = controller.ErrBackendRetryable
+		}
+		if !registryUpdated || desired.PreviousResolved == nil {
+			return
+		}
+		rollbackContext, rollbackCancel := context.WithTimeout(context.Background(), backend.config.OperationTimeout)
+		defer rollbackCancel()
+		stopArguments := []string{"compose", "-p", names.project, "-f", names.composeFile, "stop", "agent"}
+		if run.Egress.Mode == "mediated" || desired.PreviousResolved.Egress.Mode == "mediated" {
+			stopArguments = append(stopArguments, "egressd")
+		}
+		if _, err := backend.docker.Run(rollbackContext, nil, stopArguments...); err != nil {
+			resultErr = controller.ErrBackendRetryable
+			return
+		}
+		if backend.registry.upsert(rollbackContext, *desired.PreviousResolved, desired.SnapshotDigest, tokens) != nil {
+			resultErr = controller.ErrBackendRetryable
+		}
+	}()
 	if err := backend.registry.upsert(operationContext, run, desired.SnapshotDigest, tokens); err != nil {
 		if errors.Is(err, errRegistryIdentityCollision) {
 			return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
 		}
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
-	registryUpdated := rollout
-	defer func() {
-		if resultErr == nil || !registryUpdated || desired.PreviousResolved == nil {
-			return
-		}
-		rollbackContext, rollbackCancel := context.WithTimeout(context.Background(), backend.config.OperationTimeout)
-		defer rollbackCancel()
-		if backend.registry.upsert(rollbackContext, *desired.PreviousResolved, desired.SnapshotDigest, tokens) != nil {
-			resultErr = controller.ErrBackendRetryable
-		}
-	}()
+	registryUpdated = rollout
 	if err := backend.ensureExternalNetwork(operationContext); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
