@@ -598,6 +598,38 @@ class DynamicAccountsTest(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertFalse(stale_lock.exists())
 
+    def test_interrupted_stale_pair_cleanup_remains_restart_recoverable(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        account_dir = self.root / "accounts" / self.alice.principal_id
+        stale = account_dir / "credential-2-abcdefghijklmnop.bin"
+        stale.write_bytes(b"SECRET-STALE")
+        stale.chmod(0o600)
+        stale_lock = account_dir / f".{stale.name}.refresh.lock"
+        stale_lock.touch(mode=0o600)
+        stale_lock.chmod(0o600)
+        manager.close()
+
+        original_unlink = dynamic_accounts_module._safe_unlink
+
+        def interrupt_after_credential_unlink(path):
+            original_unlink(path)
+            if path == stale:
+                raise OSError("simulated cleanup interruption")
+
+        with mock.patch(
+            "broker.core.dynamic_accounts._safe_unlink",
+            side_effect=interrupt_after_credential_unlink,
+        ):
+            interrupted = self.manager(factory=FakeFactory())
+        self.assertFalse(interrupted.system_ready())
+        self.assertFalse(stale_lock.exists())
+        interrupted.close()
+
+        recovered = self.manager(factory=FakeFactory())
+        self.assertTrue(recovered.system_ready())
+        self.assertEqual(recovered.resolve(self.alice)["generation"], 1)
+
     def test_uncommitted_credential_and_lock_directory_is_recovered(self):
         account_dir = self.root / "accounts" / self.alice.principal_id
         account_dir.mkdir(parents=True, mode=0o700)
@@ -610,6 +642,36 @@ class DynamicAccountsTest(unittest.TestCase):
 
         manager = self.manager(factory=FakeFactory())
         self.assertTrue(manager.system_ready())
+        self.assertFalse(account_dir.exists())
+
+    def test_interrupted_uncommitted_pair_cleanup_remains_restart_recoverable(self):
+        account_dir = self.root / "accounts" / self.alice.principal_id
+        account_dir.mkdir(parents=True, mode=0o700)
+        credential = account_dir / "credential-1-abcdefghijklmnop.bin"
+        credential.write_bytes(b"SECRET-UNCOMMITTED")
+        credential.chmod(0o600)
+        lock = account_dir / f".{credential.name}.refresh.lock"
+        lock.touch(mode=0o600)
+        lock.chmod(0o600)
+
+        original_unlink = dynamic_accounts_module._safe_unlink
+
+        def interrupt_after_credential_unlink(path):
+            original_unlink(path)
+            if path == credential:
+                raise OSError("simulated cleanup interruption")
+
+        with mock.patch(
+            "broker.core.dynamic_accounts._safe_unlink",
+            side_effect=interrupt_after_credential_unlink,
+        ):
+            interrupted = self.manager(factory=FakeFactory())
+        self.assertFalse(interrupted.system_ready())
+        self.assertFalse(lock.exists())
+        interrupted.close()
+
+        recovered = self.manager(factory=FakeFactory())
+        self.assertTrue(recovered.system_ready())
         self.assertFalse(account_dir.exists())
 
     def test_unsafe_lock_artifacts_latch_storage_unhealthy_without_partial_cleanup(self):

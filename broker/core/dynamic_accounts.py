@@ -1132,8 +1132,7 @@ class DynamicAccountManager:
             if lock_credential == current_file:
                 continue
             removable.append(path)
-        for path in removable:
-            _safe_unlink(path)
+        _unlink_account_artifacts(account_dir, removable)
 
     def _recover_uncommitted_directory(self, account_dir):
         """Remove only recognized files from a never-committed first enroll."""
@@ -1141,8 +1140,7 @@ class DynamicAccountManager:
         names = {path.name for path in paths}
         for path in paths:
             _validate_account_artifact(path, names)
-        for path in paths:
-            _safe_unlink(path)
+        _unlink_account_artifacts(account_dir, paths)
         account_dir.rmdir()
         _fsync_dir(self._accounts_dir)
 
@@ -1331,8 +1329,10 @@ class DynamicAccountManager:
     def _unlink_credential(self, account_id, filename):
         if isinstance(filename, str) and FILE_RE.fullmatch(filename):
             account_dir = self._account_dir(account_id)
-            _safe_unlink(account_dir / _credential_lock_name(filename))
-            _safe_unlink(account_dir / filename)
+            _unlink_account_artifacts(
+                account_dir,
+                [account_dir / _credential_lock_name(filename), account_dir / filename],
+            )
 
 
 def _credential_lock_name(filename):
@@ -1356,6 +1356,25 @@ def _validate_account_artifact(path, names):
     if match is None or match.group(1) not in names or path.stat().st_size != 0:
         raise ValueError("unexpected account file")
     return match.group(1)
+
+
+def _unlink_account_artifacts(account_dir, paths):
+    """Delete lock sidecars durably before the credentials they name.
+
+    If interrupted, storage therefore contains either a recognized pair, a
+    credential without its optional lock, or neither -- never an unrecognized
+    lone lock caused by cleanup itself.
+    """
+    locks = [path for path in paths if LOCK_RE.fullmatch(path.name)]
+    remaining = [path for path in paths if not LOCK_RE.fullmatch(path.name)]
+    if locks:
+        for path in locks:
+            _safe_unlink(path)
+        _fsync_dir(account_dir)
+    if remaining:
+        for path in remaining:
+            _safe_unlink(path)
+        _fsync_dir(account_dir)
 
 
 def _validate_metadata(value, directory_name):

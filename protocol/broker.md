@@ -246,7 +246,9 @@ regular file and its credential filename must match the manager-issued
 `credential-<generation>-<nonce>.bin` grammar. Startup retains only the lock
 for the manifest-selected generation, removes a stale credential and its lock
 together, and applies the same paired-artifact rules while recovering an
-uncommitted directory. A lock without its named credential is not recognized.
+uncommitted directory. Cleanup unlinks lock sidecars and fsyncs their directory
+before unlinking the credentials they name, so every interruption state remains
+recognizable on the next startup. A lock without its named credential is not recognized.
 Unexpected files,
 symlinks, invalid modes, malformed metadata, unknown templates, collisions, or
 storage uncertainty latch the dynamic registry unavailable. A missing
