@@ -239,7 +239,15 @@ after the metadata commit and safe provider retirement.
 After interruption, the manifest therefore selects either the complete old or
 complete new generation. Creation and removal of a principal directory also
 fsync the parent account directory. Startup removes recognized orphan
-generations and never-committed first-enrollment directories. Unexpected files,
+generations and never-committed first-enrollment directories. A provider may
+hold an advisory lock beside a dynamic credential using the exact generic name
+`.<credential filename>.refresh.lock`. The lock must be an empty, mode-`0600`
+regular file and its credential filename must match the manager-issued
+`credential-<generation>-<nonce>.bin` grammar. Startup retains only the lock
+for the manifest-selected generation, removes a stale credential and its lock
+together, and applies the same paired-artifact rules while recovering an
+uncommitted directory. A lock without its named credential is not recognized.
+Unexpected files,
 symlinks, invalid modes, malformed metadata, unknown templates, collisions, or
 storage uncertainty latch the dynamic registry unavailable. A missing
 credential generation, invalid credential document, or provider initialization

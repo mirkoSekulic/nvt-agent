@@ -25,7 +25,9 @@ from broker.core.dynamic_accounts import (
     sign_coordination_assertion,
 )
 from broker.core.errors import ProviderError
+from broker.core.providers import InProcessProviderAdapter
 from broker.core.server import Broker
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
 
 
 class FakeProvider:
@@ -66,6 +68,18 @@ class FakeFactory:
 
     def create(self, entry):
         provider = FakeProvider(entry, self.fail or entry["name"] in self.fail_provider_ids)
+        self.created.append(provider)
+        return provider
+
+
+class ClaudeFactory:
+    supported_plugins = frozenset({"claude-oauth"})
+
+    def __init__(self):
+        self.created = []
+
+    def create(self, entry):
+        provider = InProcessProviderAdapter(ClaudeOAuthProvider(entry))
         self.created.append(provider)
         return provider
 
@@ -532,6 +546,112 @@ class DynamicAccountsTest(unittest.TestCase):
         recovered = self.manager(factory=FakeFactory())
         self.assertEqual(recovered.resolve(self.alice)["generation"], 1)
         self.assertFalse(orphan.exists())
+
+    def test_provider_credential_lock_survives_restart_and_broker_is_ready(self):
+        raw_config = configuration(self.root)
+        provider_template = raw_config["dynamic-accounts"]["provider-templates"][0]
+        provider_template["plugin"] = "claude-oauth"
+        provider_template["credential-config-key"] = "credentials-file"
+        provider_template["config"] = {}
+        factory = ClaudeFactory()
+        config = load_dynamic_accounts_config(raw_config, factory.supported_plugins)
+        manager = self.manager(config=config, factory=factory)
+        credential_payload = json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "SECRET-ACCESS",
+                "refreshToken": "SECRET-REFRESH",
+            }
+        }).encode()
+        manager.enroll(self.alice, "member", "enroll", bytearray(credential_payload))
+        provider = factory.created[-1]._provider
+        credential = provider.credentials_file
+        with provider._refresh_guard():
+            pass
+        lock = credential.with_name(f".{credential.name}.refresh.lock")
+        self.assertTrue(lock.is_file())
+        manager.close()
+
+        restarted = self.manager(config=config, factory=ClaudeFactory())
+        self.assertTrue(restarted.system_ready())
+        self.assertEqual(restarted.readiness(self.alice)["state"], "ready")
+        self.assertTrue(lock.is_file())
+
+        broker = Broker.__new__(Broker)
+        broker.dynamic_accounts = restarted
+        broker.providers = {}
+        self.assertEqual(Broker.readiness(broker), {"ok": True, "status": "ready"})
+
+    def test_stale_credential_and_lock_are_removed_together_on_restart(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        account_dir = self.root / "accounts" / self.alice.principal_id
+        stale = account_dir / "credential-2-abcdefghijklmnop.bin"
+        stale.write_bytes(b"SECRET-STALE")
+        stale.chmod(0o600)
+        stale_lock = account_dir / f".{stale.name}.refresh.lock"
+        stale_lock.touch(mode=0o600)
+        stale_lock.chmod(0o600)
+        manager.close()
+
+        recovered = self.manager(factory=FakeFactory())
+        self.assertTrue(recovered.system_ready())
+        self.assertFalse(stale.exists())
+        self.assertFalse(stale_lock.exists())
+
+    def test_uncommitted_credential_and_lock_directory_is_recovered(self):
+        account_dir = self.root / "accounts" / self.alice.principal_id
+        account_dir.mkdir(parents=True, mode=0o700)
+        credential = account_dir / "credential-1-abcdefghijklmnop.bin"
+        credential.write_bytes(b"SECRET-UNCOMMITTED")
+        credential.chmod(0o600)
+        lock = account_dir / f".{credential.name}.refresh.lock"
+        lock.touch(mode=0o600)
+        lock.chmod(0o600)
+
+        manager = self.manager(factory=FakeFactory())
+        self.assertTrue(manager.system_ready())
+        self.assertFalse(account_dir.exists())
+
+    def test_unsafe_lock_artifacts_latch_storage_unhealthy_without_partial_cleanup(self):
+        cases = ("unrelated", "orphan", "non-private", "non-empty", "directory", "symlink")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "accounts"
+                config = load_dynamic_accounts_config(configuration(root), self.factory.supported_plugins)
+                manager = DynamicAccountManager(config, FakeFactory(), {"shared-static"})
+                manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+                account_dir = root / "accounts" / self.alice.principal_id
+                stale = account_dir / "credential-2-abcdefghijklmnop.bin"
+                stale.write_bytes(b"SECRET-STALE")
+                stale.chmod(0o600)
+                stale_lock = account_dir / f".{stale.name}.refresh.lock"
+                stale_lock.touch(mode=0o600)
+                stale_lock.chmod(0o600)
+                current = manager._accounts[self.alice.principal_id]["credential_file"]
+                unsafe = account_dir / f".{current}.refresh.lock"
+                if case == "unrelated":
+                    unsafe = account_dir / ".unrelated"
+                    unsafe.touch(mode=0o600)
+                elif case == "orphan":
+                    unsafe = account_dir / ".credential-9-ponmlkjihgfedcba.bin.refresh.lock"
+                    unsafe.touch(mode=0o600)
+                elif case == "non-private":
+                    unsafe.touch(mode=0o600)
+                    unsafe.chmod(0o644)
+                elif case == "non-empty":
+                    unsafe.write_bytes(b"not-an-empty-lock")
+                    unsafe.chmod(0o600)
+                elif case == "directory":
+                    unsafe.mkdir(mode=0o700)
+                else:
+                    unsafe.symlink_to(account_dir / current)
+                manager.close()
+
+                recovered = DynamicAccountManager(config, FakeFactory(), {"shared-static"})
+                self.addCleanup(recovered.close)
+                self.assertFalse(recovered.system_ready())
+                self.assertTrue(stale.exists())
+                self.assertTrue(stale_lock.exists())
 
     def test_interrupted_first_enrollment_directory_is_recovered(self):
         account_dir = self.root / "accounts" / self.alice.principal_id
