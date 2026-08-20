@@ -115,6 +115,13 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		delete(docker.containers, arguments[len(arguments)-1])
 		return nil, nil
 	}
+	if arguments[0] == "stop" && len(arguments) == 2 {
+		if _, exists := docker.containers[arguments[1]]; !exists {
+			return nil, errors.New("missing")
+		}
+		docker.agentStatus = "stopped"
+		return []byte(arguments[1] + "\n"), nil
+	}
 	if arguments[0] == "ps" {
 		values := []string{}
 		for id, labels := range docker.containers {
@@ -1345,7 +1352,7 @@ func TestPersistentConfigurationRolloutRetainsVolumesAndReplacesRuntime(t *testi
 	commands := docker.commands[beforeCommands:]
 	stopIndex, recreateIndex := -1, -1
 	for index, command := range commands {
-		if command[0] == "compose" && contains(command, "stop") {
+		if command[0] == "stop" {
 			stopIndex = index
 		}
 		if command[0] == "compose" && contains(command, "up") && contains(command, "--force-recreate") {
@@ -1390,7 +1397,7 @@ func TestPersistentConfigurationRolloutRetainsVolumesAndReplacesRuntime(t *testi
 		if command[0] == "compose" && contains(command, "up") {
 			lastUp = index
 		}
-		if command[0] == "compose" && contains(command, "stop") {
+		if command[0] == "stop" {
 			lastStop = index
 		}
 	}
@@ -1430,6 +1437,39 @@ func TestPostStopPermanentRolloutErrorRemainsRetryable(t *testing.T) {
 	}
 	if docker.agentStatus != "stopped" {
 		t.Fatalf("post-stop rejection falsely left the previous runtime healthy: %q", docker.agentStatus)
+	}
+}
+
+func TestMediatedToDirectRolloutRetriesAfterDesiredPlanWasWritten(t *testing.T) {
+	backend, docker, mediated, _ := testBackend(t)
+	ownership := strings.Repeat("c", 64)
+	if _, err := backend.Ensure(context.Background(), controller.BackendRun{Resolved: mediated, SnapshotDigest: ownership, DesiredDigest: ownership}); err != nil {
+		t.Fatal(err)
+	}
+	direct := mediated
+	direct.Repositories = nil
+	direct.CredentialProviders = nil
+	direct.DefaultCredentialProvider = ""
+	direct.Broker = resolvedrun.Broker{}
+	direct.Egress = resolvedrun.Egress{Mode: "direct"}
+	if err := resolvedrun.ValidateResolvedAgentRun(direct); err != nil {
+		t.Fatal(err)
+	}
+	rollout := controller.BackendRun{Resolved: direct, PreviousResolved: &mediated, SnapshotDigest: ownership, DesiredDigest: strings.Repeat("d", 64), ConfigurationRollout: true}
+	docker.failComposeUpAfterStart = 1
+	if _, err := backend.Ensure(context.Background(), rollout); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("crash-after-plan-write fixture = %v", err)
+	}
+	plan, err := os.ReadFile(namesFor(backend.config, mediated.RunID, ownership).composeFile)
+	if err != nil || bytes.Contains(plan, []byte("egressd:")) {
+		t.Fatalf("fixture did not leave the desired direct plan on disk: %v\n%s", err, plan)
+	}
+	if _, err := backend.Ensure(context.Background(), rollout); err != nil {
+		t.Fatalf("retry depended on removed egressd Compose declaration: %v", err)
+	}
+	policy, err := os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil || bytes.Contains(policy, []byte("git-provider")) || bytes.Contains(policy, []byte("provider-a")) {
+		t.Fatalf("direct retry retained mediated grants: %v %s", err, policy)
 	}
 }
 

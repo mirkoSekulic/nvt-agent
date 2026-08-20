@@ -157,8 +157,11 @@ revision and are never deleted by this rollout. Failed preparation keeps the
 old snapshot authoritative and restores the old broker grants; retryable
 failures leave the runtime stopped and the desired change staged. Prior grants
 are restored only after a successful stop of the desired agent and paired
-egress services. Errors that become permanent only after the prior runtime was
-stopped remain retryable rather than falsely returning that runtime to
+egress services. Rollout shutdown discovers those exact-owned containers from
+their project, service, owner, run, and ownership-revision labels rather than
+depending on the service set in whichever Compose revision is currently on
+disk. Errors that become permanent only after the prior runtime was stopped
+remain retryable rather than falsely returning that runtime to
 `running`. Cancel, DELETE, and terminal backend observations transactionally
 discard the staged snapshot before entering the normal stopping cleanup path.
 

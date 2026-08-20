@@ -209,23 +209,23 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		}
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
-	if err := backend.pruneStaleOwnedResources(operationContext, run, names, plan, labels); err != nil {
-		return controller.BackendObservation{}, controller.ErrBackendRetryable
-	}
 	if err := backend.ensureDirectory(run.RunID); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	tokens := deriveTokens(backend.key, run.RunID, desired.SnapshotDigest)
 	runtimeStopped := false
 	if rollout {
-		stopArguments := []string{"compose", "-p", names.project, "-f", names.composeFile, "stop", "agent"}
+		services := []string{"agent"}
 		if desired.PreviousResolved.Egress.Mode == "mediated" {
-			stopArguments = append(stopArguments, "egressd")
+			services = append(services, "egressd")
 		}
-		if _, err := backend.docker.Run(operationContext, nil, stopArguments...); err != nil {
+		if err := backend.stopOwnedRuntimeServices(operationContext, names.project, labels, services); err != nil {
 			return controller.BackendObservation{}, controller.ErrBackendRetryable
 		}
 		runtimeStopped = true
+	}
+	if err := backend.pruneStaleOwnedResources(operationContext, run, names, plan, labels); err != nil {
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	registryUpdated := false
 	defer func() {
@@ -240,11 +240,11 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		}
 		rollbackContext, rollbackCancel := context.WithTimeout(context.Background(), backend.config.OperationTimeout)
 		defer rollbackCancel()
-		stopArguments := []string{"compose", "-p", names.project, "-f", names.composeFile, "stop", "agent"}
+		services := []string{"agent"}
 		if run.Egress.Mode == "mediated" || desired.PreviousResolved.Egress.Mode == "mediated" {
-			stopArguments = append(stopArguments, "egressd")
+			services = append(services, "egressd")
 		}
-		if _, err := backend.docker.Run(rollbackContext, nil, stopArguments...); err != nil {
+		if err := backend.stopOwnedRuntimeServices(rollbackContext, names.project, labels, services); err != nil {
 			resultErr = controller.ErrBackendRetryable
 			return
 		}
@@ -729,6 +729,28 @@ func (backend *Backend) removeOwnedComposeService(ctx context.Context, project, 
 		}
 		if _, err := backend.docker.Run(ctx, nil, "rm", "--force", "--volumes", container); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (backend *Backend) stopOwnedRuntimeServices(ctx context.Context, project string, labels ownedLabels, services []string) error {
+	for _, service := range services {
+		output, err := backend.docker.Run(ctx, nil, "ps", "-q", "--filter", "label="+composeProjectLabel+"="+project, "--filter", "label="+composeServiceLabel+"="+service)
+		if err != nil {
+			return err
+		}
+		containers := strings.Fields(string(output))
+		if len(containers) > 1 {
+			return errors.New("backend service inventory unavailable")
+		}
+		for _, container := range containers {
+			if err := backend.verifyContainer(ctx, container, labels); err != nil {
+				return err
+			}
+			if _, err := backend.docker.Run(ctx, nil, "stop", container); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
