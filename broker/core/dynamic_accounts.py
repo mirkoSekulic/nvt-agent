@@ -63,6 +63,7 @@ MAX_OPERATIONS = 32
 METADATA_VERSION = 1
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 FILE_RE = re.compile(r"^credential-[0-9]+-[A-Za-z0-9_-]{16,64}\.bin$")
+LOCK_RE = re.compile(r"^\.(credential-[0-9]+-[A-Za-z0-9_-]{16,64}\.bin)\.refresh\.lock$")
 PROVIDER_ID_RE = re.compile(r"^dpa_[A-Za-z0-9_-]{32}$")
 
 
@@ -1121,21 +1122,25 @@ class DynamicAccountManager:
             _safe_unlink(temporary)
 
     def _cleanup_orphans(self, account_dir, current_file):
-        for path in account_dir.iterdir():
+        paths = list(account_dir.iterdir())
+        names = {path.name for path in paths}
+        removable = []
+        for path in paths:
             if path.name == "metadata.json" or path.name == current_file:
                 continue
-            if path.is_symlink() or not path.is_file() or not (FILE_RE.fullmatch(path.name) or path.name.startswith(".metadata-")):
-                raise ValueError("unexpected account file")
-            _safe_unlink(path)
+            lock_credential = _validate_account_artifact(path, names)
+            if lock_credential == current_file:
+                continue
+            removable.append(path)
+        _unlink_account_artifacts(account_dir, removable)
 
     def _recover_uncommitted_directory(self, account_dir):
         """Remove only recognized files from a never-committed first enroll."""
-        for path in account_dir.iterdir():
-            if path.is_symlink() or not path.is_file() or not (
-                FILE_RE.fullmatch(path.name) or path.name.startswith(".metadata-")
-            ):
-                raise ValueError("unexpected uncommitted account file")
-            _safe_unlink(path)
+        paths = list(account_dir.iterdir())
+        names = {path.name for path in paths}
+        for path in paths:
+            _validate_account_artifact(path, names)
+        _unlink_account_artifacts(account_dir, paths)
         account_dir.rmdir()
         _fsync_dir(self._accounts_dir)
 
@@ -1323,7 +1328,53 @@ class DynamicAccountManager:
 
     def _unlink_credential(self, account_id, filename):
         if isinstance(filename, str) and FILE_RE.fullmatch(filename):
-            _safe_unlink(self._account_dir(account_id) / filename)
+            account_dir = self._account_dir(account_id)
+            _unlink_account_artifacts(
+                account_dir,
+                [account_dir / _credential_lock_name(filename), account_dir / filename],
+            )
+
+
+def _credential_lock_name(filename):
+    if not isinstance(filename, str) or not FILE_RE.fullmatch(filename):
+        raise ValueError("invalid credential filename")
+    return f".{filename}.refresh.lock"
+
+
+def _validate_account_artifact(path, names):
+    """Validate one exact, private dynamic-account storage artifact.
+
+    Returns the credential filename associated with a lock sidecar, otherwise
+    None. Lock sidecars are deliberately recognized only for a credential that
+    is present in the same directory; broad dotfile/suffix allowances would
+    weaken the fail-closed storage boundary.
+    """
+    _require_private_file(path)
+    if FILE_RE.fullmatch(path.name) or path.name.startswith(".metadata-"):
+        return None
+    match = LOCK_RE.fullmatch(path.name)
+    if match is None or match.group(1) not in names or path.stat().st_size != 0:
+        raise ValueError("unexpected account file")
+    return match.group(1)
+
+
+def _unlink_account_artifacts(account_dir, paths):
+    """Delete lock sidecars durably before the credentials they name.
+
+    If interrupted, storage therefore contains either a recognized pair, a
+    credential without its optional lock, or neither -- never an unrecognized
+    lone lock caused by cleanup itself.
+    """
+    locks = [path for path in paths if LOCK_RE.fullmatch(path.name)]
+    remaining = [path for path in paths if not LOCK_RE.fullmatch(path.name)]
+    if locks:
+        for path in locks:
+            _safe_unlink(path)
+        _fsync_dir(account_dir)
+    if remaining:
+        for path in remaining:
+            _safe_unlink(path)
+        _fsync_dir(account_dir)
 
 
 def _validate_metadata(value, directory_name):
