@@ -21,6 +21,7 @@ type fakeBackend struct {
 	inspectCursor string
 	deleteErr     error
 	ensureCalls   int
+	ensuredRuns   []BackendRun
 	deleteCalls   int
 	ensureStarted chan struct{}
 	ensureRelease chan struct{}
@@ -33,6 +34,7 @@ func (backend *fakeBackend) Ready(context.Context) bool { return true }
 func (backend *fakeBackend) Ensure(_ context.Context, run BackendRun) (BackendObservation, error) {
 	backend.mu.Lock()
 	backend.ensureCalls++
+	backend.ensuredRuns = append(backend.ensuredRuns, run)
 	backend.resources[run.Resolved.RunID] = true
 	err := backend.ensureErr
 	started, release := backend.ensureStarted, backend.ensureRelease
@@ -215,7 +217,7 @@ func TestReconcilerMapsBoundedRuntimeCompletionAndFailureReasons(t *testing.T) {
 			if err != nil || stopping.State != StateStopping || stopping.TerminalTarget != target || stopping.LastReason != terminalReason(target) {
 				t.Fatalf("terminal observation = %#v, %v", stopping, err)
 			}
-			if _, _, cursor, snapshotErr := store.backendSnapshot(context.Background(), run.RunID); snapshotErr != nil || cursor != backend.inspectCursor {
+			if _, _, _, cursor, _, snapshotErr := store.backendSnapshot(context.Background(), run.RunID); snapshotErr != nil || cursor != backend.inspectCursor {
 				t.Fatalf("terminal observation cursor = %q, %v", cursor, snapshotErr)
 			}
 			backend.inspectTarget = ""
@@ -241,7 +243,7 @@ func TestLifecycleCursorSurvivesRestartAndMatchingEventCleansUp(t *testing.T) {
 	if err := before.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	_, _, cursor, err := store.backendSnapshot(context.Background(), run.RunID)
+	_, _, _, cursor, _, err := store.backendSnapshot(context.Background(), run.RunID)
 	if err != nil || cursor != backend.inspectCursor {
 		t.Fatalf("unrelated-event cursor = %q, %v", cursor, err)
 	}
@@ -270,7 +272,7 @@ func TestLifecycleCursorSurvivesRestartAndMatchingEventCleansUp(t *testing.T) {
 	if err != nil || stopping.State != StateStopping || stopping.TerminalTarget != StateCompleted || stopping.LastReason != "backend-completed" {
 		t.Fatalf("matching completion = %#v, %v", stopping, err)
 	}
-	_, _, cursor, err = restarted.backendSnapshot(context.Background(), run.RunID)
+	_, _, _, cursor, _, err = restarted.backendSnapshot(context.Background(), run.RunID)
 	if err != nil || cursor != backend.inspectCursor {
 		t.Fatalf("terminal cursor = %q, %v", cursor, err)
 	}

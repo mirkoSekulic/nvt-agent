@@ -106,6 +106,9 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 	if arguments[0] == "cp" {
 		return nil, nil
 	}
+	if arguments[0] == "start" {
+		return nil, nil
+	}
 	if arguments[0] == "rm" && len(arguments) >= 3 {
 		delete(docker.containers, arguments[len(arguments)-1])
 		return nil, nil
@@ -1288,6 +1291,85 @@ func TestDockerBackendPreservesPersistentVolumesUntilExplicitDelete(t *testing.T
 		if _, exists := docker.objects["volume:"+name]; exists {
 			t.Fatalf("explicit delete retained volume %s", name)
 		}
+	}
+}
+
+func TestPersistentConfigurationRolloutRetainsVolumesAndReplacesRuntime(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	run.Persistence = resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true}
+	run.Retention = "persistent"
+	run.TTL = resolvedrun.TTL{}
+	ownership := strings.Repeat("d", 64)
+	initial := controller.BackendRun{Resolved: run, SnapshotDigest: ownership, DesiredDigest: ownership}
+	if _, err := backend.Ensure(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	names := namesFor(backend.config, run.RunID, ownership)
+	previous := run
+	encodedRun, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var desiredRun resolvedrun.ResolvedAgentRun
+	if err := json.Unmarshal(encodedRun, &desiredRun); err != nil {
+		t.Fatal(err)
+	}
+	desiredRun.Repositories = append(desiredRun.Repositories, resolvedrun.Repository{
+		CheckoutTarget: "github.example/org/other", BrokerRepository: "org/other", URL: "https://github.example/org/other.git",
+		CredentialProvider: "git-provider", Identity: &resolvedrun.RepositoryIdentity{Mode: "provider"},
+	})
+	desiredRun.CredentialProviders[0].MatchTargets = append(desiredRun.CredentialProviders[0].MatchTargets, "github.example/org/other")
+	desiredRun.Broker.Grants[1].Repositories = append(desiredRun.Broker.Grants[1].Repositories, "org/other")
+	if err := resolvedrun.ValidateResolvedAgentRun(desiredRun); err != nil {
+		t.Fatal(err)
+	}
+	beforeCommands := len(docker.commands)
+	rollout := controller.BackendRun{Resolved: desiredRun, PreviousResolved: &previous, SnapshotDigest: ownership, DesiredDigest: strings.Repeat("e", 64), ConfigurationRollout: true}
+	if _, err := backend.Ensure(context.Background(), rollout); err != nil {
+		t.Fatal(err)
+	}
+	for _, volume := range []string{names.workspace, names.home, names.dockerData} {
+		labels, exists := docker.objects["volume:"+volume]
+		if !exists || labels[digestLabel] != ownership {
+			t.Fatalf("persistent volume identity changed during rollout: %s %#v", volume, labels)
+		}
+	}
+	commands := docker.commands[beforeCommands:]
+	stopIndex, recreateIndex := -1, -1
+	for index, command := range commands {
+		if command[0] == "compose" && contains(command, "stop") {
+			stopIndex = index
+		}
+		if command[0] == "compose" && contains(command, "up") && contains(command, "--force-recreate") {
+			recreateIndex = index
+		}
+	}
+	if stopIndex < 0 || recreateIndex <= stopIndex {
+		t.Fatalf("runtime was not stopped and recreated for desired rollout: %v", commands)
+	}
+	policy, err := os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil || !bytes.Contains(policy, []byte("org/other")) {
+		t.Fatalf("new authorization was not committed: %v %s", err, policy)
+	}
+	docker.failComposeUp = 1
+	failedRun := desiredRun
+	failedRun.Broker.Grants = append([]resolvedrun.BrokerGrant(nil), desiredRun.Broker.Grants...)
+	failedRun.Broker.Grants[1].Repositories = append(append([]string(nil), desiredRun.Broker.Grants[1].Repositories...), "org/rejected")
+	failed := controller.BackendRun{Resolved: failedRun, PreviousResolved: &desiredRun, SnapshotDigest: ownership, DesiredDigest: strings.Repeat("f", 64), ConfigurationRollout: true}
+	if _, err := backend.Ensure(context.Background(), failed); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("failed rollout = %v", err)
+	}
+	policy, err = os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil || !bytes.Contains(policy, []byte("org/other")) || bytes.Contains(policy, []byte("org/rejected")) {
+		t.Fatalf("failed rollout partially changed grants: %v %s", err, policy)
+	}
+	removal := controller.BackendRun{Resolved: run, PreviousResolved: &desiredRun, SnapshotDigest: ownership, DesiredDigest: strings.Repeat("1", 64), ConfigurationRollout: true}
+	if _, err := backend.Ensure(context.Background(), removal); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = os.ReadFile(backend.config.BrokerAgentsPath)
+	if err != nil || bytes.Contains(policy, []byte("org/other")) {
+		t.Fatalf("repository removal retained stale authorization: %v %s", err, policy)
 	}
 }
 

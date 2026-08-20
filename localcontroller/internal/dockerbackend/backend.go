@@ -176,8 +176,9 @@ func asciiAlphaNumeric(value byte) bool {
 	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
 }
 
-func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRun) (controller.BackendObservation, error) {
+func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRun) (observation controller.BackendObservation, resultErr error) {
 	run := desired.Resolved
+	rollout := desired.ConfigurationRollout && desired.PreviousResolved != nil && desired.DesiredDigest != ""
 	if run.Execution.Kind != "container" {
 		return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
 	}
@@ -215,12 +216,32 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	tokens := deriveTokens(backend.key, run.RunID, desired.SnapshotDigest)
+	if rollout {
+		stopArguments := []string{"compose", "-p", names.project, "-f", names.composeFile, "stop", "agent"}
+		if desired.PreviousResolved.Egress.Mode == "mediated" {
+			stopArguments = append(stopArguments, "egressd")
+		}
+		if _, err := backend.docker.Run(operationContext, nil, stopArguments...); err != nil {
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
+		}
+	}
 	if err := backend.registry.upsert(operationContext, run, desired.SnapshotDigest, tokens); err != nil {
 		if errors.Is(err, errRegistryIdentityCollision) {
 			return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
 		}
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
+	registryUpdated := rollout
+	defer func() {
+		if resultErr == nil || !registryUpdated || desired.PreviousResolved == nil {
+			return
+		}
+		rollbackContext, rollbackCancel := context.WithTimeout(context.Background(), backend.config.OperationTimeout)
+		defer rollbackCancel()
+		if backend.registry.upsert(rollbackContext, *desired.PreviousResolved, desired.SnapshotDigest, tokens) != nil {
+			resultErr = controller.ErrBackendRetryable
+		}
+	}()
 	if err := backend.ensureExternalNetwork(operationContext); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
@@ -295,7 +316,13 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 			return controller.BackendObservation{}, controller.ErrBackendRetryable
 		}
 	}
-	if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d", "--no-recreate"); err != nil {
+	composeArguments := []string{"compose", "-p", names.project, "-f", names.composeFile, "up", "-d"}
+	if rollout {
+		composeArguments = append(composeArguments, "--force-recreate")
+	} else {
+		composeArguments = append(composeArguments, "--no-recreate")
+	}
+	if _, err := backend.docker.Run(operationContext, nil, composeArguments...); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	if err := backend.preflightComposeMutation(operationContext, names.project, plan, labels); err != nil {
@@ -784,10 +811,10 @@ type seedFile struct {
 }
 
 func (backend *Backend) seedVolume(ctx context.Context, volume string, files map[string]seedFile, labels ownedLabels) error {
-	arguments := []string{"create", "--entrypoint", "/bin/true", "-v", volume + ":/seed"}
+	arguments := []string{"create", "--entrypoint", "/bin/sh", "-v", volume + ":/seed"}
 	arguments = append(arguments, labelArguments(labels)...)
 	arguments = append(arguments, "--label", seedHelperLabel+"="+seedHelperValue)
-	arguments = append(arguments, backend.config.SeedImage)
+	arguments = append(arguments, backend.config.SeedImage, "-c", "find /seed -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +")
 	created, err := backend.docker.Run(ctx, nil, arguments...)
 	if err != nil {
 		return err
@@ -801,6 +828,9 @@ func (backend *Backend) seedVolume(ctx context.Context, volume string, files map
 		defer cleanupCancel()
 		_, _ = backend.docker.Run(cleanupContext, nil, "rm", "--force", "--volumes", container)
 	}()
+	if _, err := backend.docker.Run(ctx, nil, "start", "--attach", container); err != nil {
+		return err
+	}
 	archive, err := seedArchive(files)
 	if err != nil {
 		return errors.New("backend seed unavailable")

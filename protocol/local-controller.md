@@ -130,10 +130,11 @@ bearers stay in private regular files (no group/other permissions), are
 in SQLite. The local-manifest renderer generates them into separate managed
 volumes and mounts only each exact private file into the controller.
 
-The complete workstation set is installed in one SQLite transaction. Deadline
-convergence, snapshot/replay, capacity, durable tombstone, and
-configuration-drift checks happen in that transaction. Rejection rolls back
-both deadline transitions and inserts. Cleanup-bound rows do not consume
+The complete workstation set is installed or staged in one SQLite transaction.
+Deadline convergence, snapshot/replay, capacity, durable tombstone, immutable
+configuration checks, and compatible desired-configuration staging happen in
+that transaction. Rejection rolls back both deadline transitions and changes.
+Cleanup-bound rows do not consume
 replacement named-run admission capacity; reconciliation processes stopping
 rows first and does not create replacement backends while the retained cleanup
 backlog leaves the durable set over capacity. Expired downtime state therefore
@@ -142,11 +143,24 @@ resource concurrency. A rejected startup document cannot
 leave a partially installed named-run set or partially converged state.
 
 At startup the controller resolves and creates workstation selections through
-the same immutable contract. Replay after controller or Docker restart is
-idempotent and generic `runtime.resume` retains session state. Changing the
-resolved value for an existing name fails startup as configuration drift; the
-controller never silently rewrites provenance. Adding a workstation creates
-only the new run. Removing one from desired configuration is non-destructive:
+the same contract. Replay after controller or Docker restart is idempotent and
+generic `runtime.resume` retains session state. For an existing persistent
+workstation, repository declarations and their credential-provider mappings,
+broker grants, egress policy, rendered agent config, generated workflow name,
+and workspace instructions are administrator-owned desired state. A compatible
+change is staged while the active snapshot remains authoritative. The backend
+stops the affected runtime, installs the new broker/egress authorization,
+rewrites controller-owned config volumes, and force-recreates the runtime
+containers before the staged snapshot is committed. Persistent workspace,
+home/runtime-state, and Docker-data volumes retain their stable ownership
+revision and are never deleted by this rollout. Failed preparation keeps the
+old snapshot authoritative and restores the old broker grants; retryable
+failures leave the runtime stopped and the desired change staged.
+
+Run ID, principal identity, profile, image/runtime, execution backend and kind,
+persistence/retention ownership, resource limits, lifecycle, and other fields
+outside that compatible set remain immutable and fail startup as configuration
+drift. Adding a workstation creates only the new run. Removing one from desired configuration is non-destructive:
 its durable state, route, and volumes remain until an explicit authenticated
 delete request completes cleanup.
 
