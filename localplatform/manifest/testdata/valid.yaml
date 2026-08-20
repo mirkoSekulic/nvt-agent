@@ -32,9 +32,22 @@ accounts:
       mirkoSekulic: "123"
   codex:
     preset: codex-oauth
+brokerProviders:
   azure:
-    preset: azure-devops-pat
-    tokenSecret: azure-token
+    plugin: token
+    config:
+      injection-hosts: [dev.azure.com]
+      injection-git: true
+      injection-basic-username: git
+      target-mode: literal
+    secrets:
+      token-file: azure-token
+    mediation:
+      hosts: [dev.azure.com]
+      materialization: header-inject
+      git: true
+      username: git
+      targetMode: literal
 profiles:
   development:
     runtime:
@@ -43,8 +56,9 @@ profiles:
       account: codex
       model: gpt-5.6-sol
       effort: high
-    accounts: [github, codex, azure]
-    defaultRepositoryAccount: github
+    accounts: [github, codex]
+    credentialProviders: [azure]
+    defaultCredentialProvider: github
     tools:
       packages: [jq, git]
       mise: [go@latest]
@@ -69,7 +83,7 @@ repositories:
     checkoutTarget: dev.azure.com/example/platform/_git/infrastructure
     brokerRepository: dev.azure.com/example/platform/_git/infrastructure
     path: infrastructure
-    account: azure
+    credentialProvider: azure
 workstations:
   - name: nvt
     profile: development

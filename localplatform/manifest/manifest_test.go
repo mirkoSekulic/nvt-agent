@@ -36,7 +36,7 @@ func TestValidFixtureCompilesDeterministically(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reordered := strings.ReplaceAll(string(raw), "accounts: [github, codex, azure]", "accounts: [azure, codex, github]")
+	reordered := strings.ReplaceAll(string(raw), "accounts: [github, codex]", "accounts: [codex, github]")
 	reordered = strings.ReplaceAll(reordered, "packages: [jq, git]", "packages: [git, jq]")
 	second, err := Decode(strings.NewReader(reordered))
 	if err != nil {
@@ -82,8 +82,8 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 		"non-DNS producer name":                      strings.Replace(string(valid), "name: nvt-comments", "name: nvt.comments", 1),
 		"non-DNS profile name":                       dottedProfile,
 		"undeclared external config":                 strings.Replace(string(valid), "publicConfig:", "config:", 1),
-		"GitHub repository Azure account":            strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent\n    account: github", "github: mirkoSekulic/nvt-agent\n    account: azure", 1),
-		"Azure repository GitHub account":            strings.Replace(string(valid), "path: infrastructure\n    account: azure", "path: infrastructure\n    account: github", 1),
+		"GitHub repository generic provider":         strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent\n    account: github", "github: mirkoSekulic/nvt-agent\n    credentialProvider: azure", 1),
+		"custom repository GitHub account":           strings.Replace(string(valid), "path: infrastructure\n    credentialProvider: azure", "path: infrastructure\n    account: github", 1),
 		"built-in public config":                     strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    publicConfig: {mode: public}", 1),
 		"built-in manual secret":                     strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    secrets: {key: github-key}", 1),
 		"missing runtime account":                    strings.Replace(string(valid), "      account: codex", "      account: github", 1),
@@ -157,7 +157,7 @@ func TestCompiledSectionsAreOwnerSufficient(t *testing.T) {
 	if len(compiled.Controller.Profiles) != 1 || controllerProfile.Profile.Runtime.Preset != "codex" || controllerProfile.Profile.Runtime.Model != "gpt-5.6-sol" || controllerProfile.Profile.Runtime.Effort != "high" || controllerProfile.RuntimeProvider == nil || controllerProfile.RuntimeProvider.Name != "codex" || controllerProfile.DefaultCredentialProvider != "github" || controllerProfile.EgressProxyProvider != "codex" || len(controllerProfile.CredentialProviders) != 2 || len(controllerProfile.BrokerGrants) != 3 || controllerProfile.BrokerGrants[0].Purpose != "runtime-injection" || len(compiled.Controller.Repositories) != 2 {
 		t.Fatalf("controller projection is incomplete: %#v", compiled.Controller)
 	}
-	if len(compiled.Broker.Profiles) != 1 || len(compiled.Broker.Profiles[0].Accounts) != 3 || len(compiled.Broker.Repositories) != 2 {
+	if len(compiled.Broker.Profiles) != 1 || len(compiled.Broker.Profiles[0].Accounts) != 2 || len(compiled.Broker.Providers) != 1 || len(compiled.Broker.Repositories) != 2 {
 		t.Fatalf("broker projection is incomplete: %#v", compiled.Broker)
 	}
 	var github, external *ProducerIntent
@@ -256,15 +256,18 @@ func TestControllerProfileProjectionSatisfiesResolvedRunContract(t *testing.T) {
 	for _, provider := range intent.CredentialProviders {
 		var targets []string
 		for _, repository := range compiled.Controller.Repositories {
-			if repository.Account == provider.Name {
+			if repositoryProvider(repository) == provider.Name {
 				targets = append(targets, repository.CheckoutTarget)
 			}
 		}
 		profile.CredentialProviders = append(profile.CredentialProviders, resolvedrun.CredentialProviderMapping{Name: provider.Name, BrokerProvider: provider.Name, CredentialKind: "mediated", MatchTargets: targets})
 	}
 	for _, grant := range intent.BrokerGrants {
-		host := map[string]string{"codex-oauth": "api.openai.com:443", "github-app": "github.com:443", "azure-devops-pat": "dev.azure.com:443"}[grant.Preset]
-		profile.Broker.Grants = append(profile.Broker.Grants, resolvedrun.BrokerGrant{Provider: grant.Account, Repositories: grant.Repositories, Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: []string{host}, Git: grant.Purpose == "repository"})
+		hosts := []string{map[string]string{"codex-oauth": "api.openai.com:443", "github-app": "github.com:443"}[grant.Preset]}
+		if grant.Mediation != nil {
+			hosts = []string{grant.Mediation.Hosts[0] + ":443"}
+		}
+		profile.Broker.Grants = append(profile.Broker.Grants, resolvedrun.BrokerGrant{Provider: grant.Provider, Repositories: grant.Repositories, Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: hosts, Git: grant.Purpose == "repository"})
 	}
 	profile.Egress = resolvedrun.Egress{Mode: "mediated", Transport: "forward-proxy", Enforced: true, ProxyProvider: intent.EgressProxyProvider, PairedEgressRequired: true}
 	configuration := resolvedrun.TrustedConfiguration{
@@ -416,7 +419,7 @@ func TestExplicitRepositoryBrokerIdentityMustMatchProviderTarget(t *testing.T) {
 	azure.BrokerRepository = "example/platform/infrastructure"
 	decoded.Repositories["explicit"] = Repository{URL: "https://github.com/owner-one/repo.git", CheckoutTarget: "github.com/owner-one/repo", BrokerRepository: "owner-one/repo", Account: "github"}
 	decoded.Repositories["infrastructure"] = azure
-	if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), "must match the normalized checkout target") {
+	if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), "must exactly match the normalized checkout target") {
 		t.Fatalf("non-normalized Azure broker identity was accepted: %v", err)
 	}
 }
@@ -493,30 +496,132 @@ func TestRepositoryAccessValidationAndCompilation(t *testing.T) {
 	}
 }
 
-func TestGitHubPATUsesSameRepositoryAccessContract(t *testing.T) {
+func TestGenericStaticGitProviderCompilesExactSelfHostedGrant(t *testing.T) {
 	raw, err := os.ReadFile("testdata/valid.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := strings.Replace(string(raw), "  github-key:\n    file: ./.nvt-local/secrets/github/main-app.pem", "  github-key:\n    file: ./.nvt-local/secrets/github/main-app.pem\n  github-token:\n    file: ./.nvt-local/secrets/github/token", 1)
-	input = strings.Replace(input, "  codex:\n", "  github-pat:\n    preset: github-pat\n    tokenSecret: github-token\n  codex:\n", 1)
-	input = strings.Replace(input, "accounts: [github, codex, azure]", "accounts: [github, github-pat, codex, azure]", 1)
-	input = strings.Replace(input, "defaultRepositoryAccount: github", "defaultRepositoryAccount: github-pat", 1)
-	input = strings.Replace(input, "    account: github\n  infrastructure:", "    account: github-pat\n  infrastructure:", 1)
-	decoded, err := Decode(strings.NewReader(input))
+	decoded, err := Decode(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
+	decoded.Secrets["studio-token"] = Secret{File: "./.nvt-local/secrets/studio/token"}
+	decoded.BrokerProviders["studio"] = BrokerProvider{Plugin: "token", Config: map[string]any{"injection-hosts": []any{"altinn.studio"}, "injection-git": true, "injection-basic-username": "oauth2", "target-mode": "literal"}, Secrets: map[string]string{"token-file": "studio-token"}, Mediation: BrokerProviderMediation{Hosts: []string{"altinn.studio"}, Materialization: "header-inject", Git: true, Username: "oauth2", TargetMode: "literal"}}
+	profile := decoded.Profiles["development"]
+	profile.CredentialProviders = append(profile.CredentialProviders, "studio")
+	decoded.Profiles["development"] = profile
+	decoded.Repositories["studio"] = Repository{URL: "https://altinn.studio/repos/digdir/oed.git", CheckoutTarget: "altinn.studio/repos/digdir/oed", BrokerRepository: "altinn.studio/repos/digdir/oed", CredentialProvider: "studio"}
+	decoded.Workstations[0].Repositories = append(decoded.Workstations[0].Repositories, "studio")
 	compiled, err := Compile(decoded)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, profile := range compiled.Broker.Profiles {
 		for _, grant := range profile.Grants {
-			if grant.Account == "github-pat" && grant.Purpose == "repository" && grant.Preset != "github-pat" {
-				t.Fatalf("repository grant = %#v", grant)
+			if grant.Provider == "studio" && (grant.Purpose != "repository" || grant.Preset != "" || grant.Mediation == nil || strings.Join(grant.Repositories, ",") != "altinn.studio/repos/digdir/oed") {
+				t.Fatalf("generic repository grant = %#v", grant)
 			}
 		}
+	}
+}
+
+func TestGenericStaticGitProviderValidatesTargetModeRepositoryIdentity(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.Secrets["github-token"] = Secret{File: "./.nvt-local/secrets/github/token"}
+	base.BrokerProviders["github-token"] = BrokerProvider{Plugin: "token", Config: map[string]any{"injection-hosts": []any{"github.com"}, "injection-git": true, "injection-basic-username": "git", "target-mode": "github"}, Secrets: map[string]string{"token-file": "github-token"}, Mediation: BrokerProviderMediation{Hosts: []string{"github.com"}, Materialization: "header-inject", Git: true, Username: "git", TargetMode: "github"}}
+	profile := base.Profiles["development"]
+	profile.CredentialProviders = append(profile.CredentialProviders, "github-token")
+	base.Profiles["development"] = profile
+	base.Repositories["github-static"] = Repository{URL: "https://github.com/example/project.git", CheckoutTarget: "github.com/example/project", BrokerRepository: "example/project", CredentialProvider: "github-token"}
+	base.Workstations[0].Repositories = append(base.Workstations[0].Repositories, "github-static")
+	if _, err := Compile(base); err != nil {
+		t.Fatalf("GitHub-normalized repository was rejected: %v", err)
+	}
+	invalid := base
+	invalid.Repositories = cloneMap(base.Repositories)
+	repository := invalid.Repositories["github-static"]
+	repository.BrokerRepository = "github.com/example/project"
+	invalid.Repositories["github-static"] = repository
+	if _, err := Compile(invalid); err == nil || !strings.Contains(err.Error(), "normalized checkout target") {
+		t.Fatalf("literal identity was accepted for GitHub target mode: %v", err)
+	}
+}
+
+func TestGenericStaticGitProviderValidationFailsClosed(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(*Manifest){
+		"unknown bound secret": func(value *Manifest) {
+			provider := value.BrokerProviders["azure"]
+			provider.Secrets = map[string]string{"token-file": "missing"}
+			value.BrokerProviders["azure"] = provider
+		},
+		"secret in public config": func(value *Manifest) {
+			provider := value.BrokerProviders["azure"]
+			provider.Config = map[string]any{"token-file": "embedded"}
+			value.BrokerProviders["azure"] = provider
+		},
+		"undeclared secret reference": func(value *Manifest) {
+			provider := value.BrokerProviders["azure"]
+			provider.Config = map[string]any{"source": "azure-token"}
+			value.BrokerProviders["azure"] = provider
+		},
+		"host path in public config": func(value *Manifest) {
+			provider := value.BrokerProviders["azure"]
+			provider.Config = map[string]any{"helper": "/home/user/token"}
+			value.BrokerProviders["azure"] = provider
+		},
+		"invalid public config key": func(value *Manifest) {
+			provider := value.BrokerProviders["azure"]
+			provider.Config = map[string]any{"not a key": "literal"}
+			value.BrokerProviders["azure"] = provider
+		},
+		"ambiguous provider namespace": func(value *Manifest) {
+			value.BrokerProviders["github"] = value.BrokerProviders["azure"]
+		},
+		"ambiguous repository binding": func(value *Manifest) {
+			repository := value.Repositories["infrastructure"]
+			repository.Account = "github"
+			value.Repositories["infrastructure"] = repository
+		},
+		"undeclared profile provider": func(value *Manifest) {
+			profile := value.Profiles["development"]
+			profile.CredentialProviders = nil
+			value.Profiles["development"] = profile
+		},
+		"host mismatch": func(value *Manifest) {
+			repository := value.Repositories["infrastructure"]
+			repository.URL = "https://git.example/org/repository"
+			repository.CheckoutTarget = "git.example/org/repository"
+			repository.BrokerRepository = "git.example/org/repository"
+			value.Repositories["infrastructure"] = repository
+		},
+		"repository mismatch": func(value *Manifest) {
+			repository := value.Repositories["infrastructure"]
+			repository.BrokerRepository = "dev.azure.com/example/platform/_git/other"
+			value.Repositories["infrastructure"] = repository
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			value, err := Decode(bytes.NewReader(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutate(&value)
+			if err := value.Validate(); err == nil {
+				t.Fatal("invalid generic provider input was accepted")
+			}
+		})
 	}
 }
 

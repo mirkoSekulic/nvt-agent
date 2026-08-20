@@ -335,26 +335,29 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		Name: intent.Name, Runtime: &resolvedrun.Runtime{Type: runtimeType, Autonomy: autonomy, Model: intent.Profile.Runtime.Model, Effort: intent.Profile.Runtime.Effort, User: "root", Container: &resolvedrun.RuntimeContainer{Capabilities: append([]string(nil), intent.Profile.Capabilities...)}, Docker: &resolvedrun.RuntimeDocker{}},
 		AgentConfig: agentConfig, WorkspaceInstructions: instructions, AllowedBackends: []string{"local-docker"}, DefaultBackend: "local-docker", AllowedRetentions: append([]string(nil), retentionNames...),
 	}
-	grantProviders := map[string]struct{}{}
 	repositoryGrants := map[string]struct {
 		preset       string
+		mediation    *manifest.BrokerProviderMediation
 		repositories []string
 		permissions  map[string]string
 	}{}
 	for _, grant := range intent.BrokerGrants {
 		if grant.Purpose == "runtime-injection" {
-			provider := grant.Account
+			provider := grant.Provider
 			profile.Broker.Grants = append(profile.Broker.Grants, runtimeGrant(provider, grant.Preset))
-			grantProviders[provider] = struct{}{}
 			profile.Egress.ProxyProvider = provider
 			continue
 		}
 		for _, repositoryName := range grant.Repositories {
-			repository := brokerRepositoryByIdentity(repositories, repositoryName, grant.Account)
-			provider := providerFor(grant.Account, repository.BrokerRepository, accounts[grant.Account])
+			repository := brokerRepositoryByIdentity(repositories, repositoryName, grant.Provider)
+			provider := grant.Provider
+			if account, ok := accounts[grant.Provider]; ok {
+				provider = providerFor(grant.Provider, repository.BrokerRepository, account)
+			}
 			key := provider + "\x00" + permissionsKey(grant.Permissions)
 			entry := repositoryGrants[key]
 			entry.preset = grant.Preset
+			entry.mediation = grant.Mediation
 			entry.repositories = append(entry.repositories, repository.BrokerRepository)
 			entry.permissions = grant.Permissions
 			repositoryGrants[key] = entry
@@ -364,17 +367,19 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		entry := repositoryGrants[key]
 		provider := strings.SplitN(key, "\x00", 2)[0]
 		sort.Strings(entry.repositories)
-		profile.Broker.Grants = append(profile.Broker.Grants, repositoryGrant(provider, entry.preset, entry.repositories, entry.permissions))
-		grantProviders[provider] = struct{}{}
+		profile.Broker.Grants = append(profile.Broker.Grants, repositoryGrant(provider, entry.preset, entry.mediation, entry.repositories, entry.permissions))
 	}
 	mappingTargets := map[string]map[string]struct{}{}
 	defaultProviders := map[string]struct{}{}
 	for _, account := range intent.CredentialProviders {
 		for _, repository := range repositories {
-			if repository.Account != account.Name {
+			if repositoryProvider(repository) != account.Name {
 				continue
 			}
-			provider := providerFor(account.Name, repository.BrokerRepository, accounts[account.Name])
+			provider := account.Name
+			if value, ok := accounts[account.Name]; ok {
+				provider = providerFor(account.Name, repository.BrokerRepository, value)
+			}
 			found := false
 			for key := range repositoryGrants {
 				if strings.HasPrefix(key, provider+"\x00") {
@@ -422,7 +427,7 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 func pluginEgressProvider(intent manifest.ControllerProfileIntent, account string, accounts map[string]manifest.Account, repositories map[string]manifest.ControllerRepositoryIntent) (string, error) {
 	provider := ""
 	for _, grant := range intent.BrokerGrants {
-		if grant.Account != account {
+		if grant.Provider != account {
 			continue
 		}
 		candidates := []string{account}
@@ -488,12 +493,22 @@ func runtimePreseed(runtimeType string) map[string]any {
 
 func renderRepository(item manifest.ControllerRepositoryIntent, profile manifest.ControllerProfileIntent, accounts map[string]manifest.Account) resolvedrun.Repository {
 	provider := ""
+	username := ""
 	if item.Account != "" {
 		provider = providerFor(item.Account, item.BrokerRepository, accounts[item.Account])
+		username = credentialUsername(accounts[item.Account])
+	} else if item.CredentialProvider != "" {
+		provider = item.CredentialProvider
+		for _, candidate := range profile.CredentialProviders {
+			if candidate.Name == provider {
+				username = candidate.Username
+				break
+			}
+		}
 	}
 	return resolvedrun.Repository{
 		CheckoutTarget: item.CheckoutTarget, BrokerRepository: item.BrokerRepository, URL: item.URL, Path: item.Path, Upstream: item.Upstream,
-		CredentialProvider: provider, CredentialUsername: credentialUsername(accounts[item.Account]),
+		CredentialProvider: provider, CredentialUsername: username,
 	}
 }
 
@@ -505,12 +520,17 @@ func runtimeGrant(provider, preset string) resolvedrun.BrokerGrant {
 	return resolvedrun.BrokerGrant{Provider: provider, Capabilities: []string{"injection.headers"}, Materialization: "placeholder-file", EgressHosts: hosts}
 }
 
-func repositoryGrant(provider, preset string, repositories []string, permissions map[string]string) resolvedrun.BrokerGrant {
+func repositoryGrant(provider, preset string, mediation *manifest.BrokerProviderMediation, repositories []string, permissions map[string]string) resolvedrun.BrokerGrant {
 	hosts := []string{"github.com:443", "api.github.com:443"}
-	if preset == "azure-devops-pat" {
-		hosts = []string{"dev.azure.com:443"}
+	materialization, git := "header-inject", true
+	if mediation != nil {
+		hosts = make([]string, len(mediation.Hosts))
+		for index, host := range mediation.Hosts {
+			hosts[index] = host + ":443"
+		}
+		materialization, git = mediation.Materialization, mediation.Git
 	}
-	grant := resolvedrun.BrokerGrant{Provider: provider, Repositories: repositories, Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: hosts, Git: true}
+	grant := resolvedrun.BrokerGrant{Provider: provider, Repositories: repositories, Capabilities: []string{"injection.headers"}, Materialization: materialization, EgressHosts: hosts, Git: git}
 	if preset == "github-app" {
 		grant.Preparations = []string{"identity"}
 		grant.Permissions = permissions
@@ -564,17 +584,23 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 					"app-id": appID, "installation-id": installationID, "private-key-file": plancontract.PrivateTarget(account.PrivateKeySecret), "injection-hosts": []string{"github.com", "api.github.com"},
 				}, "allow": map[string]any{"repositories": allowed, "permissions": brokerPermissionsFor(compiled, named.Name, owner), "methods": []string{"GET", "POST", "PUT", "PATCH", "DELETE"}}})
 			}
-		case "github-pat", "azure-devops-pat":
-			hosts, mode := []string{"github.com", "api.github.com"}, "github"
-			if account.Preset == "azure-devops-pat" {
-				hosts, mode = []string{"dev.azure.com"}, "literal"
-			}
-			providers = append(providers, map[string]any{"name": named.Name, "plugin": "token", "config": map[string]any{
-				"token-file": plancontract.PrivateTarget(account.TokenSecret), "injection-hosts": hosts, "injection-git": true, "injection-basic-username": "git", "target-mode": mode,
-			}, "allow": map[string]any{"repositories": brokerRepositoriesFor(compiled, named.Name, "")}})
 		default:
 			return nil, errors.New("compiled broker account preset is invalid")
 		}
+	}
+	for _, named := range compiled.Broker.Providers {
+		provider := named.Provider
+		config, err := clonePublicConfig(provider.Config)
+		if err != nil {
+			return nil, errors.New("compiled broker provider config is invalid")
+		}
+		for configKey, secretName := range provider.Secrets {
+			if _, exists := config[configKey]; exists || secretName == "" {
+				return nil, errors.New("compiled broker provider secret binding is invalid")
+			}
+			config[configKey] = plancontract.PrivateTarget(secretName)
+		}
+		providers = append(providers, map[string]any{"name": named.Name, "plugin": provider.Plugin, "config": config, "allow": map[string]any{"repositories": brokerRepositoriesFor(compiled, named.Name, "")}})
 	}
 	providerNames := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -629,7 +655,7 @@ func providerFor(account, repository string, value manifest.Account) string {
 func brokerRepositoriesFor(compiled manifest.Compiled, account, owner string) []string {
 	result := []string{}
 	for _, repository := range compiled.Broker.Repositories {
-		if repository.Account != account || repository.BrokerRepository == "" {
+		if repository.Provider != account || repository.BrokerRepository == "" {
 			continue
 		}
 		if owner != "" && !strings.EqualFold(strings.SplitN(repository.BrokerRepository, "/", 2)[0], owner) {
@@ -645,7 +671,7 @@ func brokerPermissionsFor(compiled manifest.Compiled, account, owner string) map
 	result := map[string]string{}
 	levels := map[string]int{"read": 1, "write": 2}
 	for _, repository := range compiled.Broker.Repositories {
-		if repository.Account != account || owner != "" && !strings.EqualFold(strings.SplitN(repository.BrokerRepository, "/", 2)[0], owner) {
+		if repository.Provider != account || owner != "" && !strings.EqualFold(strings.SplitN(repository.BrokerRepository, "/", 2)[0], owner) {
 			continue
 		}
 		for permission, level := range repository.Permissions {
@@ -664,19 +690,38 @@ func permissionsKey(permissions map[string]string) string {
 
 func brokerRepositoryByIdentity(repositories map[string]manifest.ControllerRepositoryIntent, identity, account string) manifest.ControllerRepositoryIntent {
 	for _, repository := range repositories {
-		if repository.BrokerRepository == identity && repository.Account == account {
+		if repository.BrokerRepository == identity && repositoryProvider(repository) == account {
 			return repository
 		}
 	}
 	return manifest.ControllerRepositoryIntent{BrokerRepository: identity, Account: account}
 }
 
+func repositoryProvider(repository manifest.ControllerRepositoryIntent) string {
+	if repository.CredentialProvider != "" {
+		return repository.CredentialProvider
+	}
+	return repository.Account
+}
+
+func clonePublicConfig(input map[string]any) (map[string]any, error) {
+	if input == nil {
+		return map[string]any{}, nil
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func credentialUsername(account manifest.Account) string {
 	if account.Preset == "github-app" {
 		return "x-access-token"
-	}
-	if account.Preset == "github-pat" || account.Preset == "azure-devops-pat" {
-		return "git"
 	}
 	return ""
 }

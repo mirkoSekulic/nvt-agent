@@ -22,6 +22,7 @@ type Compiled struct {
 type BrokerIntent struct {
 	Owner        string                   `json:"owner"`
 	Accounts     []NamedAccount           `json:"accounts,omitempty"`
+	Providers    []NamedBrokerProvider    `json:"providers,omitempty"`
 	Profiles     []BrokerProfileIntent    `json:"profiles"`
 	Repositories []BrokerRepositoryIntent `json:"repositories"`
 }
@@ -90,17 +91,22 @@ type NamedAccount struct {
 	Name    string  `json:"name"`
 	Account Account `json:"account"`
 }
+type NamedBrokerProvider struct {
+	Name     string         `json:"name"`
+	Provider BrokerProvider `json:"provider"`
+}
 type BrokerProfileIntent struct {
 	Name     string              `json:"name"`
 	Accounts []string            `json:"accounts,omitempty"`
 	Grants   []BrokerGrantIntent `json:"grants,omitempty"`
 }
 type BrokerGrantIntent struct {
-	Account      string            `json:"account"`
-	Preset       string            `json:"preset"`
-	Purpose      string            `json:"purpose"`
-	Repositories []string          `json:"repositories"`
-	Permissions  map[string]string `json:"permissions,omitempty"`
+	Provider     string                   `json:"provider"`
+	Preset       string                   `json:"preset"`
+	Mediation    *BrokerProviderMediation `json:"mediation,omitempty"`
+	Purpose      string                   `json:"purpose"`
+	Repositories []string                 `json:"repositories"`
+	Permissions  map[string]string        `json:"permissions,omitempty"`
 }
 type ControllerProfileIntent struct {
 	Name                      string                               `json:"name"`
@@ -112,8 +118,9 @@ type ControllerProfileIntent struct {
 	BrokerGrants              []BrokerGrantIntent                  `json:"brokerGrants,omitempty"`
 }
 type ControllerCredentialProviderIntent struct {
-	Name   string `json:"name"`
-	Preset string `json:"preset"`
+	Name     string `json:"name"`
+	Preset   string `json:"preset"`
+	Username string `json:"username,omitempty"`
 }
 type ProducerAdmissionIntent struct {
 	Producer                string            `json:"producer"`
@@ -126,17 +133,18 @@ type ProducerAdmissionIntent struct {
 type BrokerRepositoryIntent struct {
 	Name             string            `json:"name"`
 	BrokerRepository string            `json:"brokerRepository,omitempty"`
-	Account          string            `json:"account,omitempty"`
+	Provider         string            `json:"provider,omitempty"`
 	Permissions      map[string]string `json:"permissions,omitempty"`
 }
 type ControllerRepositoryIntent struct {
-	Name             string `json:"name"`
-	URL              string `json:"url"`
-	CheckoutTarget   string `json:"checkoutTarget"`
-	BrokerRepository string `json:"brokerRepository,omitempty"`
-	Path             string `json:"path,omitempty"`
-	Upstream         string `json:"upstream,omitempty"`
-	Account          string `json:"account,omitempty"`
+	Name               string `json:"name"`
+	URL                string `json:"url"`
+	CheckoutTarget     string `json:"checkoutTarget"`
+	BrokerRepository   string `json:"brokerRepository,omitempty"`
+	Path               string `json:"path,omitempty"`
+	Upstream           string `json:"upstream,omitempty"`
+	Account            string `json:"account,omitempty"`
+	CredentialProvider string `json:"credentialProvider,omitempty"`
 }
 type NamedWorkflow struct {
 	Name     string   `json:"name"`
@@ -162,9 +170,18 @@ func Compile(m Manifest) (Compiled, error) {
 		account.Installations = sortedMap(account.Installations)
 		result.Broker.Accounts = append(result.Broker.Accounts, NamedAccount{name, account})
 	}
+	for _, name := range SortedNames(m.BrokerProviders) {
+		provider := m.BrokerProviders[name]
+		provider.Config = cloneConfig(provider.Config)
+		provider.Secrets = sortedMap(provider.Secrets)
+		provider.Mediation.Hosts = append([]string(nil), provider.Mediation.Hosts...)
+		sort.Strings(provider.Mediation.Hosts)
+		result.Broker.Providers = append(result.Broker.Providers, NamedBrokerProvider{Name: name, Provider: provider})
+	}
 	for _, name := range SortedNames(m.Profiles) {
 		profile := m.Profiles[name]
 		profile.Accounts = append([]string(nil), profile.Accounts...)
+		profile.CredentialProviders = append([]string(nil), profile.CredentialProviders...)
 		profile.Tools.Packages = append([]string(nil), profile.Tools.Packages...)
 		profile.Tools.Mise = append([]string(nil), profile.Tools.Mise...)
 		profile.Capabilities = append([]string(nil), profile.Capabilities...)
@@ -177,25 +194,30 @@ func Compile(m Manifest) (Compiled, error) {
 			}
 		}
 		sort.Strings(profile.Accounts)
+		sort.Strings(profile.CredentialProviders)
 		sort.Strings(profile.Tools.Packages)
 		sort.Strings(profile.Tools.Mise)
 		sort.Strings(profile.Capabilities)
 		sort.Slice(profile.Plugins, func(i, j int) bool { return profile.Plugins[i].Name < profile.Plugins[j].Name })
 		grants := compileBrokerGrants(m, name)
 		result.Broker.Profiles = append(result.Broker.Profiles, BrokerProfileIntent{Name: name, Accounts: append([]string(nil), profile.Accounts...), Grants: grants})
-		controllerProfile := ControllerProfileIntent{Name: name, Profile: profile, DefaultCredentialProvider: defaultRepositoryAccount(m, name), EgressProxyProvider: profile.Runtime.Account, BrokerGrants: cloneBrokerGrants(grants)}
+		controllerProfile := ControllerProfileIntent{Name: name, Profile: profile, DefaultCredentialProvider: defaultCredentialProvider(m, name), EgressProxyProvider: profile.Runtime.Account, BrokerGrants: cloneBrokerGrants(grants)}
 		if profile.Runtime.Account != "" {
-			controllerProfile.RuntimeProvider = &ControllerCredentialProviderIntent{profile.Runtime.Account, m.Accounts[profile.Runtime.Account].Preset}
+			controllerProfile.RuntimeProvider = &ControllerCredentialProviderIntent{Name: profile.Runtime.Account, Preset: m.Accounts[profile.Runtime.Account].Preset}
 		}
-		for _, accountName := range profileRepositoryAccounts(m, name) {
-			controllerProfile.CredentialProviders = append(controllerProfile.CredentialProviders, ControllerCredentialProviderIntent{accountName, m.Accounts[accountName].Preset})
+		for _, providerName := range profileRepositoryProviders(m, name) {
+			if account, ok := m.Accounts[providerName]; ok {
+				controllerProfile.CredentialProviders = append(controllerProfile.CredentialProviders, ControllerCredentialProviderIntent{Name: providerName, Preset: account.Preset})
+			} else {
+				controllerProfile.CredentialProviders = append(controllerProfile.CredentialProviders, ControllerCredentialProviderIntent{Name: providerName, Username: m.BrokerProviders[providerName].Mediation.Username})
+			}
 		}
 		result.Controller.Profiles = append(result.Controller.Profiles, controllerProfile)
 	}
 	for _, name := range SortedNames(m.Repositories) {
 		repository := compileRepository(name, m.Repositories[name])
 		result.Controller.Repositories = append(result.Controller.Repositories, repository)
-		result.Broker.Repositories = append(result.Broker.Repositories, BrokerRepositoryIntent{name, repository.BrokerRepository, repository.Account, repositoryPermissions(m.Repositories[name], m.Accounts)})
+		result.Broker.Repositories = append(result.Broker.Repositories, BrokerRepositoryIntent{name, repository.BrokerRepository, repositoryProvider(repository), repositoryPermissions(m.Repositories[name], m.Accounts)})
 	}
 	result.Controller.Workstations = append([]Workstation(nil), m.Workstations...)
 	for i := range result.Controller.Workstations {
@@ -248,12 +270,27 @@ func Compile(m Manifest) (Compiled, error) {
 		result.Controller.ProducerAdmissions = append(result.Controller.ProducerAdmissions, ProducerAdmissionIntent{Producer: producer.Name, Identity: "producer:" + producer.Name, Workflow: producer.Workflow, CommandWorkflows: workflows, Credential: credential, AllowedPrincipalIssuers: issuers})
 		result.GeneratedPrivateInputs = append(result.GeneratedPrivateInputs, GeneratedPrivateInputIntent{"local-platform-state", credential, "schedule-admission-token", []string{"local-controller", "producer:" + producer.Name}})
 	}
+	seenBrokerSecrets := map[string]struct{}{}
 	for _, name := range SortedNames(m.Accounts) {
 		account := m.Accounts[name]
-		for _, secretName := range []string{account.PrivateKeySecret, account.TokenSecret} {
+		for _, secretName := range []string{account.PrivateKeySecret} {
 			if secretName != "" {
+				if _, exists := seenBrokerSecrets[secretName]; exists {
+					continue
+				}
+				seenBrokerSecrets[secretName] = struct{}{}
 				result.PrivateInputs = append(result.PrivateInputs, PrivateInputIntent{"broker", secretName, m.Secrets[secretName].File, "secret"})
 			}
+		}
+	}
+	for _, name := range SortedNames(m.BrokerProviders) {
+		for _, configKey := range SortedNames(m.BrokerProviders[name].Secrets) {
+			secretName := m.BrokerProviders[name].Secrets[configKey]
+			if _, exists := seenBrokerSecrets[secretName]; exists {
+				continue
+			}
+			seenBrokerSecrets[secretName] = struct{}{}
+			result.PrivateInputs = append(result.PrivateInputs, PrivateInputIntent{"broker", secretName, m.Secrets[secretName].File, "secret"})
 		}
 	}
 	for _, name := range SortedNames(m.Profiles) {
@@ -287,28 +324,29 @@ func Compile(m Manifest) (Compiled, error) {
 func cloneBrokerGrants(input []BrokerGrantIntent) []BrokerGrantIntent {
 	result := make([]BrokerGrantIntent, len(input))
 	for index, grant := range input {
-		result[index] = BrokerGrantIntent{grant.Account, grant.Preset, grant.Purpose, append([]string(nil), grant.Repositories...), sortedMap(grant.Permissions)}
+		result[index] = BrokerGrantIntent{Provider: grant.Provider, Preset: grant.Preset, Mediation: cloneMediation(grant.Mediation), Purpose: grant.Purpose, Repositories: append([]string(nil), grant.Repositories...), Permissions: sortedMap(grant.Permissions)}
 	}
 	return result
 }
 
 func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 	type group struct {
-		account      string
+		provider     string
 		permissions  map[string]string
 		repositories map[string]struct{}
 	}
 	groups := map[string]*group{}
 	add := func(repositoryName string) {
 		repository := compileRepository(repositoryName, m.Repositories[repositoryName])
-		if repository.Account == "" || repository.BrokerRepository == "" {
+		provider := repositoryProvider(repository)
+		if provider == "" || repository.BrokerRepository == "" {
 			return
 		}
 		permissions := repositoryPermissions(m.Repositories[repositoryName], m.Accounts)
 		encoded, _ := json.Marshal(permissions)
-		key := repository.Account + "\x00" + string(encoded)
+		key := provider + "\x00" + string(encoded)
 		if groups[key] == nil {
-			groups[key] = &group{repository.Account, permissions, map[string]struct{}{}}
+			groups[key] = &group{provider, permissions, map[string]struct{}{}}
 		}
 		groups[key].repositories[repository.BrokerRepository] = struct{}{}
 	}
@@ -326,11 +364,18 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 	}
 	result := make([]BrokerGrantIntent, 0, len(groups)+1)
 	if runtimeAccount := m.Profiles[profileName].Runtime.Account; runtimeAccount != "" {
-		result = append(result, BrokerGrantIntent{Account: runtimeAccount, Preset: m.Accounts[runtimeAccount].Preset, Purpose: "runtime-injection"})
+		result = append(result, BrokerGrantIntent{Provider: runtimeAccount, Preset: m.Accounts[runtimeAccount].Preset, Purpose: "runtime-injection"})
 	}
 	for _, key := range SortedNames(groups) {
 		entry := groups[key]
-		result = append(result, BrokerGrantIntent{Account: entry.account, Preset: m.Accounts[entry.account].Preset, Purpose: "repository", Repositories: SortedNames(entry.repositories), Permissions: entry.permissions})
+		grant := BrokerGrantIntent{Provider: entry.provider, Purpose: "repository", Repositories: SortedNames(entry.repositories), Permissions: entry.permissions}
+		if account, ok := m.Accounts[entry.provider]; ok {
+			grant.Preset = account.Preset
+		} else {
+			mediation := m.BrokerProviders[entry.provider].Mediation
+			grant.Mediation = &mediation
+		}
+		result = append(result, grant)
 	}
 	return result
 }
@@ -339,25 +384,25 @@ func repositoryPermissions(repository Repository, accounts map[string]Account) m
 	if repository.Access != nil {
 		return sortedMap(repository.Access.Permissions)
 	}
-	if repository.Account != "" && oneOf(accounts[repository.Account].Preset, "github-app", "github-pat") {
+	if repository.Account != "" && accounts[repository.Account].Preset == "github-app" {
 		return map[string]string{"contents": "write", "pull_requests": "write"}
 	}
 	return nil
 }
 
-func defaultRepositoryAccount(m Manifest, profileName string) string {
-	if configured := m.Profiles[profileName].DefaultRepositoryAccount; configured != "" {
+func defaultCredentialProvider(m Manifest, profileName string) string {
+	if configured := m.Profiles[profileName].DefaultCredentialProvider; configured != "" {
 		return configured
 	}
-	accounts := profileRepositoryAccounts(m, profileName)
-	if len(accounts) == 1 {
-		return accounts[0]
+	providers := profileRepositoryProviders(m, profileName)
+	if len(providers) == 1 {
+		return providers[0]
 	}
 	return ""
 }
 
 func compileRepository(name string, repository Repository) ControllerRepositoryIntent {
-	result := ControllerRepositoryIntent{Name: name, URL: repository.URL, CheckoutTarget: repository.CheckoutTarget, BrokerRepository: repository.BrokerRepository, Path: repository.Path, Upstream: repository.Upstream, Account: repository.Account}
+	result := ControllerRepositoryIntent{Name: name, URL: repository.URL, CheckoutTarget: repository.CheckoutTarget, BrokerRepository: repository.BrokerRepository, Path: repository.Path, Upstream: repository.Upstream, Account: repository.Account, CredentialProvider: repository.CredentialProvider}
 	if repository.GitHub != "" {
 		result.URL = "https://github.com/" + repository.GitHub + ".git"
 		result.CheckoutTarget = "github.com/" + repository.GitHub
@@ -366,6 +411,22 @@ func compileRepository(name string, repository Repository) ControllerRepositoryI
 		}
 	}
 	return result
+}
+
+func repositoryProvider(repository ControllerRepositoryIntent) string {
+	if repository.CredentialProvider != "" {
+		return repository.CredentialProvider
+	}
+	return repository.Account
+}
+
+func cloneMediation(value *BrokerProviderMediation) *BrokerProviderMediation {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	result.Hosts = append([]string(nil), value.Hosts...)
+	return &result
 }
 
 func sortedMap[T any](input map[string]T) map[string]T {

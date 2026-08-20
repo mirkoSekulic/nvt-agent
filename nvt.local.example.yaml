@@ -23,6 +23,8 @@ retentionPolicies:
 secrets:
   github-key:
     file: ./.nvt-local/secrets/github/app.pem
+  studio-token:
+    file: ./.nvt-local/secrets/studio/token
 
 accounts:
   github:
@@ -32,6 +34,23 @@ accounts:
     installations:
       mirkoSekulic: "1"
 
+brokerProviders:
+  studio:
+    plugin: token
+    config:
+      injection-hosts: [altinn.studio]
+      injection-git: true
+      injection-basic-username: oauth2
+      target-mode: literal
+    secrets:
+      token-file: studio-token
+    mediation:
+      hosts: [altinn.studio]
+      materialization: header-inject
+      git: true
+      username: oauth2
+      targetMode: literal
+
 profiles:
   development:
     runtime:
@@ -40,7 +59,8 @@ profiles:
     editor:
       preset: code-server
     accounts: [github]
-    defaultRepositoryAccount: github
+    credentialProviders: [studio]
+    defaultCredentialProvider: github
     plugins:
       - work-control
       - name: github-watcher
@@ -59,7 +79,10 @@ repositories:
         pull_requests: write
         workflows: write
   studio:
-    github: Altinn/altinn-studio
+    url: https://altinn.studio/repos/altinn/altinn-studio.git
+    checkoutTarget: altinn.studio/repos/altinn/altinn-studio
+    brokerRepository: altinn.studio/repos/altinn/altinn-studio
+    credentialProvider: studio
   infrastructure:
     github: Altinn/altinn-platform
 
