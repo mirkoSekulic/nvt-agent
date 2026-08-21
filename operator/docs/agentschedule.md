@@ -79,6 +79,25 @@ Forward-proxy and transparent execution profiles may set the generic
 the AgentRun with the other profile-owned egress settings. Omission uses
 egressd's default of 256 active tunnels with bounded burst queueing.
 
+The same profiles may define an optional administrator-owned
+`egressDomainPolicy`:
+
+```yaml
+profiles:
+  - name: restricted
+    egress: mediated
+    egressEnforcement: true
+    egressTransport: transparent
+    egressDomainPolicy:
+      defaultAction: deny
+      allow: [github.com, registry.npmjs.org]
+      deny: [pastebin.com]
+```
+
+The complete policy is deep-copied into the selected AgentRun. Producers can
+only select an authorized profile and cannot widen the policy. Required broker
+injection hosts that the policy denies make the profile/run invalid.
+
 Profiles may also require bounded IPv4 Docker bridge networks without naming a
 tool or repository:
 

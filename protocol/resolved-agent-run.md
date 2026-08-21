@@ -60,7 +60,8 @@ A resolved value contains:
 - administrator-owned repository checkouts and approved public credential
   aliases, including an optional non-secret credential username;
 - broker provider names and non-secret grant/capability metadata;
-- direct or mediated egress policy;
+- direct or mediated egress policy, including an optional administrator-owned
+  domain policy whose deny rules take precedence;
 - separately ordered profile/workflow instructions;
 - portable resources, persistence intent, retention, TTLs, and trusted
   execution-backend name/kind.
@@ -207,7 +208,7 @@ This abbreviated trusted configuration uses example names only:
       "materialization":"header-inject",
       "egress_hosts":["runtime.example:443"]
     }]},
-    "egress":{"mode":"mediated","transport":"forward-proxy","enforced":true,"proxy_provider":"runtime-main","paired_egress_required":true},
+    "egress":{"mode":"mediated","transport":"forward-proxy","enforced":true,"proxy_provider":"runtime-main","paired_egress_required":true,"domain_policy":{"default_action":"deny","allow":["git.example","runtime.example"],"deny":["pastebin.com"]}},
     "allowed_backends":["container"],
     "default_backend":"container",
     "allowed_retentions":["persistent"]

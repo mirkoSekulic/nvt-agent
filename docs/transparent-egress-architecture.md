@@ -82,6 +82,12 @@ spec:
   egressTransport: transparent
   # Optional active CONNECT bound; default 256, allowed range 1-4096.
   egressMaxConcurrentTunnels: 512
+  # Optional administrator-owned destination policy. Omission preserves the
+  # compatibility behavior of allowing unmatched public destinations.
+  egressDomainPolicy:
+    defaultAction: deny
+    allow: [github.com, registry.npmjs.org]
+    deny: [pastebin.com]
 ```
 
 | Setting | Behavior |
@@ -92,6 +98,7 @@ spec:
 | `egressTransport: redirect` | Tool-specific base URL or redirect configuration |
 | `egressTransport: forward-proxy` | `HTTP(S)_PROXY` for proxy-aware tools |
 | `egressTransport: transparent` | iptables capture for ordinary TCP clients |
+| `egressDomainPolicy` | Optional provider-neutral DNS allow/deny policy; deny rules win |
 
 The pre-1.0 `spec.egressForwardProxy` compatibility behavior has been removed.
 Migrate `egressForwardProxy: true` to `egressTransport: forward-proxy`; use
@@ -258,9 +265,29 @@ Blind tunnelling is constrained to prevent egressd becoming an SSRF gateway:
 - injection routes pin hostname, port, TLS SNI, and outbound Host;
 - only configured injection hosts are TLS-terminated.
 
-Encrypted ClientHello can hide a hostname. When inspection cannot identify a
-name, only an explicitly permitted opaque IP tunnel is possible; credentials
-are never injected into that path.
+When `egressDomainPolicy` is present, each rule matches the bare domain and
+all label-boundary subdomains: `example.com` matches `api.example.com`, but not
+`notexample.com`. Matching is case-insensitive and ignores one DNS trailing
+dot. Deny rules take precedence over allow rules. `defaultAction: deny` fails
+closed for IP literals and any connection whose hostname cannot be recovered
+from valid HTTP CONNECT or transparent TLS metadata. DNS failure, an empty
+answer, or a mixed answer containing a denied/non-public address also fails
+closed. `defaultAction: allow` preserves reachability of otherwise-unlisted
+public domains while still applying deny rules, allowed-port checks, DNS
+pinning, rebinding protection, built-in non-public CIDRs, and deployment
+`denyCIDRs`.
+
+The policy is execution-profile-owned and snapshotted into the resolved run.
+Producers can select an authorized profile but cannot add or widen its rules.
+Injection routes are validated separately and must be reachable under the
+domain policy; allowing a domain never selects a provider, and declaring a
+provider route never bypasses the domain policy. Egressd records sanitized
+host, port, allow/deny, and error-class decisions without bodies, credentials,
+or sensitive headers.
+
+Encrypted ClientHello can hide a hostname. Under `defaultAction: deny`, traffic
+whose name cannot be inspected is denied; credentials are never injected into
+an opaque IP path.
 
 ## Local Compose
 

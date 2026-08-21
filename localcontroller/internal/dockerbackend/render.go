@@ -470,10 +470,18 @@ func renderEgressdConfig(config Config, run resolvedrun.ResolvedAgentRun) ([]byt
 				injects = append(injects, route)
 			}
 		}
-		root["forward_proxy"] = map[string]any{
-			"listen": "0.0.0.0:8470", "transparent_mode": run.Egress.Transport == "transparent", "allow_unmatched_hosts": true,
+		forwardProxy := map[string]any{
+			"listen": "0.0.0.0:8470", "transparent_mode": run.Egress.Transport == "transparent", "allow_unmatched_hosts": run.Egress.DomainPolicy == nil,
 			"allow_ports": []int{80, 443}, "max_concurrent_tunnels": run.Egress.MaxConcurrentTunnels, "inject_routes": injects,
 		}
+		if policy := run.Egress.DomainPolicy; policy != nil {
+			forwardProxy["domain_policy"] = map[string]any{
+				"default_action": policy.DefaultAction,
+				"allow":          append([]string(nil), policy.Allow...),
+				"deny":           append([]string(nil), policy.Deny...),
+			}
+		}
+		root["forward_proxy"] = forwardProxy
 	}
 	return json.MarshalIndent(root, "", "  ")
 }

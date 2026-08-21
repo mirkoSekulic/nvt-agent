@@ -127,13 +127,22 @@ type BrokerGrantQuota struct {
 // to provision a distinct paired egress identity; it is not an identity or
 // credential itself.
 type Egress struct {
-	Mode                 string `json:"mode"`
-	Transport            string `json:"transport,omitempty"`
-	Enforced             bool   `json:"enforced,omitempty"`
-	ProxyProvider        string `json:"proxy_provider,omitempty"`
-	PairedEgressRequired bool   `json:"paired_egress_required,omitempty"`
-	AllowInsecureBroker  bool   `json:"allow_insecure_broker,omitempty"`
-	MaxConcurrentTunnels int32  `json:"max_concurrent_tunnels,omitempty"`
+	Mode                 string        `json:"mode"`
+	Transport            string        `json:"transport,omitempty"`
+	Enforced             bool          `json:"enforced,omitempty"`
+	ProxyProvider        string        `json:"proxy_provider,omitempty"`
+	PairedEgressRequired bool          `json:"paired_egress_required,omitempty"`
+	AllowInsecureBroker  bool          `json:"allow_insecure_broker,omitempty"`
+	MaxConcurrentTunnels int32         `json:"max_concurrent_tunnels,omitempty"`
+	DomainPolicy         *DomainPolicy `json:"domain_policy,omitempty"`
+}
+
+// DomainPolicy is administrator-owned DNS reachability policy. Rules match a
+// domain and its label-boundary subdomains; deny takes precedence over allow.
+type DomainPolicy struct {
+	DefaultAction string   `json:"default_action"`
+	Allow         []string `json:"allow,omitempty"`
+	Deny          []string `json:"deny,omitempty"`
 }
 
 // Resources uses backend-neutral quantity strings. A backend must reject any

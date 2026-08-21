@@ -12,6 +12,7 @@ import (
 type AgentRunPhase string
 type AgentRunEgressMode string
 type AgentRunEgressTransport string
+type AgentRunEgressDomainDefaultAction string
 type AgentRunGrantMaterialization string
 
 // AgentRunLegacyExecution is retained only so upgrades can detect and fail
@@ -36,11 +37,13 @@ const (
 	// AgentRunPhaseDeadlineExceeded means the run exceeded its active deadline.
 	AgentRunPhaseDeadlineExceeded AgentRunPhase = "DeadlineExceeded"
 
-	AgentRunEgressDirect                AgentRunEgressMode      = "direct"
-	AgentRunEgressMediated              AgentRunEgressMode      = "mediated"
-	AgentRunEgressTransportRedirect     AgentRunEgressTransport = "redirect"
-	AgentRunEgressTransportForwardProxy AgentRunEgressTransport = "forward-proxy"
-	AgentRunEgressTransportTransparent  AgentRunEgressTransport = "transparent"
+	AgentRunEgressDirect                AgentRunEgressMode                = "direct"
+	AgentRunEgressMediated              AgentRunEgressMode                = "mediated"
+	AgentRunEgressTransportRedirect     AgentRunEgressTransport           = "redirect"
+	AgentRunEgressTransportForwardProxy AgentRunEgressTransport           = "forward-proxy"
+	AgentRunEgressTransportTransparent  AgentRunEgressTransport           = "transparent"
+	AgentRunEgressDomainAllow           AgentRunEgressDomainDefaultAction = "allow"
+	AgentRunEgressDomainDeny            AgentRunEgressDomainDefaultAction = "deny"
 
 	AgentRunGrantFileBundle   AgentRunGrantMaterialization = "file-bundle"
 	AgentRunGrantHeaderInject AgentRunGrantMaterialization = "header-inject"
@@ -108,14 +111,31 @@ type AgentRunSpec struct {
 	// forward-proxy and transparent transports. Omit to use the egressd default.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=4096
-	EgressMaxConcurrentTunnels int32                      `json:"egressMaxConcurrentTunnels,omitempty"`
-	Workspace                  AgentRunWorkspace          `json:"workspace"`
-	Broker                     *AgentRunBroker            `json:"broker,omitempty"`
-	Prompt                     *AgentRunPrompt            `json:"prompt,omitempty"`
-	Agent                      AgentRunAgent              `json:"agent"`
-	Lifecycle                  *AgentRunLifecycle         `json:"lifecycle,omitempty"`
-	TTL                        *AgentRunTTL               `json:"ttl,omitempty"`
-	ProfileProvenance          *AgentRunProfileProvenance `json:"profileProvenance,omitempty"`
+	EgressMaxConcurrentTunnels int32 `json:"egressMaxConcurrentTunnels,omitempty"`
+	// EgressDomainPolicy is the immutable administrator-owned DNS destination
+	// policy snapshotted from an execution profile. It controls reachability,
+	// never provider selection or credential injection authorization.
+	EgressDomainPolicy *AgentRunEgressDomainPolicy `json:"egressDomainPolicy,omitempty"`
+	Workspace          AgentRunWorkspace           `json:"workspace"`
+	Broker             *AgentRunBroker             `json:"broker,omitempty"`
+	Prompt             *AgentRunPrompt             `json:"prompt,omitempty"`
+	Agent              AgentRunAgent               `json:"agent"`
+	Lifecycle          *AgentRunLifecycle          `json:"lifecycle,omitempty"`
+	TTL                *AgentRunTTL                `json:"ttl,omitempty"`
+	ProfileProvenance  *AgentRunProfileProvenance  `json:"profileProvenance,omitempty"`
+}
+
+// AgentRunEgressDomainPolicy controls transparent/forward-proxy destination
+// names. Each entry matches itself and label-boundary subdomains; deny wins.
+type AgentRunEgressDomainPolicy struct {
+	// +kubebuilder:validation:Enum=allow;deny
+	DefaultAction AgentRunEgressDomainDefaultAction `json:"defaultAction"`
+	// +kubebuilder:validation:MaxItems=256
+	// +listType=set
+	Allow []string `json:"allow,omitempty"`
+	// +kubebuilder:validation:MaxItems=256
+	// +listType=set
+	Deny []string `json:"deny,omitempty"`
 }
 
 // AgentRunProfileProvenance is the immutable record of a profiled schedule resolution.
@@ -445,6 +465,9 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 		out.EgressForwardProxy = new(bool)
 		*out.EgressForwardProxy = *in.EgressForwardProxy
 	}
+	if in.EgressDomainPolicy != nil {
+		out.EgressDomainPolicy = in.EgressDomainPolicy.DeepCopy()
+	}
 	if in.RuntimeAuth != nil {
 		out.RuntimeAuth = in.RuntimeAuth.DeepCopy()
 	}
@@ -465,6 +488,17 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	if in.ProfileProvenance != nil {
 		out.ProfileProvenance = in.ProfileProvenance.DeepCopy()
 	}
+	return out
+}
+
+func (in *AgentRunEgressDomainPolicy) DeepCopy() *AgentRunEgressDomainPolicy {
+	if in == nil {
+		return nil
+	}
+	out := new(AgentRunEgressDomainPolicy)
+	*out = *in
+	out.Allow = append([]string(nil), in.Allow...)
+	out.Deny = append([]string(nil), in.Deny...)
 	return out
 }
 

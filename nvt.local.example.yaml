@@ -61,6 +61,11 @@ profiles:
     accounts: [github]
     credentialProviders: [studio]
     defaultCredentialProvider: github
+    egress:
+      domainPolicy:
+        defaultAction: deny
+        allow: [github.com, altinn.studio]
+        deny: [pastebin.com]
     plugins:
       - work-control
       - name: github-watcher

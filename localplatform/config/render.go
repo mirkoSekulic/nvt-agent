@@ -421,6 +421,17 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		profile.Egress.AllowInsecureBroker = true
 		profile.Egress.MaxConcurrentTunnels = 128
 	}
+	if intent.Profile.Egress != nil && intent.Profile.Egress.DomainPolicy != nil {
+		if profile.Egress.Mode != "mediated" {
+			return resolvedrun.Profile{}, errors.New("egress domain policy requires a mediated profile")
+		}
+		policy := intent.Profile.Egress.DomainPolicy
+		profile.Egress.DomainPolicy = &resolvedrun.DomainPolicy{
+			DefaultAction: policy.DefaultAction,
+			Allow:         append([]string(nil), policy.Allow...),
+			Deny:          append([]string(nil), policy.Deny...),
+		}
+	}
 	return profile, nil
 }
 

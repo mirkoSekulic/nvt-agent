@@ -5497,6 +5497,15 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	if fmt.Sprint(tunnelCapacity["minimum"]) != "1" || fmt.Sprint(tunnelCapacity["maximum"]) != "4096" {
 		t.Fatalf("expected bounded tunnel capacity schema, got %#v", tunnelCapacity)
 	}
+	domainPolicy := crdPath(t, spec, "egressDomainPolicy", "properties").(map[string]any)
+	if !reflect.DeepEqual(crdPath(t, domainPolicy, "defaultAction", "enum"), []any{"allow", "deny"}) ||
+		fmt.Sprint(crdPath(t, domainPolicy, "allow", "maxItems")) != "256" ||
+		crdPath(t, domainPolicy, "deny", "x-kubernetes-list-type") != "set" {
+		t.Fatalf("expected bounded egress domain policy schema, got %#v", domainPolicy)
+	}
+	if !hasCRDValidation(validations, "!has(self.egressDomainPolicy) || (self.egress == 'mediated' && self.egressEnforcement && has(self.egressTransport) && self.egressTransport in ['forward-proxy', 'transparent'])", "requires mediated") {
+		t.Fatalf("missing domain policy transport CEL: %#v", validations)
+	}
 	materialization := crdPath(t, spec, "broker", "properties", "grants", "items", "properties", "materialization").(map[string]any)
 	if materialization["default"] != "file-bundle" {
 		t.Fatalf("expected materialization default file-bundle, got %#v", materialization)
@@ -7488,6 +7497,52 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 	}
 	if got := egress["transport"]; got != string(nvtv1alpha1.AgentRunEgressTransportTransparent) {
 		t.Fatalf("bootstrap egress transport = %v", got)
+	}
+}
+
+func TestTransparentDomainPolicyValidationAndRendering(t *testing.T) {
+	run := transparentAgentRun(t)
+	run.Spec.EgressDomainPolicy = &nvtv1alpha1.AgentRunEgressDomainPolicy{
+		DefaultAction: nvtv1alpha1.AgentRunEgressDomainDeny,
+		Allow:         []string{"OPENAI.com.", "chatgpt.com"},
+		Deny:          []string{"auth.openai.com"},
+	}
+	if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "auth.openai.com") {
+		t.Fatalf("overlapping deny did not reject a required injection host: %v", err)
+	}
+	run.Spec.EgressDomainPolicy.Deny = []string{"pastebin.com"}
+	run.Spec.EgressDomainPolicy.Allow = append(run.Spec.EgressDomainPolicy.Allow, "8.8.8.8.")
+	if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "must be a DNS domain") {
+		t.Fatalf("trailing-dot IP literal domain rule accepted: %v", err)
+	}
+	run.Spec.EgressDomainPolicy.Allow = run.Spec.EgressDomainPolicy.Allow[:2]
+	if err := ValidateAgentRunEgressMode(run); err != nil {
+		t.Fatalf("valid strict domain policy rejected: %v", err)
+	}
+	rendered, err := RenderEgressdConfigJSON(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"allow_unmatched_hosts": false`, `"default_action": "deny"`, `"openai.com"`, `"pastebin.com"`} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered domain policy missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestDomainPolicyMatchingUsesLabelBoundariesAndDenyPrecedence(t *testing.T) {
+	policy := nvtv1alpha1.AgentRunEgressDomainPolicy{
+		DefaultAction: nvtv1alpha1.AgentRunEgressDomainDeny,
+		Allow:         []string{"example.com"},
+		Deny:          []string{"private.example.com"},
+	}
+	for host, want := range map[string]bool{
+		"example.com": true, "api.example.com": true, "notexample.com": false,
+		"private.example.com": false, "deep.private.example.com": false,
+	} {
+		if got := egressDomainAllowed(policy, host); got != want {
+			t.Errorf("egressDomainAllowed(%q) = %v, want %v", host, got, want)
+		}
 	}
 }
 

@@ -69,6 +69,20 @@ func TestResolveAllowedAddressRejectsAnyDeniedCandidate(t *testing.T) {
 	}
 }
 
+func TestResolveAllowedAddressRejectsUnavailableHostname(t *testing.T) {
+	policy, _ := newDestinationPolicy(nil)
+	for name, resolver := range map[string]*staticResolver{
+		"lookup failure": {err: errors.New("DNS unavailable")},
+		"empty answer":   {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := resolveAllowedAddresses(context.Background(), resolver, policy, "unavailable.example"); err == nil {
+				t.Fatal("unavailable hostname must fail closed")
+			}
+		})
+	}
+}
+
 func TestForwardProxyPrefersIPv4AndFallsBackAcrossValidatedAddresses(t *testing.T) {
 	resolver := &staticResolver{addresses: []netip.Addr{
 		netip.MustParseAddr("2606:4700:4700::1111"),

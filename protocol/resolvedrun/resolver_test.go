@@ -19,6 +19,43 @@ func TestDefaultCredentialProviderMustReferenceApprovedMapping(t *testing.T) {
 	}
 }
 
+func TestResolvedRunSnapshotsStrictDomainPolicy(t *testing.T) {
+	configuration := validConfiguration()
+	configuration.Profiles[0].Egress.DomainPolicy = &DomainPolicy{
+		DefaultAction: "deny",
+		Allow:         []string{"GitHub.COM.", "runtime.example"},
+		Deny:          []string{"pastebin.com"},
+	}
+	resolver, err := NewResolver(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolver.Resolve(validAuthorization(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration.Profiles[0].Egress.DomainPolicy.Allow[0] = "changed.example"
+	if resolved.Egress.DomainPolicy == nil || resolved.Egress.DomainPolicy.Allow[0] != "GitHub.COM." {
+		t.Fatalf("domain policy was not immutably snapshotted: %#v", resolved.Egress.DomainPolicy)
+	}
+}
+
+func TestResolvedRunRejectsContradictoryAndMalformedDomainPolicies(t *testing.T) {
+	for _, policy := range []*DomainPolicy{
+		{DefaultAction: "deny", Allow: []string{"runtime.example"}},
+		{DefaultAction: "invalid"},
+		{DefaultAction: "deny", Allow: []string{"127.0.0.1"}},
+		{DefaultAction: "deny", Allow: []string{"8.8.8.8."}},
+		{DefaultAction: "deny", Allow: []string{"github.com", "GITHUB.COM."}},
+	} {
+		configuration := validConfiguration()
+		configuration.Profiles[0].Egress.DomainPolicy = policy
+		if _, err := NewResolver(configuration); !errors.Is(err, ErrInvalidConfiguration) {
+			t.Fatalf("invalid domain policy accepted: %#v, %v", policy, err)
+		}
+	}
+}
+
 func TestWorkflowLifecycleCompletelyReplacesProfileLifecycle(t *testing.T) {
 	configuration := validConfiguration()
 	configuration.Workflows[0].Lifecycle = &Lifecycle{

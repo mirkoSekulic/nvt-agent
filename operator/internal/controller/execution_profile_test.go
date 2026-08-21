@@ -206,6 +206,7 @@ func TestProfiledScheduleSnapshotsForwardProxyTunnelCapacity(t *testing.T) {
 	profile.EgressEnforcement = true
 	profile.EgressTransport = nvtv1alpha1.AgentRunEgressTransportForwardProxy
 	profile.EgressMaxConcurrentTunnels = 512
+	profile.EgressDomainPolicy = &nvtv1alpha1.AgentRunEgressDomainPolicy{DefaultAction: nvtv1alpha1.AgentRunEgressDomainDeny, Allow: []string{"ChatGPT.COM."}}
 	profile.Broker.Grants[0].Materialization = nvtv1alpha1.AgentRunGrantPlaceholderFile
 	profile.Broker.Grants[0].EgressHosts = []string{"chatgpt.com"}
 
@@ -220,9 +221,16 @@ func TestProfiledScheduleSnapshotsForwardProxyTunnelCapacity(t *testing.T) {
 	if run.Spec.EgressMaxConcurrentTunnels != 512 {
 		t.Fatalf("tunnel capacity was not snapshotted: %d", run.Spec.EgressMaxConcurrentTunnels)
 	}
+	if run.Spec.EgressDomainPolicy == nil || run.Spec.EgressDomainPolicy.DefaultAction != nvtv1alpha1.AgentRunEgressDomainDeny || strings.Join(run.Spec.EgressDomainPolicy.Allow, ",") != "ChatGPT.COM." {
+		t.Fatalf("domain policy was not snapshotted: %#v", run.Spec.EgressDomainPolicy)
+	}
 	profile.EgressMaxConcurrentTunnels = 1024
+	profile.EgressDomainPolicy.Allow[0] = "changed.example"
 	if run.Spec.EgressMaxConcurrentTunnels != 512 {
 		t.Fatal("resolved tunnel capacity changed after schedule mutation")
+	}
+	if run.Spec.EgressDomainPolicy.Allow[0] != "ChatGPT.COM." {
+		t.Fatal("resolved domain policy changed after schedule mutation")
 	}
 }
 
@@ -683,6 +691,24 @@ func TestProfileConfigurationValidation(t *testing.T) {
 			},
 		},
 		{
+			name: "domain policy on direct profile",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				schedule.Spec.Profiles[0].EgressDomainPolicy = &nvtv1alpha1.AgentRunEgressDomainPolicy{DefaultAction: nvtv1alpha1.AgentRunEgressDomainDeny}
+			},
+		},
+		{
+			name: "domain policy blocks required injection host",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				profile := &schedule.Spec.Profiles[0]
+				profile.Egress = nvtv1alpha1.AgentRunEgressMediated
+				profile.EgressEnforcement = true
+				profile.EgressTransport = nvtv1alpha1.AgentRunEgressTransportTransparent
+				profile.Broker.Grants[0].Materialization = nvtv1alpha1.AgentRunGrantPlaceholderFile
+				profile.Broker.Grants[0].EgressHosts = []string{"api.required.example:443"}
+				profile.EgressDomainPolicy = &nvtv1alpha1.AgentRunEgressDomainPolicy{DefaultAction: nvtv1alpha1.AgentRunEgressDomainDeny, Allow: []string{"other.example"}}
+			},
+		},
+		{
 			name: "invalid onNoMatch",
 			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
 				schedule.Spec.ProfileSelection.OnNoMatch = "guess"
@@ -725,6 +751,7 @@ func TestProfileConfigurationRejectsRemovedEgressForwardProxy(t *testing.T) {
 func TestProfiledAdmissionRejectsProducerSecurityFields(t *testing.T) {
 	for _, extra := range []map[string]any{
 		{"agentRun": map[string]any{"spec": map[string]any{"broker": map[string]any{}}}},
+		{"agentRun": map[string]any{"spec": map[string]any{"egressDomainPolicy": map[string]any{"defaultAction": "allow"}}}},
 		{"agentRun": map[string]any{"spec": map[string]any{"runtime": map[string]any{
 			"container": map[string]any{"capabilities": map[string]any{"add": []any{"SYS_PTRACE"}}},
 		}}}},

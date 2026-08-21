@@ -76,8 +76,11 @@ type AgentScheduleExecutionProfile struct {
 	// forward-proxy and transparent transports. Omit to use the egressd default.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=4096
-	EgressMaxConcurrentTunnels int32           `json:"egressMaxConcurrentTunnels,omitempty"`
-	Broker                     *AgentRunBroker `json:"broker,omitempty"`
+	EgressMaxConcurrentTunnels int32 `json:"egressMaxConcurrentTunnels,omitempty"`
+	// EgressDomainPolicy is administrator-owned and is snapshotted unchanged
+	// into every AgentRun selecting this profile.
+	EgressDomainPolicy *AgentRunEgressDomainPolicy `json:"egressDomainPolicy,omitempty"`
+	Broker             *AgentRunBroker             `json:"broker,omitempty"`
 }
 
 // AgentScheduleWorkflowProfile is reusable, administrator-owned workflow guidance.
@@ -334,6 +337,9 @@ func (in *AgentScheduleExecutionProfile) DeepCopy() *AgentScheduleExecutionProfi
 	if in.EgressForwardProxy != nil {
 		out.EgressForwardProxy = new(bool)
 		*out.EgressForwardProxy = *in.EgressForwardProxy
+	}
+	if in.EgressDomainPolicy != nil {
+		out.EgressDomainPolicy = in.EgressDomainPolicy.DeepCopy()
 	}
 	if in.RuntimeAuth != nil {
 		out.RuntimeAuth = in.RuntimeAuth.DeepCopy()

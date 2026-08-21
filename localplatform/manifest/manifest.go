@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"path"
 	"regexp"
@@ -103,15 +104,26 @@ type BrokerProviderMediation struct {
 }
 
 type Profile struct {
-	Runtime                   Runtime  `json:"runtime"`
-	Accounts                  []string `json:"accounts,omitempty"`
-	CredentialProviders       []string `json:"credentialProviders,omitempty"`
-	DefaultCredentialProvider string   `json:"defaultCredentialProvider,omitempty"`
-	Tools                     Tools    `json:"tools,omitempty"`
-	Capabilities              []string `json:"capabilities,omitempty"`
-	Instructions              *FileRef `json:"instructions,omitempty"`
-	Editor                    Editor   `json:"editor,omitempty"`
-	Plugins                   []Plugin `json:"plugins,omitempty"`
+	Runtime                   Runtime        `json:"runtime"`
+	Accounts                  []string       `json:"accounts,omitempty"`
+	CredentialProviders       []string       `json:"credentialProviders,omitempty"`
+	DefaultCredentialProvider string         `json:"defaultCredentialProvider,omitempty"`
+	Tools                     Tools          `json:"tools,omitempty"`
+	Capabilities              []string       `json:"capabilities,omitempty"`
+	Instructions              *FileRef       `json:"instructions,omitempty"`
+	Editor                    Editor         `json:"editor,omitempty"`
+	Plugins                   []Plugin       `json:"plugins,omitempty"`
+	Egress                    *ProfileEgress `json:"egress,omitempty"`
+}
+
+type ProfileEgress struct {
+	DomainPolicy *DomainPolicy `json:"domainPolicy"`
+}
+
+type DomainPolicy struct {
+	DefaultAction string   `json:"defaultAction"`
+	Allow         []string `json:"allow,omitempty"`
+	Deny          []string `json:"deny,omitempty"`
 }
 
 type Plugin struct {
@@ -399,6 +411,11 @@ func (m Manifest) Validate() error {
 		if !validRuntimeSelection(profile.Runtime) {
 			return fmt.Errorf("profile %q has an invalid runtime model or effort", name)
 		}
+		if profile.Egress != nil {
+			if profile.Egress.DomainPolicy == nil || validateDomainPolicy(*profile.Egress.DomainPolicy) != nil {
+				return fmt.Errorf("profile %q has an invalid egress domain policy", name)
+			}
+		}
 		if err := uniqueRefs(profile.Accounts, m.Accounts, "account"); err != nil {
 			return fmt.Errorf("profile %q: %w", name, err)
 		}
@@ -602,6 +619,48 @@ func (m Manifest) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateDomainPolicy(policy DomainPolicy) error {
+	if !oneOf(policy.DefaultAction, "allow", "deny") || len(policy.Allow) > MaxItems || len(policy.Deny) > MaxItems {
+		return errors.New("invalid domain policy")
+	}
+	for _, entries := range [][]string{policy.Allow, policy.Deny} {
+		seen := map[string]bool{}
+		for _, entry := range entries {
+			normalized, ok := normalizeDomain(entry)
+			if !ok || seen[normalized] {
+				return errors.New("invalid or duplicate domain policy entry")
+			}
+			seen[normalized] = true
+		}
+	}
+	return nil
+}
+
+func normalizeDomain(value string) (string, bool) {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 254 || strings.ContainsAny(value, "/\\@?#: \t\r\n%") {
+		return "", false
+	}
+	value = strings.ToLower(strings.TrimSuffix(value, "."))
+	if parsed := net.ParseIP(value); parsed != nil {
+		return "", false
+	}
+	if value == "" || len(value) > 253 {
+		return "", false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", false
+		}
+		for _, character := range label {
+			if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' {
+				continue
+			}
+			return "", false
+		}
+	}
+	return value, true
 }
 
 func validName(v string) bool { return len(v) <= MaxNameBytes && namePattern.MatchString(v) }

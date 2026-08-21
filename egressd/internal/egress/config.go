@@ -108,13 +108,17 @@ type CAConfig struct {
 // (no TLS termination, no injection). InjectRoutes are TLS-terminated under the
 // per-agent CA and injected.
 type ForwardProxyConfig struct {
-	Listen                   string   `json:"listen"`
-	TransparentMode          bool     `json:"transparent_mode"`
-	AllowHosts               []string `json:"allow_hosts"`
-	AllowUnmatchedHosts      bool     `json:"allow_unmatched_hosts"`
-	AllowPorts               []int    `json:"allow_ports"`
-	MaxConcurrentTunnels     int      `json:"max_concurrent_tunnels"`
-	TunnelIdleTimeoutSeconds int      `json:"tunnel_idle_timeout_seconds"`
+	Listen              string   `json:"listen"`
+	TransparentMode     bool     `json:"transparent_mode"`
+	AllowHosts          []string `json:"allow_hosts"`
+	AllowUnmatchedHosts bool     `json:"allow_unmatched_hosts"`
+	// DomainPolicy is an administrator-owned, provider-neutral destination
+	// policy. When present it replaces the legacy exact AllowHosts/
+	// AllowUnmatchedHosts decision while leaving port and IP policy intact.
+	DomainPolicy             *DomainPolicy `json:"domain_policy"`
+	AllowPorts               []int         `json:"allow_ports"`
+	MaxConcurrentTunnels     int           `json:"max_concurrent_tunnels"`
+	TunnelIdleTimeoutSeconds int           `json:"tunnel_idle_timeout_seconds"`
 	// DenyCIDRs adds deployment-specific Pod, Service, node, cluster, and VNet
 	// ranges to the built-in non-public destination deny policy.
 	DenyCIDRs []string `json:"deny_cidrs"`
@@ -122,6 +126,14 @@ type ForwardProxyConfig struct {
 	// TLS with a CA-minted leaf for the host, injects the broker credential,
 	// and re-originates TLS to the pinned upstream.
 	InjectRoutes []ForwardProxyInjectRoute `json:"inject_routes"`
+}
+
+// DomainPolicy controls which DNS destination names may traverse the forward
+// proxy. A rule matches its bare domain and every label-boundary subdomain.
+type DomainPolicy struct {
+	DefaultAction string   `json:"default_action"`
+	Allow         []string `json:"allow"`
+	Deny          []string `json:"deny"`
 }
 
 // ForwardProxyInjectRoute maps a MITM'd upstream host to a broker capability.
@@ -342,6 +354,14 @@ func (c *ForwardProxyConfig) Validate() error {
 			return fmt.Errorf("allow_hosts[%q]: %w", host, err)
 		}
 	}
+	if c.DomainPolicy != nil {
+		if c.AllowUnmatchedHosts || len(c.AllowHosts) != 0 {
+			return fmt.Errorf("domain_policy is mutually exclusive with legacy allow_hosts and allow_unmatched_hosts")
+		}
+		if err := c.DomainPolicy.Validate(); err != nil {
+			return fmt.Errorf("domain_policy: %w", err)
+		}
+	}
 	for _, port := range c.effectiveAllowPorts() {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("allow_ports contains invalid port %d", port)
@@ -355,6 +375,20 @@ func (c *ForwardProxyConfig) Validate() error {
 	}
 	if _, err := newDestinationPolicy(c.DenyCIDRs); err != nil {
 		return err
+	}
+	if c.DomainPolicy != nil {
+		for index, route := range c.InjectRoutes {
+			if allowed, _ := c.DomainPolicy.Decide(route.Host); !allowed {
+				return fmt.Errorf("inject_routes[%d].host %q is denied by domain_policy", index, route.Host)
+			}
+			host, ok := normalizedRouteUpstreamHost(route.Upstream)
+			if !ok {
+				continue // validateForwardProxyRouteOverlap reports the malformed upstream.
+			}
+			if allowed, _ := c.DomainPolicy.Decide(host); !allowed {
+				return fmt.Errorf("inject_routes[%d].upstream %q is denied by domain_policy", index, route.Upstream)
+			}
+		}
 	}
 	return nil
 }
