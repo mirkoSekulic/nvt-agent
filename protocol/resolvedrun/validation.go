@@ -550,10 +550,13 @@ func validateDomainPolicy(policy *DomainPolicy) error {
 }
 
 func normalizedDomainPolicyEntry(value string) (string, bool) {
-	if value == "" || value != strings.TrimSpace(value) || len(value) > 254 || strings.ContainsAny(value, "/\\@?#: \t\r\n%") || net.ParseIP(value) != nil {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 254 || strings.ContainsAny(value, "/\\@?#: \t\r\n%") {
 		return "", false
 	}
 	value = strings.ToLower(strings.TrimSuffix(value, "."))
+	if net.ParseIP(value) != nil {
+		return "", false
+	}
 	if value == "" || len(value) > 253 {
 		return "", false
 	}

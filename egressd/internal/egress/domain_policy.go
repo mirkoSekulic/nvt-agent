@@ -73,10 +73,10 @@ func normalizeDomainName(value string) (string, error) {
 	if value == "" || value != strings.TrimSpace(value) || strings.ContainsAny(value, "/\\@?#: \t\r\n%") {
 		return "", fmt.Errorf("invalid domain")
 	}
+	value = strings.ToLower(strings.TrimSuffix(value, "."))
 	if _, err := netip.ParseAddr(value); err == nil {
 		return "", fmt.Errorf("IP literals are not domain names")
 	}
-	value = strings.ToLower(strings.TrimSuffix(value, "."))
 	if value == "" || len(value) > 253 {
 		return "", fmt.Errorf("invalid domain length")
 	}

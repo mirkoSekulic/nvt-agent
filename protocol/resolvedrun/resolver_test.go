@@ -45,6 +45,7 @@ func TestResolvedRunRejectsContradictoryAndMalformedDomainPolicies(t *testing.T)
 		{DefaultAction: "deny", Allow: []string{"runtime.example"}},
 		{DefaultAction: "invalid"},
 		{DefaultAction: "deny", Allow: []string{"127.0.0.1"}},
+		{DefaultAction: "deny", Allow: []string{"8.8.8.8."}},
 		{DefaultAction: "deny", Allow: []string{"github.com", "GITHUB.COM."}},
 	} {
 		configuration := validConfiguration()

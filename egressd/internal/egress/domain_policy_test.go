@@ -51,6 +51,7 @@ func TestDomainPolicyValidation(t *testing.T) {
 	for _, policy := range []DomainPolicy{
 		{DefaultAction: ""},
 		{DefaultAction: "deny", Allow: []string{"127.0.0.1"}},
+		{DefaultAction: "deny", Allow: []string{"8.8.8.8."}},
 		{DefaultAction: "deny", Allow: []string{"example.com", "EXAMPLE.COM."}},
 		{DefaultAction: "allow", Deny: []string{"bad..example"}},
 	} {

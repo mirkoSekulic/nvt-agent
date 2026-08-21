@@ -7511,6 +7511,11 @@ func TestTransparentDomainPolicyValidationAndRendering(t *testing.T) {
 		t.Fatalf("overlapping deny did not reject a required injection host: %v", err)
 	}
 	run.Spec.EgressDomainPolicy.Deny = []string{"pastebin.com"}
+	run.Spec.EgressDomainPolicy.Allow = append(run.Spec.EgressDomainPolicy.Allow, "8.8.8.8.")
+	if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "must be a DNS domain") {
+		t.Fatalf("trailing-dot IP literal domain rule accepted: %v", err)
+	}
+	run.Spec.EgressDomainPolicy.Allow = run.Spec.EgressDomainPolicy.Allow[:2]
 	if err := ValidateAgentRunEgressMode(run); err != nil {
 		t.Fatalf("valid strict domain policy rejected: %v", err)
 	}

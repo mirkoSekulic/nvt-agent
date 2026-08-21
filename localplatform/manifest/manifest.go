@@ -642,10 +642,10 @@ func normalizeDomain(value string) (string, bool) {
 	if value == "" || value != strings.TrimSpace(value) || len(value) > 254 || strings.ContainsAny(value, "/\\@?#: \t\r\n%") {
 		return "", false
 	}
+	value = strings.ToLower(strings.TrimSuffix(value, "."))
 	if parsed := net.ParseIP(value); parsed != nil {
 		return "", false
 	}
-	value = strings.ToLower(strings.TrimSuffix(value, "."))
 	if value == "" || len(value) > 253 {
 		return "", false
 	}

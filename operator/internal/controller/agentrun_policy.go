@@ -462,10 +462,13 @@ func validateEgressDomainPolicy(policy *nvtv1alpha1.AgentRunEgressDomainPolicy) 
 }
 
 func normalizeEgressDomain(value string) (string, error) {
-	if value == "" || value != strings.TrimSpace(value) || strings.ContainsAny(value, "/\\@?#: \t\r\n%") || net.ParseIP(value) != nil {
+	if value == "" || value != strings.TrimSpace(value) || strings.ContainsAny(value, "/\\@?#: \t\r\n%") {
 		return "", fmt.Errorf("must be a DNS domain")
 	}
 	value = strings.ToLower(strings.TrimSuffix(value, "."))
+	if net.ParseIP(value) != nil {
+		return "", fmt.Errorf("must be a DNS domain")
+	}
 	if value == "" || len(value) > 253 {
 		return "", fmt.Errorf("has invalid length")
 	}

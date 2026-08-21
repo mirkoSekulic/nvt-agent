@@ -98,6 +98,7 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 		"built-in producer runtime override":         strings.Replace(string(valid), "    prefix: /nvtagent\n", "    prefix: /nvtagent\n    runtimeIdentity: {uid: 1000, gid: 1000}\n", 1),
 		"invalid domain default action":              strings.Replace(string(valid), "        defaultAction: deny", "        defaultAction: block", 1),
 		"IP literal domain rule":                     strings.Replace(string(valid), "        deny: [pastebin.com]", "        deny: [127.0.0.1]", 1),
+		"trailing-dot IP literal domain rule":        strings.Replace(string(valid), "        deny: [pastebin.com]", "        deny: [8.8.8.8.]", 1),
 		"duplicate normalized domain rule":           strings.Replace(string(valid), "GitHub.COM., openai.com", "GitHub.COM., github.com, openai.com", 1),
 	}
 	for name, raw := range cases {
