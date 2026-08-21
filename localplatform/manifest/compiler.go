@@ -186,6 +186,16 @@ func Compile(m Manifest) (Compiled, error) {
 		profile.Tools.Mise = append([]string(nil), profile.Tools.Mise...)
 		profile.Capabilities = append([]string(nil), profile.Capabilities...)
 		profile.Plugins = append([]Plugin(nil), profile.Plugins...)
+		if profile.Egress != nil {
+			egress := *profile.Egress
+			if egress.DomainPolicy != nil {
+				policy := *egress.DomainPolicy
+				policy.Allow = normalizeDomains(policy.Allow)
+				policy.Deny = normalizeDomains(policy.Deny)
+				egress.DomainPolicy = &policy
+			}
+			profile.Egress = &egress
+		}
 		for index := range profile.Plugins {
 			profile.Plugins[index].Config = cloneConfig(profile.Plugins[index].Config)
 			if profile.Plugins[index].Egress != nil {
@@ -319,6 +329,17 @@ func Compile(m Manifest) (Compiled, error) {
 		return a.Name < b.Name
 	})
 	return result, nil
+}
+
+func normalizeDomains(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if normalized, ok := normalizeDomain(value); ok {
+			result = append(result, normalized)
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 
 func cloneBrokerGrants(input []BrokerGrantIntent) []BrokerGrantIntent {

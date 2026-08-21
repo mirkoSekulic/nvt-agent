@@ -64,9 +64,9 @@ YAML
 generate_payload() {
   local variant="$1" output="$2"
   base_generate_payload valid "${output}"
-  python3 - "${variant}" "${output}" <<'PY'
+  python3 - "${variant}" "${output}" "${FIXTURE_HOST}" <<'PY'
 import json, sys
-variant, path = sys.argv[1], sys.argv[2]
+variant, path, fixture_host = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path, encoding="utf-8") as f:
     payload = json.load(f)
 spec = payload["agentRun"]["spec"]
@@ -78,6 +78,12 @@ elif variant == "ambiguous":
     second = dict(spec["broker"]["grants"][0])
     second["provider"] = "static-bearer-alt"
     spec["broker"]["grants"].append(second)
+elif variant == "domain-policy":
+    spec["egressDomainPolicy"] = {
+        "defaultAction": "deny",
+        "allow": [fixture_host.upper() + "."],
+        "deny": ["pastebin.com"],
+    }
 with open(path, "w", encoding="utf-8") as f:
     json.dump(payload, f, separators=(",", ":")); f.write("\n")
 PY
@@ -114,10 +120,12 @@ case_run() {
   submit_valid_admission valid
   submit_valid_admission other
   submit_valid_admission ambiguous
+  submit_valid_admission domain-policy
   local run="${RUN_NAME}-valid"
   wait_for_phase_any "${run}" "${RUN_TIMEOUT_SECONDS}" Running
   wait_for_phase_any "${RUN_NAME}-other" "${RUN_TIMEOUT_SECONDS}" Running
   wait_for_phase_any "${RUN_NAME}-ambiguous" "${RUN_TIMEOUT_SECONDS}" Running
+  wait_for_phase_any "${RUN_NAME}-domain-policy" "${RUN_TIMEOUT_SECONDS}" Running
   wait_for_proxy_ready "${run}"
 
   # Proxy-aware path through captured's explicit listener.
@@ -139,6 +147,19 @@ case_run() {
     curl -sS --fail --max-time 20 "https://${FIXTURE_HOST}/transparent")"
   grep -q '"credential_match":true' <<<"${body}" || die "proxy-unaware request did not carry the exact fixture credential: ${body}"
   grep -q '"placeholder_seen":false' <<<"${body}" || die "placeholder reached the fixture: ${body}"
+
+  # Strict policy is enforced on transparently captured traffic even when the
+  # client has no proxy environment. The allowed mixed-case/trailing-dot rule
+  # reaches its bare fixture domain; an unlisted public TLS name is denied.
+  local policy_run="${RUN_NAME}-domain-policy"
+  wait_for_proxy_ready "${policy_run}"
+  body="$(agent_exec "${policy_run}" env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
+    curl -sS --fail --max-time 20 "https://${FIXTURE_HOST}/domain-policy")"
+  grep -q '"credential_match":true' <<<"${body}" || die "strict policy blocked its allowed injected fixture: ${body}"
+  if agent_exec "${policy_run}" env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
+    openssl s_client -connect example.com:443 -servername example.com -brief </dev/null; then
+    die "proxy-unaware raw TLS client reached an unlisted domain under strict policy"
+  fi
 
   # A raw TCP connect (no HTTP proxy semantics) must traverse captured and
   # egressd. TLS bytes remain opaque for this unmatched public host.

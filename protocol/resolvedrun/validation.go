@@ -456,9 +456,12 @@ func validateBrokerAndEgress(broker Broker, egress Egress) error {
 	if egress.MaxConcurrentTunnels < 0 || egress.MaxConcurrentTunnels > 4096 {
 		return errors.New("egress tunnel limit is invalid")
 	}
+	if err := validateDomainPolicy(egress.DomainPolicy); err != nil {
+		return err
+	}
 	switch egress.Mode {
 	case "direct":
-		if egress.Transport != "" || egress.Enforced || egress.ProxyProvider != "" || egress.PairedEgressRequired || egress.MaxConcurrentTunnels != 0 {
+		if egress.Transport != "" || egress.Enforced || egress.ProxyProvider != "" || egress.PairedEgressRequired || egress.MaxConcurrentTunnels != 0 || egress.DomainPolicy != nil {
 			return errors.New("direct egress contains mediated policy")
 		}
 		for _, grant := range broker.Grants {
@@ -472,7 +475,7 @@ func validateBrokerAndEgress(broker Broker, egress Egress) error {
 		}
 		switch egress.Transport {
 		case "redirect":
-			if egress.ProxyProvider != "" || egress.MaxConcurrentTunnels != 0 {
+			if egress.ProxyProvider != "" || egress.MaxConcurrentTunnels != 0 || egress.DomainPolicy != nil {
 				return errors.New("mediated redirect contains tunnel policy")
 			}
 		case "forward-proxy", "transparent":
@@ -504,6 +507,11 @@ func validateBrokerAndEgress(broker Broker, egress Egress) error {
 			}
 			if isTunnelTransport(egress.Transport) {
 				tunnelRoutes += len(grant.EgressHosts)
+				for _, value := range grant.EgressHosts {
+					if egress.DomainPolicy != nil && !domainPolicyAllows(*egress.DomainPolicy, egressHostName(value)) {
+						return errors.New("mediated injection host is denied by domain policy")
+					}
+				}
 			}
 		}
 		if egress.Transport == "redirect" && headerInjectGrants == 0 {
@@ -516,6 +524,78 @@ func validateBrokerAndEgress(broker Broker, egress Egress) error {
 		return errors.New("egress mode is invalid")
 	}
 	return nil
+}
+
+func validateDomainPolicy(policy *DomainPolicy) error {
+	if policy == nil {
+		return nil
+	}
+	if policy.DefaultAction != "allow" && policy.DefaultAction != "deny" {
+		return errors.New("egress domain policy default action is invalid")
+	}
+	if len(policy.Allow) > maxGrantValues || len(policy.Deny) > maxGrantValues {
+		return errors.New("egress domain policy exceeds its limit")
+	}
+	for _, entries := range [][]string{policy.Allow, policy.Deny} {
+		seen := map[string]bool{}
+		for _, entry := range entries {
+			normalized, ok := normalizedDomainPolicyEntry(entry)
+			if !ok || seen[normalized] {
+				return errors.New("egress domain policy entry is invalid or duplicated")
+			}
+			seen[normalized] = true
+		}
+	}
+	return nil
+}
+
+func normalizedDomainPolicyEntry(value string) (string, bool) {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 254 || strings.ContainsAny(value, "/\\@?#: \t\r\n%") || net.ParseIP(value) != nil {
+		return "", false
+	}
+	value = strings.ToLower(strings.TrimSuffix(value, "."))
+	if value == "" || len(value) > 253 {
+		return "", false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", false
+		}
+		for _, character := range label {
+			if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' {
+				continue
+			}
+			return "", false
+		}
+	}
+	return value, true
+}
+
+func domainPolicyAllows(policy DomainPolicy, host string) bool {
+	normalized, ok := normalizedDomainPolicyEntry(host)
+	if !ok {
+		return policy.DefaultAction == "allow"
+	}
+	for _, rule := range policy.Deny {
+		normalizedRule, _ := normalizedDomainPolicyEntry(rule)
+		if normalized == normalizedRule || strings.HasSuffix(normalized, "."+normalizedRule) {
+			return false
+		}
+	}
+	for _, rule := range policy.Allow {
+		normalizedRule, _ := normalizedDomainPolicyEntry(rule)
+		if normalized == normalizedRule || strings.HasSuffix(normalized, "."+normalizedRule) {
+			return true
+		}
+	}
+	return policy.DefaultAction == "allow"
+}
+
+func egressHostName(value string) string {
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return host
+	}
+	return value
 }
 
 func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repositories []Repository, broker Broker, egress Egress) error {

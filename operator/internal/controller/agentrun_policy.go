@@ -270,6 +270,9 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		return fmt.Errorf("spec.egressEnforcement requires spec.egress mediated, got %q", mode)
 	}
 	transport := AgentRunEgressTransport(agentRun)
+	if err := validateEgressDomainPolicy(agentRun.Spec.EgressDomainPolicy); err != nil {
+		return fmt.Errorf("spec.egressDomainPolicy: %w", err)
+	}
 	if err := validateEgressMaxConcurrentTunnels(agentRun.Spec.EgressMaxConcurrentTunnels); err != nil {
 		return err
 	}
@@ -287,6 +290,11 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 	}
 	if transport != nvtv1alpha1.AgentRunEgressTransportRedirect && (!agentRun.Spec.EgressEnforcement || mode != nvtv1alpha1.AgentRunEgressMediated) {
 		return fmt.Errorf("spec.egressTransport %s requires spec.egress mediated and spec.egressEnforcement", transport)
+	}
+	if agentRun.Spec.EgressDomainPolicy != nil &&
+		(mode != nvtv1alpha1.AgentRunEgressMediated || !agentRun.Spec.EgressEnforcement ||
+			(transport != nvtv1alpha1.AgentRunEgressTransportForwardProxy && transport != nvtv1alpha1.AgentRunEgressTransportTransparent)) {
+		return fmt.Errorf("spec.egressDomainPolicy requires mediated, enforced forward-proxy or transparent egress")
 	}
 	if transport == nvtv1alpha1.AgentRunEgressTransportTransparent && !NetworkPolicyCapable() {
 		return fmt.Errorf("spec.egressTransport transparent requires a NetworkPolicy-capable deployment")
@@ -408,6 +416,9 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 				return fmt.Errorf("forward-proxy host %q is duplicated for broker grant %s", inject.Host, inject.Capability)
 			}
 			claimedBy[key] = true
+			if agentRun.Spec.EgressDomainPolicy != nil && !egressDomainAllowed(*agentRun.Spec.EgressDomainPolicy, inject.Host) {
+				return fmt.Errorf("forward-proxy host %q required by broker grant %s is denied by spec.egressDomainPolicy", inject.Host, inject.Capability)
+			}
 		}
 		return nil
 	}
@@ -418,6 +429,89 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		return fmt.Errorf("egress mediated requires at least one header-inject broker grant with egressHosts")
 	}
 	return nil
+}
+
+func validateEgressDomainPolicy(policy *nvtv1alpha1.AgentRunEgressDomainPolicy) error {
+	if policy == nil {
+		return nil
+	}
+	if policy.DefaultAction != nvtv1alpha1.AgentRunEgressDomainAllow && policy.DefaultAction != nvtv1alpha1.AgentRunEgressDomainDeny {
+		return fmt.Errorf("defaultAction must be allow or deny")
+	}
+	if len(policy.Allow) > 256 || len(policy.Deny) > 256 {
+		return fmt.Errorf("allow and deny must contain at most 256 entries each")
+	}
+	for _, list := range []struct {
+		name    string
+		entries []string
+	}{{"allow", policy.Allow}, {"deny", policy.Deny}} {
+		name, entries := list.name, list.entries
+		seen := map[string]bool{}
+		for index, entry := range entries {
+			normalized, err := normalizeEgressDomain(entry)
+			if err != nil {
+				return fmt.Errorf("%s[%d]: %w", name, index, err)
+			}
+			if seen[normalized] {
+				return fmt.Errorf("%s[%d] duplicates %q after normalization", name, index, normalized)
+			}
+			seen[normalized] = true
+		}
+	}
+	return nil
+}
+
+func normalizeEgressDomain(value string) (string, error) {
+	if value == "" || value != strings.TrimSpace(value) || strings.ContainsAny(value, "/\\@?#: \t\r\n%") || net.ParseIP(value) != nil {
+		return "", fmt.Errorf("must be a DNS domain")
+	}
+	value = strings.ToLower(strings.TrimSuffix(value, "."))
+	if value == "" || len(value) > 253 {
+		return "", fmt.Errorf("has invalid length")
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("has an invalid DNS label")
+		}
+		for _, character := range label {
+			if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' {
+				continue
+			}
+			return "", fmt.Errorf("must be an ASCII DNS domain")
+		}
+	}
+	return value, nil
+}
+
+func egressDomainAllowed(policy nvtv1alpha1.AgentRunEgressDomainPolicy, host string) bool {
+	normalized, err := normalizeEgressDomain(host)
+	if err != nil {
+		return policy.DefaultAction == nvtv1alpha1.AgentRunEgressDomainAllow
+	}
+	for _, rule := range policy.Deny {
+		normalizedRule, _ := normalizeEgressDomain(rule)
+		if normalized == normalizedRule || strings.HasSuffix(normalized, "."+normalizedRule) {
+			return false
+		}
+	}
+	for _, rule := range policy.Allow {
+		normalizedRule, _ := normalizeEgressDomain(rule)
+		if normalized == normalizedRule || strings.HasSuffix(normalized, "."+normalizedRule) {
+			return true
+		}
+	}
+	return policy.DefaultAction == nvtv1alpha1.AgentRunEgressDomainAllow
+}
+
+func normalizeEgressDomains(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized, err := normalizeEgressDomain(value)
+		if err == nil {
+			result = append(result, normalized)
+		}
+	}
+	return result
 }
 
 func validateEgressMaxConcurrentTunnels(value int32) error {

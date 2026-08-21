@@ -83,6 +83,19 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "malformed CONNECT target", http.StatusBadRequest)
 		return
 	}
+	if !p.portAllowed(target.port) {
+		p.writeDecision(target.host, target.port, "deny", "target_not_allowed")
+		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
+		return
+	}
+	if p.Config.DomainPolicy != nil {
+		allowed, policyReason := p.Config.DomainPolicy.Decide(target.host)
+		if !allowed {
+			p.writeDecision(target.host, target.port, "deny", policyReason)
+			http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
+			return
+		}
+	}
 	// A CONNECT to an inject-route host is TLS-terminated and injected; every
 	// other host falls through to the blind-tunnel allowlist.
 	proxy, found, err := p.injectProxy(target.host, capabilityHintFromConnect(r))
@@ -98,8 +111,9 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.serveMITM(r.Context(), w, target, proxy)
 		return
 	}
-	if !p.allowed(target) {
-		p.writeDecision(target.host, target.port, "deny", "target_not_allowed")
+	allowed, policyReason := p.allowed(target)
+	if !allowed {
+		p.writeDecision(target.host, target.port, "deny", policyReason)
 		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
 		return
 	}
@@ -156,11 +170,6 @@ func (p *ForwardProxy) serveMITM(ctx context.Context, w http.ResponseWriter, tar
 	if p.CA == nil {
 		p.writeDecision(target.host, target.port, "deny", "mitm_unconfigured")
 		http.Error(w, "CONNECT unavailable", http.StatusInternalServerError)
-		return
-	}
-	if !p.portAllowed(target.port) {
-		p.writeDecision(target.host, target.port, "deny", "target_not_allowed")
-		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
 		return
 	}
 	releaseTunnel, errorClass := p.acquireTunnel(ctx)
@@ -243,9 +252,18 @@ func (p *ForwardProxy) logf(format string, args ...any) {
 	logger.Printf(format, args...)
 }
 
-func (p *ForwardProxy) allowed(target connectTarget) bool {
+func (p *ForwardProxy) allowed(target connectTarget) (bool, string) {
 	p.init()
-	return (p.Config.AllowUnmatchedHosts || p.allowHosts[target.host]) && p.allowPorts[target.port]
+	if !p.allowPorts[target.port] {
+		return false, "port_denied"
+	}
+	if p.Config.DomainPolicy != nil {
+		return p.Config.DomainPolicy.Decide(target.host)
+	}
+	if p.Config.AllowUnmatchedHosts || p.allowHosts[target.host] {
+		return true, "legacy_host_allow"
+	}
+	return false, "target_not_allowed"
 }
 
 func (p *ForwardProxy) acquireTunnel(ctx context.Context) (func(), string) {
@@ -629,20 +647,7 @@ func normalizeProxyHost(host string) (string, error) {
 	if address, err := netip.ParseAddr(host); err == nil {
 		return address.Unmap().String(), nil
 	}
-	if strings.ContainsAny(host, "/\\@?#: \t\r\n") || strings.Contains(host, "%") {
-		return "", fmt.Errorf("invalid host")
-	}
-	if strings.HasSuffix(host, ".") {
-		return "", fmt.Errorf("trailing dot host is not allowed")
-	}
-	lower := strings.ToLower(host)
-	for _, r := range lower {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '.' {
-			continue
-		}
-		return "", fmt.Errorf("host must be ascii DNS name or IPv4 literal")
-	}
-	return lower, nil
+	return normalizeDomainName(host)
 }
 
 func tunnel(client net.Conn, buffered *bufio.ReadWriter, upstream net.Conn, idleTimeout time.Duration) {

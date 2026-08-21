@@ -75,3 +75,28 @@ func TestForwardProxyInjectRoutesAllowSameHostWithExplicitCapabilities(t *testin
 		t.Fatal("same host with duplicate capability must be rejected")
 	}
 }
+
+func TestLoadForwardProxyDomainPolicyConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	config := `{
+  "broker_url":"https://broker:7347",
+  "routes":[],
+  "forward_proxy":{
+    "listen":"0.0.0.0:8473",
+    "domain_policy":{"default_action":"deny","allow":["OpenAI.COM."],"deny":["pastebin.com"]},
+    "inject_routes":[{"host":"api.openai.com","capability":"runtime","upstream":"api.openai.com:443"}]
+  },
+  "ca":{"serve_addr":"0.0.0.0:8470"}
+}`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ForwardProxy.DomainPolicy == nil || loaded.ForwardProxy.DomainPolicy.DefaultAction != "deny" {
+		t.Fatalf("domain policy not parsed: %#v", loaded.ForwardProxy)
+	}
+}

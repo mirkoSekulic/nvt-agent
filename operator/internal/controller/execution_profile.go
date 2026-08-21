@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -158,6 +159,31 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 			profile.EgressTransport != nvtv1alpha1.AgentRunEgressTransportForwardProxy &&
 			profile.EgressTransport != nvtv1alpha1.AgentRunEgressTransportTransparent {
 			return nil, errInvalidExecutionProfileConfiguration
+		}
+		if err := validateEgressDomainPolicy(profile.EgressDomainPolicy); err != nil {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		if profile.EgressDomainPolicy != nil &&
+			(profile.Egress != nvtv1alpha1.AgentRunEgressMediated || !profile.EgressEnforcement ||
+				(profile.EgressTransport != nvtv1alpha1.AgentRunEgressTransportForwardProxy && profile.EgressTransport != nvtv1alpha1.AgentRunEgressTransportTransparent)) {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		if profile.EgressDomainPolicy != nil && profile.Broker != nil {
+			for _, grant := range AgentRunBrokerGrants(profile.Broker) {
+				materialization := AgentRunGrantMaterialization(grant)
+				if materialization != nvtv1alpha1.AgentRunGrantHeaderInject && materialization != nvtv1alpha1.AgentRunGrantPlaceholderFile {
+					continue
+				}
+				for _, upstream := range grant.EgressHosts {
+					host := upstream
+					if parsed, _, splitErr := net.SplitHostPort(upstream); splitErr == nil {
+						host = parsed
+					}
+					if !egressDomainAllowed(*profile.EgressDomainPolicy, host) {
+						return nil, errInvalidExecutionProfileConfiguration
+					}
+				}
+			}
 		}
 		if err := validateRuntimeCapabilities(profile.Runtime); err != nil {
 			return nil, errInvalidExecutionProfileConfiguration
@@ -585,6 +611,7 @@ func buildProfiledAgentRun(
 			EgressEnforcement:          profile.EgressEnforcement,
 			EgressTransport:            profile.EgressTransport,
 			EgressMaxConcurrentTunnels: profile.EgressMaxConcurrentTunnels,
+			EgressDomainPolicy:         profile.EgressDomainPolicy.DeepCopy(),
 			Workspace:                  *template.Workspace.DeepCopy(),
 			Broker:                     profile.Broker.DeepCopy(),
 			Agent: nvtv1alpha1.AgentRunAgent{

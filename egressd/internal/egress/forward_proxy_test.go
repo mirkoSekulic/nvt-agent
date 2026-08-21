@@ -676,7 +676,6 @@ func TestForwardProxyMalformedConnectTargetsRejected(t *testing.T) {
 		"chatgpt.com:bad",
 		"chatgpt.com:0",
 		"chatgpt.com:443/path",
-		"chatgpt.com.:443",
 	}
 	for _, target := range malformed {
 		t.Run(target, func(t *testing.T) {
@@ -684,6 +683,16 @@ func TestForwardProxyMalformedConnectTargetsRejected(t *testing.T) {
 				t.Fatalf("target %q should be rejected", target)
 			}
 		})
+	}
+}
+
+func TestForwardProxyNormalizesTrailingDot(t *testing.T) {
+	target, err := parseConnectTarget("API.Example.COM.:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.host != "api.example.com" || target.port != 443 {
+		t.Fatalf("normalized target = %#v", target)
 	}
 }
 

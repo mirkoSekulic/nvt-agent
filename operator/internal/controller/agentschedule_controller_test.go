@@ -215,6 +215,15 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if fmt.Sprint(tunnelCapacity["minimum"]) != "1" || fmt.Sprint(tunnelCapacity["maximum"]) != "4096" {
 		t.Fatalf("expected bounded profile tunnel capacity schema, got %#v", tunnelCapacity)
 	}
+	domainPolicy := crdPath(t, profileProperties, "egressDomainPolicy", "properties").(map[string]any)
+	if !reflect.DeepEqual(crdPath(t, domainPolicy, "defaultAction", "enum"), []any{"allow", "deny"}) ||
+		fmt.Sprint(crdPath(t, domainPolicy, "allow", "maxItems")) != "256" ||
+		crdPath(t, domainPolicy, "deny", "x-kubernetes-list-type") != "set" {
+		t.Fatalf("expected bounded profile domain policy schema, got %#v", domainPolicy)
+	}
+	if !hasCRDValidation(validations, "!has(self.egressDomainPolicy) || (self.egress == 'mediated' && self.egressEnforcement && has(self.egressTransport) && self.egressTransport in ['forward-proxy', 'transparent'])", "requires mediated") {
+		t.Fatalf("missing profile domain policy transport CEL: %#v", validations)
+	}
 	if crdPath(t, properties, "profileSelection", "properties", "onNoMatch", "type") != "string" {
 		t.Fatalf("expected profileSelection.onNoMatch schema, got %#v", properties["profileSelection"])
 	}

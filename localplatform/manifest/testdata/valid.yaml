@@ -59,6 +59,11 @@ profiles:
     accounts: [github, codex]
     credentialProviders: [azure]
     defaultCredentialProvider: github
+    egress:
+      domainPolicy:
+        defaultAction: deny
+        allow: [GitHub.COM., openai.com, chatgpt.com, dev.azure.com]
+        deny: [pastebin.com]
     tools:
       packages: [jq, git]
       mise: [go@latest]

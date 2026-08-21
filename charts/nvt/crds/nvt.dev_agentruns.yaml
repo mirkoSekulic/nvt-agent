@@ -39,6 +39,8 @@ spec:
                   message: spec.egressForwardProxy is removed; use spec.egressTransport
                 - rule: "!has(self.egressMaxConcurrentTunnels) || (has(self.egressTransport) && self.egressTransport in ['forward-proxy', 'transparent'])"
                   message: spec.egressMaxConcurrentTunnels requires spec.egressTransport forward-proxy or transparent
+                - rule: "!has(self.egressDomainPolicy) || (self.egress == 'mediated' && self.egressEnforcement && has(self.egressTransport) && self.egressTransport in ['forward-proxy', 'transparent'])"
+                  message: spec.egressDomainPolicy requires mediated, enforced forward-proxy or transparent egress
                 - rule: "has(self.profileProvenance) == has(oldSelf.profileProvenance) && (!has(self.profileProvenance) || self.profileProvenance == oldSelf.profileProvenance)"
                   message: spec.profileProvenance is immutable
                 - rule: "self.workspace == oldSelf.workspace"
@@ -49,6 +51,8 @@ spec:
                   message: spec.egressEnforcement is immutable
                 - rule: "has(self.egressTransport) == has(oldSelf.egressTransport) && (!has(self.egressTransport) || self.egressTransport == oldSelf.egressTransport)"
                   message: spec.egressTransport is immutable
+                - rule: "has(self.egressDomainPolicy) == has(oldSelf.egressDomainPolicy) && (!has(self.egressDomainPolicy) || self.egressDomainPolicy == oldSelf.egressDomainPolicy)"
+                  message: spec.egressDomainPolicy is immutable
               properties:
                 execution:
                   description: Deprecated tombstone used only to fail closed for AgentRuns created by the removed external execution stack.
@@ -272,6 +276,32 @@ spec:
                   format: int32
                   minimum: 1
                   maximum: 4096
+                egressDomainPolicy:
+                  type: object
+                  required:
+                    - defaultAction
+                  properties:
+                    defaultAction:
+                      type: string
+                      enum:
+                        - allow
+                        - deny
+                    allow:
+                      type: array
+                      maxItems: 256
+                      x-kubernetes-list-type: set
+                      items:
+                        type: string
+                        minLength: 1
+                        maxLength: 254
+                    deny:
+                      type: array
+                      maxItems: 256
+                      x-kubernetes-list-type: set
+                      items:
+                        type: string
+                        minLength: 1
+                        maxLength: 254
                 workspace:
                   type: object
                   x-kubernetes-validations:

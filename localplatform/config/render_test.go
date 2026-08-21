@@ -145,6 +145,10 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	if trusted.Profiles[0].Runtime.Model != "gpt-5.6-sol" || trusted.Profiles[0].Runtime.Effort != "high" {
 		t.Fatalf("runtime model and effort policy missing: %#v", trusted.Profiles[0].Runtime)
 	}
+	if policy := trusted.Profiles[0].Egress.DomainPolicy; policy == nil || policy.DefaultAction != "deny" ||
+		strings.Join(policy.Allow, ",") != "chatgpt.com,dev.azure.com,github.com,openai.com" || strings.Join(policy.Deny, ",") != "pastebin.com" {
+		t.Fatalf("normalized profile domain policy missing: %#v", policy)
+	}
 	githubGrantFound, codexGrantFound, azureGrantFound := false, false, false
 	for _, grant := range trusted.Profiles[0].Broker.Grants {
 		if grant.Provider == "codex" {
@@ -375,6 +379,7 @@ func TestGenericStaticGitProviderRendersSelfHostedWithoutSecretDisclosure(t *tes
 	decoded.BrokerProviders["studio"] = manifest.BrokerProvider{Plugin: "token", Config: map[string]any{"label": "studio-provider", "injection-hosts": []any{"altinn.studio"}, "injection-git": true, "injection-basic-username": "oauth2", "target-mode": "literal"}, Secrets: map[string]string{"token-file": "studio-token"}, Mediation: manifest.BrokerProviderMediation{Hosts: []string{"altinn.studio"}, Materialization: "header-inject", Git: true, Username: "oauth2", TargetMode: "literal"}}
 	profile := decoded.Profiles["development"]
 	profile.CredentialProviders = append(profile.CredentialProviders, "studio")
+	profile.Egress.DomainPolicy.Allow = append(profile.Egress.DomainPolicy.Allow, "altinn.studio")
 	decoded.Profiles["development"] = profile
 	decoded.Repositories["studio"] = manifest.Repository{URL: "https://altinn.studio/repos/digdir/oed.git", CheckoutTarget: "altinn.studio/repos/digdir/oed", BrokerRepository: "altinn.studio/repos/digdir/oed", Path: "studio", CredentialProvider: "studio"}
 	decoded.Workstations[0].Repositories = append(decoded.Workstations[0].Repositories, "studio")

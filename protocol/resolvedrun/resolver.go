@@ -190,7 +190,7 @@ func (resolver *Resolver) Resolve(authorization AuthorizationContext, request Lo
 		AgentConfig: clone(agentConfig), Prompt: request.Prompt,
 		Repositories: clone(workflow.Repositories), CredentialProviders: clone(profile.CredentialProviders),
 		DefaultCredentialProvider: profile.DefaultCredentialProvider,
-		Broker:                    clone(profile.Broker), Egress: profile.Egress,
+		Broker:                    clone(profile.Broker), Egress: clone(profile.Egress),
 		WorkspaceInstructions: WorkspaceInstructions{Profile: profile.WorkspaceInstructions, Workflow: workflow.WorkspaceInstructions},
 		Resources:             resources, Persistence: retention.Persistence, Retention: retention.Name,
 		TTL: retention.TTL, Lifecycle: lifecycle, Execution: backend,

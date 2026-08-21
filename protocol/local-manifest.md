@@ -54,6 +54,26 @@ default. Codex accepts `minimal`, `low`, `medium`, `high`, or `xhigh`; Claude
 accepts `low`, `medium`, `high`, `xhigh`, or `max`. Shell profiles reject both
 fields.
 
+Profiles may optionally own a generic domain policy for their mediated,
+transparent egress:
+
+```yaml
+profiles:
+  development:
+    egress:
+      domainPolicy:
+        defaultAction: deny
+        allow: [github.com, registry.npmjs.org]
+        deny: [pastebin.com]
+```
+
+Domains are normalized to lower case without a trailing dot during compilation.
+A rule matches itself and label-boundary subdomains, and deny wins overlaps.
+The compiler rejects malformed, duplicate-normalized, or IP-literal entries;
+resolved-run validation also rejects a policy that blocks a required injection
+host. Omitting `domainPolicy` retains unrestricted unmatched-public-host
+compatibility on the configured ports.
+
 Profile plugins use a string shorthand for an ordinary builtin plugin, or a
 structured builtin policy with `name`, optional `when`, `restart`, bounded
 public `config`, and `egress.provider`. The egress provider names one account

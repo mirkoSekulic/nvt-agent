@@ -789,10 +789,16 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		MaxRequests           int    `json:"max_requests,omitempty"`
 		RequireCapabilityHint bool   `json:"require_capability_hint,omitempty"`
 	}
+	type egressdDomainPolicy struct {
+		DefaultAction string   `json:"default_action"`
+		Allow         []string `json:"allow"`
+		Deny          []string `json:"deny"`
+	}
 	type egressdForwardProxy struct {
 		Listen               string                     `json:"listen"`
 		TransparentMode      bool                       `json:"transparent_mode,omitempty"`
 		AllowUnmatchedHosts  bool                       `json:"allow_unmatched_hosts"`
+		DomainPolicy         *egressdDomainPolicy       `json:"domain_policy,omitempty"`
 		AllowPorts           []int                      `json:"allow_ports"`
 		MaxConcurrentTunnels int32                      `json:"max_concurrent_tunnels,omitempty"`
 		DenyCIDRs            []string                   `json:"deny_cidrs,omitempty"`
@@ -885,6 +891,14 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 			MaxConcurrentTunnels: agentRun.Spec.EgressMaxConcurrentTunnels,
 			DenyCIDRs:            denyCIDRs,
 			InjectRoutes:         fpRoutes,
+		}
+		if policy := agentRun.Spec.EgressDomainPolicy; policy != nil {
+			config.ForwardProxy.AllowUnmatchedHosts = false
+			config.ForwardProxy.DomainPolicy = &egressdDomainPolicy{
+				DefaultAction: string(policy.DefaultAction),
+				Allow:         normalizeEgressDomains(policy.Allow),
+				Deny:          normalizeEgressDomains(policy.Deny),
+			}
 		}
 	}
 	if brokerCADistributed() {

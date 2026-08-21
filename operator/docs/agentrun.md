@@ -226,6 +226,10 @@ egress: mediated
 egressEnforcement: true
 egressTransport: transparent
 egressMaxConcurrentTunnels: 512 # optional; default 256
+egressDomainPolicy:             # optional; omission preserves compatibility
+  defaultAction: deny
+  allow: [github.com, registry.npmjs.org]
+  deny: [pastebin.com]
 ```
 
 - `egressEnforcement` requests a CNI-enforced guarantee that workload egress
@@ -237,6 +241,11 @@ egressMaxConcurrentTunnels: 512 # optional; default 256
   for those proxy transports (1–4096). Omit it for the 256-tunnel default;
   egressd applies bounded burst queueing rather than an unbounded backlog.
 - `egressAllowInsecureBroker` permits local plaintext broker traffic only.
+- `egressDomainPolicy` is an immutable snapshot of the administrator-owned
+  execution-profile policy and is supported by enforced forward-proxy and
+  transparent transports. Rules match the named domain and its subdomains,
+  deny wins, and strict `defaultAction: deny` rejects unavailable names and IP
+  literals. An allowed domain does not authorize credential injection.
 
 Pre-1.0 migration: replace `egressForwardProxy: true` with
 `egressTransport: forward-proxy`. Remove `egressForwardProxy: false` or use
