@@ -415,6 +415,8 @@ func (a *Authenticator) validCallbackIssuer(query url.Values) bool {
 	expected := a.cfg.Auth.OAuth2.Issuer
 	if a.cfg.Auth.Mode == authModeOIDC {
 		expected = a.cfg.Auth.OIDC.IssuerURL
+	} else if a.cfg.Auth.OAuth2.AuthorizationResponseIssuer != "" {
+		expected = a.cfg.Auth.OAuth2.AuthorizationResponseIssuer
 	}
 	return values[0] == expected
 }

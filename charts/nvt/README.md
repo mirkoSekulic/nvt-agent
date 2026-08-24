@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.73`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.74`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.73 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.74 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.73 --namespace nvt --create-namespace
+  --version 0.8.74 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -637,6 +637,12 @@ assertion keys come from existing Secret file mounts visible only to the portal,
 never Helm values or runner environment. Public template/adapter mappings must
 match enabled broker credential templates. Dynamic mode is mutually exclusive
 with static slots and renders no Secret-patch Role or ServiceAccount token.
+
+For generic OAuth2 providers that return an RFC 9207 `iss` callback parameter
+different from the stable principal namespace, set
+`credentialPortal.auth.oauth2.authorizationResponseIssuer`. For GitHub, keep
+`issuer: https://github.com` and set the response issuer to
+`https://github.com/login/oauth`; existing principal ownership remains stable.
 
 The browser cannot choose provider plugins, commands, paths, provider IDs,
 Secrets, profiles, grants, capabilities, runtime, or egress policy. A template

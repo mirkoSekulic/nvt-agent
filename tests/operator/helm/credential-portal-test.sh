@@ -24,7 +24,7 @@ if grep -Eq 'verbs:.*(get|list|create|delete)' "${PORTAL_ROLE}"; then
 fi
 grep -Fq 'resourceNames:' "${RENDER}"
 grep -Fq -- '- "nvt-portal-seed"' "${RENDER}"
-grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.73"' "${RENDER}"
+grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.74"' "${RENDER}"
 grep -Fq -- '--credential-portal-url=/agents/credentials' "${RENDER}"
 grep -Fq 'readOnlyRootFilesystem: true' "${RENDER}"
 grep -Fq 'automountServiceAccountToken: false' "${RENDER}"
@@ -228,6 +228,7 @@ helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-p
   --set-string credentialPortal.auth.mode=oauth2 \
   --set-string credentialPortal.auth.oauth2.credentials.existingSecret=nvt-portal-oauth2 \
   --set-string credentialPortal.auth.oauth2.issuer=https://identity.example.test \
+  --set-string credentialPortal.auth.oauth2.authorizationResponseIssuer=https://identity.example.test/oauth \
   --set-string credentialPortal.auth.oauth2.authorizationURL=https://identity.example.test/authorize \
   --set-string credentialPortal.auth.oauth2.tokenURL=https://identity.example.test/token \
   --set-string credentialPortal.auth.oauth2.identity.endpoint=https://api.identity.example.test/user \
@@ -237,6 +238,7 @@ helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-p
 grep -Fq 'name: NVT_CREDENTIAL_PORTAL_CLIENT_ID' "${OAUTH_RENDER}"
 grep -Fq 'name: "nvt-portal-oauth2"' "${OAUTH_RENDER}"
 grep -Fq '"mode": "oauth2"' "${OAUTH_RENDER}"
+grep -Fq '"authorizationResponseIssuer": "https://identity.example.test/oauth"' "${OAUTH_RENDER}"
 
 for forbidden in access-token refresh-token authorization-code credential-value; do
   if grep -Fq "${forbidden}" "${RENDER}"; then

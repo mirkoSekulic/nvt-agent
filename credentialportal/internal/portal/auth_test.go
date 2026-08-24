@@ -472,6 +472,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Auth.OAuth2.AuthorizationURL = provider.URL + "/authorize"
+	cfg.Auth.OAuth2.AuthorizationResponseIssuer = provider.URL + "/oauth"
 	cfg.Auth.OAuth2.TokenURL = provider.URL + testTokenPath
 	cfg.Auth.OAuth2.IdentityEndpoint = provider.URL + "/identity"
 	cfg.Auth.OAuth2.AllowedHosts = []string{providerURL.Hostname()}
@@ -519,7 +520,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	callbackURL := "https://portal.example/agents/credentials/oauth2/callback?state=" + url.QueryEscape(
 		location.Query().Get("state"),
 	) + "&code=one-time-code&iss=" + url.QueryEscape(
-		cfg.Auth.OAuth2.Issuer,
+		cfg.Auth.OAuth2.AuthorizationResponseIssuer,
 	) + "&session_state=provider-session&slot=bob"
 	callbackRequest := httptest.NewRequestWithContext(t.Context(), http.MethodGet, callbackURL, nil)
 	callbackRequest.AddCookie(loginCookies[0])

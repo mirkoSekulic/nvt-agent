@@ -148,16 +148,17 @@ type OIDCConfig struct {
 }
 
 type OAuth2Config struct {
-	Issuer           string   `json:"issuer"`
-	AuthorizationURL string   `json:"authorizationURL"`
-	TokenURL         string   `json:"tokenURL"`
-	CallbackPath     string   `json:"callbackPath"`
-	IdentityEndpoint string   `json:"identityEndpoint"`
-	SubjectPath      string   `json:"subjectPath"`
-	DisplayNamePath  string   `json:"displayNamePath"`
-	ClientAuthMethod string   `json:"clientAuthMethod"`
-	Scopes           []string `json:"scopes"`
-	AllowedHosts     []string `json:"allowedHosts"`
+	Issuer                      string   `json:"issuer"`
+	AuthorizationResponseIssuer string   `json:"authorizationResponseIssuer"`
+	AuthorizationURL            string   `json:"authorizationURL"`
+	TokenURL                    string   `json:"tokenURL"`
+	CallbackPath                string   `json:"callbackPath"`
+	IdentityEndpoint            string   `json:"identityEndpoint"`
+	SubjectPath                 string   `json:"subjectPath"`
+	DisplayNamePath             string   `json:"displayNamePath"`
+	ClientAuthMethod            string   `json:"clientAuthMethod"`
+	Scopes                      []string `json:"scopes"`
+	AllowedHosts                []string `json:"allowedHosts"`
 }
 
 type Slot struct {
@@ -299,6 +300,10 @@ func (c *Config) Validate() error {
 			!absoluteHTTPS(c.Auth.OAuth2.IdentityEndpoint) ||
 			c.Auth.OAuth2.SubjectPath == "" {
 			return fmt.Errorf("%w: OAuth2 issuer, endpoints, and subjectPath are required", errInvalidConfig)
+		}
+		if c.Auth.OAuth2.AuthorizationResponseIssuer != "" &&
+			!absoluteHTTPS(c.Auth.OAuth2.AuthorizationResponseIssuer) {
+			return fmt.Errorf("%w: OAuth2 authorizationResponseIssuer must be an absolute HTTPS URL", errInvalidConfig)
 		}
 		identityURL, parseErr := url.Parse(c.Auth.OAuth2.IdentityEndpoint)
 		if parseErr != nil {

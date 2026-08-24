@@ -83,6 +83,18 @@ func TestConfigValidatesOIDCEligibilityClaimSource(t *testing.T) {
 	}
 }
 
+func TestConfigValidatesOAuth2AuthorizationResponseIssuer(t *testing.T) {
+	cfg := testConfig()
+	cfg.Auth.OAuth2.AuthorizationResponseIssuer = "https://identity.example.test/oauth"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid authorization response issuer rejected: %v", err)
+	}
+	cfg.Auth.OAuth2.AuthorizationResponseIssuer = "http://identity.example.test/oauth"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("insecure authorization response issuer accepted")
+	}
+}
+
 func TestPortalEligibilityRejectsOwnerFieldEvenWhenFalse(t *testing.T) {
 	cfg := testConfig()
 	cfg.Auth.Eligibility = &eligibility.Policy{Rules: []eligibility.Rule{{
