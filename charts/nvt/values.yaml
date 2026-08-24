@@ -302,6 +302,9 @@ credentialPortal:
         clientIDKey: client-id
         clientSecretKey: client-secret
       issuer: ""
+      # Optional RFC 9207 callback `iss` value when it differs from the stable
+      # principal issuer namespace above.
+      authorizationResponseIssuer: ""
       authorizationURL: ""
       tokenURL: ""
       scopes: []

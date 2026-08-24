@@ -638,6 +638,12 @@ never Helm values or runner environment. Public template/adapter mappings must
 match enabled broker credential templates. Dynamic mode is mutually exclusive
 with static slots and renders no Secret-patch Role or ServiceAccount token.
 
+For generic OAuth2 providers that return an RFC 9207 `iss` callback parameter
+different from the stable principal namespace, set
+`credentialPortal.auth.oauth2.authorizationResponseIssuer`. For GitHub, keep
+`issuer: https://github.com` and set the response issuer to
+`https://github.com/login/oauth`; existing principal ownership remains stable.
+
 The browser cannot choose provider plugins, commands, paths, provider IDs,
 Secrets, profiles, grants, capabilities, runtime, or egress policy. A template
 switch remains locked unless separately enabled operator coordination proves
