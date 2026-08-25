@@ -165,6 +165,46 @@ func TestConfiguredWorkstationsBootstrapIdempotentlyAndRejectDrift(t *testing.T)
 	}
 }
 
+func TestConfiguredWorkstationRestartsFromTerminalState(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
+	path := filepath.Join(t.TempDir(), "local-controller.yaml")
+	if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := LoadScheduler(path, store)
+	if err != nil || scheduler.BootstrapWorkstations(context.Background()) != nil {
+		t.Fatalf("bootstrap workstation: %v", err)
+	}
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	run, err := store.Get(context.Background(), "nvt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconcileToRunning(t, reconciler, store, run.RunID)
+	if _, err := store.Cancel(context.Background(), run.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.Get(context.Background(), run.RunID)
+	if err != nil || failed.State != StateFailed {
+		t.Fatalf("terminal workstation = %#v, %v", failed, err)
+	}
+
+	if err := scheduler.BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatalf("restart workstation: %v", err)
+	}
+	restarted, err := store.Get(context.Background(), run.RunID)
+	if err != nil || restarted.State != StatePending || restarted.LastReason != "workstation-restart-requested" || restarted.TerminalExpiresAt != nil {
+		t.Fatalf("restarted workstation = %#v, %v", restarted, err)
+	}
+}
+
 func TestPersistentWorkstationDesiredConfigurationRollsOutAtomically(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)

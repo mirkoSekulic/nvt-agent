@@ -435,6 +435,7 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 	newIndexes := make([]int, 0, len(prepared))
 	updateIndexes := make([]int, 0, len(prepared))
 	cancelIndexes := make([]int, 0, len(prepared))
+	restartIndexes := make([]int, 0, len(prepared))
 	for index, candidate := range prepared {
 		existing, found, queryErr := queryByIdempotency(ctx, tx, candidate.input.IdempotencyKey)
 		if queryErr != nil {
@@ -467,6 +468,8 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 			}
 		} else if len(existing.pendingSnapshot) != 0 {
 			cancelIndexes = append(cancelIndexes, index)
+		} else if reclaimCleanupCapacity && existing.view.State.terminal() {
+			restartIndexes = append(restartIndexes, index)
 		}
 		results[index] = CreateResult{Run: existing.view, Created: false}
 	}
@@ -496,7 +499,7 @@ AND state IN ('pending','preparing','running','stopping')`, group, group).Scan(&
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM local_runs WHERE deleted_at IS NULL AND state IN `+activeStates).Scan(&active); err != nil {
 		return nil, ErrStoreUnavailable
 	}
-	if active+len(newIndexes) > store.maxActiveRuns {
+	if active+len(newIndexes)+len(restartIndexes) > store.maxActiveRuns {
 		return nil, ErrCapacityExceeded
 	}
 	for _, index := range newIndexes {
@@ -538,6 +541,19 @@ run_id,idempotency_key,active_group,request_digest,snapshot,snapshot_digest,owne
 	for _, index := range cancelIndexes {
 		candidate := prepared[index]
 		result, updateErr := tx.ExecContext(ctx, `UPDATE local_runs SET pending_snapshot=snapshot,pending_snapshot_digest=snapshot_digest,state='preparing',revision=revision+1,updated_at=?,last_reason='configuration-rollback-requested',reconcile_owner=NULL,reconcile_until=NULL WHERE idempotency_key=? AND pending_snapshot IS NOT NULL`,
+			formatTimestamp(now), candidate.input.IdempotencyKey)
+		if updateErr != nil || rowsAffected(result) != 1 {
+			return nil, ErrStoreUnavailable
+		}
+		updated, found, queryErr := queryByIdempotency(ctx, tx, candidate.input.IdempotencyKey)
+		if queryErr != nil || !found {
+			return nil, ErrStoreUnavailable
+		}
+		results[index] = CreateResult{Run: updated.view, Created: false}
+	}
+	for _, index := range restartIndexes {
+		candidate := prepared[index]
+		result, updateErr := tx.ExecContext(ctx, `UPDATE local_runs SET state='pending',revision=revision+1,updated_at=?,terminal_expires_at=NULL,reconcile_owner=NULL,reconcile_until=NULL,last_reason='workstation-restart-requested',terminal_target='' WHERE idempotency_key=? AND deleted_at IS NULL AND state IN ('completed','failed')`,
 			formatTimestamp(now), candidate.input.IdempotencyKey)
 		if updateErr != nil || rowsAffected(result) != 1 {
 			return nil, ErrStoreUnavailable

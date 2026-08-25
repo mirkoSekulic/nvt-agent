@@ -307,7 +307,7 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		if err != nil {
 			return controller.BackendObservation{}, errors.New("egress configuration unavailable")
 		}
-		if err := backend.seedVolume(operationContext, names.egressPrivate, map[string]seedFile{
+		if err := backend.seedManagedFiles(operationContext, names.egressPrivate, map[string]seedFile{
 			"egressd.json": {content: egressConfig, mode: 0o600}, "broker-token": {content: []byte(tokens.egress), mode: 0o400},
 		}, labels); err != nil {
 			return controller.BackendObservation{}, controller.ErrBackendRetryable
@@ -850,10 +850,34 @@ type seedFile struct {
 }
 
 func (backend *Backend) seedVolume(ctx context.Context, volume string, files map[string]seedFile, labels ownedLabels) error {
+	return backend.seedVolumeWithCleanup(ctx, volume, files, labels, []string{"find /seed -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +"})
+}
+
+// seedManagedFiles replaces only controller-owned files. The same private
+// volume also holds the durable egress CA key, which must survive controller
+// restarts and configuration reconciliation.
+func (backend *Backend) seedManagedFiles(ctx context.Context, volume string, files map[string]seedFile, labels ownedLabels) error {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		if name == "" || filepath.Base(name) != name || strings.Contains(name, "..") {
+			return errors.New("invalid seed path")
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	cleanup := []string{"rm -f -- \"$@\"", "nvt-seed-managed"}
+	for _, name := range names {
+		cleanup = append(cleanup, "/seed/"+name)
+	}
+	return backend.seedVolumeWithCleanup(ctx, volume, files, labels, cleanup)
+}
+
+func (backend *Backend) seedVolumeWithCleanup(ctx context.Context, volume string, files map[string]seedFile, labels ownedLabels, cleanup []string) error {
 	arguments := []string{"create", "--entrypoint", "/bin/sh", "-v", volume + ":/seed"}
 	arguments = append(arguments, labelArguments(labels)...)
 	arguments = append(arguments, "--label", seedHelperLabel+"="+seedHelperValue)
-	arguments = append(arguments, backend.config.SeedImage, "-c", "find /seed -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +")
+	arguments = append(arguments, backend.config.SeedImage, "-c")
+	arguments = append(arguments, cleanup...)
 	created, err := backend.docker.Run(ctx, nil, arguments...)
 	if err != nil {
 		return err
