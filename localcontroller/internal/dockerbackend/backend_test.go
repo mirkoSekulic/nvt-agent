@@ -416,6 +416,37 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 	}
 }
 
+func TestMediatedSeedPreservesDurableCAState(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("d", 64)}
+	if observation, err := backend.Ensure(context.Background(), desired); err != nil || !observation.Ready {
+		t.Fatalf("ensure = %#v %v", observation, err)
+	}
+
+	names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
+	found := false
+	for _, command := range docker.commands {
+		if len(command) == 0 || command[0] != "create" || !contains(command, names.egressPrivate+":/seed") {
+			continue
+		}
+		found = true
+		joined := strings.Join(command, " ")
+		for _, required := range []string{`rm -f -- "$@"`, "/seed/broker-token", "/seed/egressd.json"} {
+			if !strings.Contains(joined, required) {
+				t.Fatalf("managed egress seed omitted %q: %v", required, command)
+			}
+		}
+		for _, forbidden := range []string{"find /seed", "/seed/ca.key", "/seed/ca.key.rotation"} {
+			if strings.Contains(joined, forbidden) {
+				t.Fatalf("managed egress seed can remove durable CA state %q: %v", forbidden, command)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("managed egress seed helper was not created")
+	}
+}
+
 func TestSeedHelperIdentityIsVerified(t *testing.T) {
 	backend, docker, run, _ := testBackend(t)
 	labels := ownedLabels{Owner: backend.config.Owner, RunID: run.RunID, Digest: strings.Repeat("a", 64)}
