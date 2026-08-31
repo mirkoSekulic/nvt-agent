@@ -165,3 +165,7 @@ Repository contribution and test guidance is in [AGENTS.md](AGENTS.md).
 ## Acknowledgements
 
 Thanks to [agentdp](https://github.com/martinothamar/agentdp) for the inspiration.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
