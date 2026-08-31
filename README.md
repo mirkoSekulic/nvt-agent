@@ -2,14 +2,14 @@
 
 <img src="assets/branding/nvt-agent-mark-512.png" alt="NVT Agent feather and sun mark" width="112">
 
-`nvt-agent` runs coding agents in isolated, reproducible environments. It works
-locally with Docker Compose and in Kubernetes through an operator.
+`nvt-agent` runs coding agents in isolated, reproducible environments. It uses
+Docker Compose for local development and a Kubernetes operator for production.
 
-Each agent gets a workspace, a terminal coding CLI, optional code-server access,
-runtime plugins, and its own Docker daemon. Codex and Claude Code are supported,
-but the runtime contract is CLI-agnostic.
+Each agent receives a workspace, a terminal coding CLI, optional code-server
+access, runtime plugins, and its own Docker daemon. Codex and Claude Code are
+supported, while the runtime contract remains CLI-agnostic.
 
-## How It Fits Together
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -36,23 +36,22 @@ flowchart LR
     B --> E
 ```
 
-The components have deliberately narrow jobs:
-
 | Component | Responsibility |
 | --- | --- |
 | Runtime | Starts the coding CLI, workspace services, and plugins |
 | `agentd` | Queues prompts, interacts with the terminal session, and records events |
-| Operator | Creates and reconciles agent workloads in Kubernetes |
+| Operator | Reconciles agent workloads in Kubernetes |
 | Broker | Owns credentials, policy, refresh, and audit |
-| `egressd` | Applies broker-approved credentials at the network edge |
-| Gateway | Lists running agents and routes browser sessions |
-| Producers | Turn external work, such as GitHub comments, into agent runs |
+| `egressd` | Applies approved credentials at the network boundary |
+| Gateway | Lists agents and routes browser sessions |
+| Producers | Turn external work into agent runs |
 
-## Mediated Credentials
+## Mediated credentials
 
-In mediated mode, the agent receives placeholders rather than real provider
-credentials. Network traffic crosses a trusted egress boundary where the broker
-authorizes the request and `egressd` injects the credential.
+Mediated mode keeps real provider credentials outside the agent. File-based
+tools receive inert placeholders; other requests can leave the agent without a
+credential. Traffic passes through a trusted egress boundary, where `egressd`
+asks the broker what may be injected for the selected provider and destination.
 
 ```mermaid
 sequenceDiagram
@@ -62,25 +61,20 @@ sequenceDiagram
     participant Broker as Broker
     participant API as External API
 
-    Agent->>Capture: Request with inert placeholder
+    Agent->>Capture: Ordinary or placeholder request
     Capture->>Egress: Captured outbound request
-    Egress->>Broker: Provider, agent, host, method, path
-    Broker-->>Egress: Approved headers and expiry
-    Egress->>API: TLS request with real credential
+    Egress->>Broker: Agent, provider, destination, operation
+    Broker-->>Egress: Approved credential material
+    Egress->>API: Request with injected credential
     API-->>Egress: Response
     Egress-->>Agent: Response without credential material
 ```
 
-The broker is the only long-lived credential owner. It refreshes OAuth tokens,
-supports scoped GitHub App and token providers, records audit events, and can
-revoke grants while a run is active.
+Direct mode remains available for local development and integrations that are
+not mediated. Kubernetes deployments can enforce capture with NetworkPolicy
+and use a hardened `RuntimeClass`, including Kata Containers.
 
-Mediation is optional. Direct mode remains available for local development and
-tools that have not been moved behind broker-backed providers. Kubernetes can
-add NetworkPolicy enforcement and a hardened `RuntimeClass`, including Kata
-Containers.
-
-## Local Quick Start
+## Run locally
 
 Requirements: Docker with Compose, Make, and a browser.
 
@@ -89,52 +83,33 @@ cp nvt.local.example.yaml nvt.local.yaml
 make local-images local-init local-up
 ```
 
-Open:
+Open `http://nvt.agent.localhost:4090`.
 
-```text
-http://nvt.agent.localhost:4090
-```
+The local manifest defines profiles, repositories, workstations, workflows,
+accounts, broker providers, and producers. Secret inputs stay in the ignored
+`.nvt-local/secrets/` directory. Codex and Claude OAuth accounts are enrolled
+through **Manage credentials** in the gateway.
 
-`nvt.local.yaml` is the only local configuration entry point. It defines
-profiles, repositories, retention policies, persistent workstations, workflows,
-accounts, routes, broker grants, and producers. Secret files are referenced beneath the ignored
-`.nvt-local/secrets/` directory; Codex and Claude OAuth accounts are enrolled
-through the local portal. See [Native local workstations](docs/local-development-agent.md).
+See [Local development](docs/local-development-agent.md) for lifecycle and
+configuration details.
 
-## Kubernetes
+## Deploy to Kubernetes
 
-The Helm chart installs the operator, broker, CRDs, and optional gateway. A
-producer or another trusted client submits work to an `AgentSchedule`; the
-operator creates an `AgentRun` and reconciles its Pods, Services, policy, status,
-and cleanup.
+The Helm chart installs the CRDs, operator, broker, and optional gateway,
+credential portal, and GitHub comments producer. A trusted producer submits
+work to an `AgentSchedule`; the operator creates an `AgentRun` and reconciles
+its Pods, storage, Services, routes, policy, status, and cleanup.
 
-```mermaid
-flowchart TD
-    S[AgentSchedule] --> O[Operator admission]
-    O --> R[AgentRun CR]
-    R --> AP[Agent Pod]
-    R --> EP[Trusted egress service]
-    R --> NP[NetworkPolicies]
-    R --> SV[Services and gateway route]
-    AP --> EP
-    EP --> B[Broker]
-    EP --> NET[Approved external destinations]
-```
+See the [Helm chart guide](charts/nvt/README.md) for installation and production
+configuration.
 
-The local Compose backend is intended for development. Kubernetes is the
-production lifecycle and isolation model.
-
-## Extensibility
+## Extend nvt
 
 Runtime plugins are executables with small configuration contracts. They can
 check out repositories, expose tools, react to events, publish lifecycle
-signals, or integrate with external systems. Exported tools run inside the
-untrusted agent container, so secret-bearing operations should use broker-backed
-providers.
-
-Operator extensions are a separate concern: they influence scheduling,
-placement, provisioning, routing, and policy rather than behavior inside an
-agent session.
+signals, or integrate with external systems. Secret-bearing operations should
+use broker-backed providers because exported tools run in the untrusted agent
+container.
 
 See [Runtime plugins](runtime/plugins/README.md) and the contracts under
 [`protocol/`](protocol/).
@@ -142,29 +117,11 @@ See [Runtime plugins](runtime/plugins/README.md) and the contracts under
 ## Documentation
 
 - [Documentation map](docs/README.md)
-- [Local development agent](docs/local-development-agent.md)
-- [Codex authentication](docs/codex-auth.md)
-- [Claude authentication](docs/claude-auth.md)
-- [Transparent egress architecture](docs/transparent-egress-architecture.md)
-- [Local GitHub producer](docs/local-kind-github-producer.md)
-- [Helm charts and versioning](charts/README.md)
-- [`agentd` protocol](protocol/agentd.md)
+- [Transparent mediated egress](docs/transparent-egress-architecture.md)
+- [AgentRun API](operator/docs/agentrun.md)
+- [AgentSchedule API](operator/docs/agentschedule.md)
 - [Broker protocol](protocol/broker.md)
-- [Local controller protocol](protocol/local-controller.md)
-- [Local route metadata](protocol/local-routes.md)
-
-## Project Status
-
-The repository includes the local Compose runtime, Kubernetes operator,
-capability broker, mediated egress, agent gateway, GitHub comment producer, and
-Codex/Claude OAuth providers. Security-sensitive features remain opt-in so they
-can be introduced per workload and provider.
-
-Repository contribution and test guidance is in [AGENTS.md](AGENTS.md).
-
-## Acknowledgements
-
-Thanks to [agentdp](https://github.com/martinothamar/agentdp) for the inspiration.
+- [Contributing](CONTRIBUTING.md)
 
 ## License
 

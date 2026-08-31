@@ -281,7 +281,7 @@ runtime/plugins/my-plugin/
 To create a custom plugin for one agent:
 
 ```sh
-make plugin-init NAME=my-plugin DIR=.agents/frontend/custom-plugins
+make plugin-init NAME=my-plugin DIR=.nvt-local/plugins
 ```
 
 The generated `plugin.yaml` includes common plugin metadata:

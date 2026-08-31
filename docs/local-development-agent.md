@@ -1,10 +1,9 @@
-# Native local workstations
+# Local development
 
-The local backend is reproduced from one non-secret `nvt.local.yaml`, optional
-files beneath `.nvt-local/`, and broker-managed OAuth enrollment. Generated
-configuration, identities, admission credentials, databases, workspaces,
-runtime homes, Docker data, and sessions live in exactly labeled Docker
-volumes. There is no generated host Compose file or local `.env` file.
+The local platform is defined by `nvt.local.yaml`, private inputs beneath
+`.nvt-local/`, and broker-managed OAuth enrollment. Generated configuration,
+credentials, workspaces, Docker data, and sessions live in labeled Docker
+volumes. No generated Compose or `.env` file is written to the host.
 
 ## Configure and start
 
@@ -16,7 +15,11 @@ make local-up
 make local-status
 ```
 
-Open `http://localhost:4090/agents`. A workstation keeps its `/workspace`,
+Before `local-init`, replace the example repository and create the referenced
+PAT file. NVT scopes injection to that repository; the token's upstream
+permissions remain the outer limit.
+
+Open `http://nvt.agent.localhost:4090`. A workstation keeps its `/workspace`,
 runtime home, nested Docker data, and agent session across controller, Docker,
 Docker Desktop, and laptop restarts. The runtime resumes through its existing
 generic resume command.
@@ -30,8 +33,12 @@ Secret inputs must be regular, current-user-owned files below
 
 ```sh
 install -d -m 0700 .nvt-local/secrets/github
-install -m 0600 /safe/source/main-app.pem .nvt-local/secrets/github/main-app.pem
+install -m 0600 /safe/source/token .nvt-local/secrets/github/token
 ```
+
+A PAT is sufficient for workstation and workflow repository access. The
+built-in GitHub comments producer uses a GitHub App account instead; see its
+[configuration guide](../producers/github-comments/README.md).
 
 Declaring a Codex or Claude OAuth account enables **Manage credentials** in the
 gateway. Enroll it there; the broker imports it into canonical private storage.
@@ -52,22 +59,6 @@ gateway. Enroll it there; the broker imports it into canonical private storage.
 
 Removing a workstation from the manifest is non-destructive. Immutable drift
 for an existing workstation fails closed.
-
-## Clean-break upgrade
-
-There is no compatibility fallback or automatic migration from the former
-local layout.
-
-1. Preserve externally supplied PEM or PAT files you still need.
-2. Create `nvt.local.yaml` and copy those files into private paths below
-   `.nvt-local/secrets/`.
-3. Run `make local-images local-init local-up`, then enroll Codex or Claude
-   OAuth credentials through **Manage credentials**.
-4. Verify workstations and producers, then explicitly remove the old local
-   containers and volumes with the old checkout's Compose teardown. After
-   preserving any externally supplied files you still need, remove the legacy
-   `.broker/` directory. The new lifecycle never reads, adopts, or deletes
-   those resources for you.
 
 ## Troubleshooting
 

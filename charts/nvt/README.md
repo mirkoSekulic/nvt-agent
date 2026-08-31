@@ -114,31 +114,6 @@ is projected by Kubernetes for code-server, while the gateway must be restarted
 to reload its in-memory validated assets. Leave `existingConfigMap` empty to
 use the built-in branding.
 
-## Upgrading image values from 0.1
-
-Version 0.2 replaces scalar image values with repository/tag/pullPolicy maps.
-Migrate saved values before upgrading:
-
-```yaml
-# 0.1 (no longer accepted)
-operator:
-  image: nvt-operator:latest
-
-# 0.2
-operator:
-  image:
-    repository: ghcr.io/mirkosekulic/nvt-operator
-    tag: 0.2.0-943d5ba
-    pullPolicy: IfNotPresent
-```
-
-The same shape applies to runtime, broker, gateway, producer, egressd, and
-captured. A legacy scalar fails rendering with an explicit migration error.
-Do not use `--reuse-values` across this boundary; migrate the values file or
-reset stored values before the 0.2 upgrade. `make producer-kind-install` uses
-`--reset-values` and treats `PRODUCER_VALUES` as a complete consolidated-chart
-values file for this reason.
-
 ## GitHub comments producer
 
 The producer is integrated under `producer` and disabled by default. It keeps
@@ -567,12 +542,7 @@ Set it only when the cluster CNI enforces NetworkPolicy. The enforced kind
 smoke uses Calico because default kind networking does not prove the boundary.
 
 Forward-proxy transport remains available for clients that honor
-`HTTP(S)_PROXY`. For the pre-1.0 migration, replace
-`spec.egressForwardProxy: true` with `spec.egressTransport: forward-proxy`;
-remove a false legacy field or select `redirect` explicitly. The consolidated
-CRD retains a deprecated rejection-only tombstone so either legacy value fails
-loudly instead of being pruned. The tombstone has no behavior and may be removed
-in a later pre-1.0 release; migrate stored manifests before upgrading the chart.
+`HTTP(S)_PROXY`.
 
 `allowInsecureUpstreams` permits explicitly marked plain-HTTP fixtures for
 hermetic tests. Leave it false in real deployments; plaintext would expose an
@@ -865,21 +835,11 @@ callback. No repository permission or scope is needed for the current-user
 identity lookup. Owner matching uses only exact normalized issuer and immutable
 subject from `AgentRun.spec.profileProvenance.principal`; login/display name and
 requested-by annotations are ignored. See the [gateway
-README](../../gateway/README.md) for the OAuth2 trust boundary and the exact
-0.3 `github.*` to 0.4 `oauth2.*` migration.
+README](../../gateway/README.md) for the OAuth2 trust boundary.
 
 OAuth2 does not provide OIDC's cryptographically verified issuer/ID-token
 identity contract. Trusted operator configuration defines the issuer namespace
 and identity endpoint; prefer OIDC when available.
-
-Chart 0.4 removes the provider-specific 0.3 surface. Change
-`gateway.auth.mode: github` to `oauth2`, move `gateway.auth.github.credentials`,
-`callbackPath`, `issuer`, `authorizationURL`, and `tokenURL` beneath
-`gateway.auth.oauth2`, and replace `github.userURL` with
-`oauth2.identity.endpoint`. Add the endpoint's exact `allowedHosts` entry plus
-`subjectPath` and optional `displayNamePath`. Existing Secret names and key
-names may be retained. Old values fail validation; there is no automatic
-fallback.
 
 ### Path routing
 

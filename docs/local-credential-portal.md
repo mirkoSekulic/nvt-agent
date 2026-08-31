@@ -2,7 +2,7 @@
 
 Declaring a `codex-oauth` or `claude-oauth` account in `nvt.local.yaml`
 automatically enables the local credential portal. Start with `make local-up`,
-open `http://localhost:4090/agents`, and choose **Manage credentials**.
+open `http://nvt.agent.localhost:4090`, and choose **Manage credentials**.
 
 The manifest owns account names and presets. Slot names, portal configuration,
 runner/session keys, broker provider paths, and seed handoff are generated in
