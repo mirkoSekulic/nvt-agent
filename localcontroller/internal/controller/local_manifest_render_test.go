@@ -45,10 +45,10 @@ func TestLocalManifestRendererProducesNativeWorkstations(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed, err := store.List(context.Background(), 10, "")
-	if err != nil || len(listed.Runs) != 3 {
+	if err != nil || len(listed.Runs) != 1 {
 		t.Fatalf("rendered workstations = %#v, %v", listed, err)
 	}
-	for _, runID := range []string{"infra", "nvt", "studio"} {
+	for _, runID := range []string{"project"} {
 		snapshot, _, snapshotErr := store.ResolvedSnapshot(context.Background(), runID)
 		if snapshotErr != nil {
 			t.Fatal(snapshotErr)

@@ -420,30 +420,6 @@ are discarded before session creation. The identity endpoint host must be
 explicitly allowlisted. Principals from different issuers are never guessed or
 linked; any account correlation requires an external explicit mapping.
 
-### Migration from chart 0.3
-
-Chart 0.4 removes `auth.mode=github` and `auth.github.*`. Migrate saved values
-to `auth.mode=oauth2` and the explicit `auth.oauth2.*` fields shown above. The
-old GitHub defaults are intentionally configuration now: issuer,
-authorization/token URLs, identity endpoint, host allowlist, and JSON paths
-must all be declared. Rename the credentials block but the referenced Secret
-and its `client-id`/`client-secret` keys may remain unchanged. There is no
-automatic compatibility fallback.
-
-| Chart 0.3 | Chart 0.4 |
-| --- | --- |
-| `auth.mode: github` | `auth.mode: oauth2` |
-| `auth.github.credentials` | `auth.oauth2.credentials` |
-| `auth.github.callbackPath` | `auth.oauth2.callbackPath` |
-| `auth.github.issuer` | `auth.oauth2.issuer` |
-| `auth.github.authorizationURL` | `auth.oauth2.authorizationURL` |
-| `auth.github.tokenURL` | `auth.oauth2.tokenURL` |
-| `auth.github.userURL` | `auth.oauth2.identity.endpoint` |
-
-Also set `auth.oauth2.clientAuthMethod`,
-`auth.oauth2.identity.allowedHosts`, `subjectPath`, and optional
-`displayNamePath`; these replace the removed adapter's implicit behavior.
-
 In path mode, `session.cookieDomain` must be empty so the gateway cookie is
 host-only, and its Path is scoped to the configured gateway base path. Secure
 session cookies are mandatory; do not broaden the cookie to `.altinn.studio`.

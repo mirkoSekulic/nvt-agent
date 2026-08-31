@@ -26,14 +26,7 @@ func TestRenderCompleteComposeWithoutHostAuthoredState(t *testing.T) {
 	if err := os.MkdirAll(secretDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(secretDirectory, "app.pem"), []byte("test-private-input"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	studioSecretDirectory := filepath.Join(root, ".nvt-local", "secrets", "studio")
-	if err := os.MkdirAll(studioSecretDirectory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(studioSecretDirectory, "token"), []byte("test-static-token"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(secretDirectory, "token"), []byte("test-private-input"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, example, 0o600); err != nil {

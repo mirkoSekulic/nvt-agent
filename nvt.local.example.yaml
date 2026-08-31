@@ -6,13 +6,6 @@ retentionPolicies:
       workspace: true
       runtimeState: true
       dockerData: true
-  retained:
-    persistence:
-      workspace: true
-      runtimeState: true
-      dockerData: true
-    ttl:
-      activeSeconds: 86400
   disposable:
     ttl:
       activeSeconds: 604800
@@ -21,51 +14,41 @@ retentionPolicies:
       runRetentionSeconds: 86400
 
 secrets:
-  github-key:
-    file: ./.nvt-local/secrets/github/app.pem
-  studio-token:
-    file: ./.nvt-local/secrets/studio/token
+  github-token:
+    file: ./.nvt-local/secrets/github/token
 
 accounts:
-  github:
-    preset: github-app
-    appId: "1"
-    privateKeySecret: github-key
-    installations:
-      mirkoSekulic: "1"
+  codex:
+    preset: codex-oauth
 
 brokerProviders:
-  studio:
+  github:
     plugin: token
     config:
-      injection-hosts: [altinn.studio]
+      injection-hosts: [github.com, api.github.com]
       injection-git: true
-      injection-basic-username: oauth2
-      target-mode: literal
+      injection-basic-username: x-access-token
+      target-mode: github
     secrets:
-      token-file: studio-token
+      token-file: github-token
     mediation:
-      hosts: [altinn.studio]
+      hosts: [github.com, api.github.com]
       materialization: header-inject
       git: true
-      username: oauth2
-      targetMode: literal
+      username: x-access-token
+      targetMode: github
 
 profiles:
   development:
     runtime:
-      preset: shell
+      preset: codex
       autonomy: trusted-local
+      account: codex
     editor:
       preset: code-server
-    accounts: [github]
-    credentialProviders: [studio]
+    accounts: [codex]
+    credentialProviders: [github]
     defaultCredentialProvider: github
-    egress:
-      domainPolicy:
-        defaultAction: deny
-        allow: [github.com, altinn.studio]
-        deny: [pastebin.com]
     plugins:
       - work-control
       - name: github-watcher
@@ -75,52 +58,28 @@ profiles:
           provider: github
 
 repositories:
-  nvt-agent:
-    github: mirkoSekulic/nvt-agent
-    account: github
-    access:
-      permissions:
-        contents: write
-        pull_requests: write
-        workflows: write
-  studio:
-    url: https://altinn.studio/repos/altinn/altinn-studio.git
-    checkoutTarget: altinn.studio/repos/altinn/altinn-studio
-    brokerRepository: altinn.studio/repos/altinn/altinn-studio
-    credentialProvider: studio
-  infrastructure:
-    github: Altinn/altinn-platform
+  project:
+    url: https://github.com/example-org/example-repo.git
+    checkoutTarget: github.com/example-org/example-repo
+    brokerRepository: example-org/example-repo
+    credentialProvider: github
 
 workstations:
-  - name: nvt
+  - name: project
     profile: development
-    repositories: [nvt-agent]
-  - name: studio
-    profile: development
-    repositories: [studio]
-  - name: infra
-    profile: development
-    repositories: [infrastructure]
+    repositories: [project]
 
 workflows:
-  nvt-development:
+  implement:
     profile: development
-    repository: nvt-agent
+    repository: project
     retention: disposable
     lifecycle:
       completeOn: [plugin.github.pr.merged, plugin.github.pr.closed]
-  nvt-review:
+  review:
     profile: development
-    repository: nvt-agent
+    repository: project
     retention: disposable
     lifecycle:
       completeOn: [plugin.work.completed]
       failOn: [plugin.work.failed]
-  studio-development:
-    profile: development
-    repository: studio
-    retention: disposable
-  infrastructure:
-    profile: development
-    repository: infrastructure
-    retention: retained
