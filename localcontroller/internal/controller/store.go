@@ -357,6 +357,26 @@ func administratorWorkstation(record storedRun) bool {
 	return record.idempotencyKey == "workstation-"+hex.EncodeToString(digest[:])
 }
 
+// repairableMalformedTerminal accepts only terminal rows whose complete store
+// invariant is restored by recomputing the digest of a still-valid immutable
+// snapshot. Any ambiguity in lifecycle or ownership metadata remains fatal.
+func repairableMalformedTerminal(record storedRun) (storedRun, bool) {
+	if !record.view.State.terminal() || record.deletedAt != nil || record.view.DeleteRequested {
+		return storedRun{}, false
+	}
+	resolved, err := resolvedrun.DecodeResolvedAgentRun(record.snapshot)
+	if err != nil || resolved.RunID != record.view.RunID {
+		return storedRun{}, false
+	}
+	digest := sha256.Sum256(record.snapshot)
+	record.view.SnapshotDigest = hex.EncodeToString(digest[:])
+	record.requestDigest = record.view.SnapshotDigest
+	if validateStoredRun(&record) != nil {
+		return storedRun{}, false
+	}
+	return record, true
+}
+
 func populateRunMetadata(view *Run, resolved resolvedrun.ResolvedAgentRun) {
 	view.Issuer = resolved.Principal.Issuer
 	view.Subject = resolved.Principal.Subject
@@ -474,14 +494,15 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 			continue
 		}
 		if validateStoredRun(&existing) != nil {
-			if !existing.view.State.terminal() || existing.view.RunID != candidate.resolved.RunID {
+			repaired, repairable := repairableMalformedTerminal(existing)
+			if !repairable || repaired.view.RunID != candidate.resolved.RunID {
 				return nil, ErrStoreUnavailable
 			}
-			if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM local_runs WHERE run_id=? AND idempotency_key=? AND state IN ('completed','failed','expired')`, existing.view.RunID, candidate.input.IdempotencyKey); deleteErr != nil {
+			existing = repaired
+			result, repairErr := tx.ExecContext(ctx, `UPDATE local_runs SET snapshot_digest=?,request_digest=? WHERE run_id=? AND idempotency_key=? AND deleted_at IS NULL AND state IN ('completed','failed','expired')`, existing.view.SnapshotDigest, existing.requestDigest, existing.view.RunID, candidate.input.IdempotencyKey)
+			if repairErr != nil || rowsAffected(result) != 1 {
 				return nil, ErrStoreUnavailable
 			}
-			newIndexes = append(newIndexes, index)
-			continue
 		}
 		if existing.deletedAt != nil {
 			return nil, ErrGone

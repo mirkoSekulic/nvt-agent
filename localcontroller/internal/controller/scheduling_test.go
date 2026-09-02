@@ -245,6 +245,75 @@ func TestMalformedTerminalWorkstationCannotPoisonManagementAndBootstrapRecovers(
 	}
 }
 
+func TestMalformedTerminalImmutableChangeRequiresAcknowledgedCleanup(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("malformed-replace", "Original")}
+	path := filepath.Join(t.TempDir(), "local-controller.yaml")
+	write := func() *Scheduler {
+		if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		scheduler, err := LoadScheduler(path, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scheduler
+	}
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	reconcileToRunning(t, reconciler, store, "malformed-replace")
+	before, err := store.Get(context.Background(), "malformed-replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Cancel(context.Background(), before.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	corruptDigest := strings.Repeat("0", 64)
+	if _, err := store.db.Exec(`UPDATE local_runs SET snapshot_digest=? WHERE run_id=?`, corruptDigest, before.RunID); err != nil {
+		t.Fatal(err)
+	}
+	document.Workstations[0].Principal.DisplayName = "Replacement"
+	if err := write().BootstrapWorkstations(context.Background()); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unconfigured malformed replacement = %v", err)
+	}
+	document.Reconciliation.ReplaceOnImmutableChange = true
+	if err := write().BootstrapWorkstations(context.Background()); !errors.Is(err, ErrDestructiveReconcile) || !strings.Contains(err.Error(), "replace=malformed-replace") {
+		t.Fatalf("unacknowledged malformed replacement = %v", err)
+	}
+	var persistedDigest string
+	if err := store.db.QueryRow(`SELECT snapshot_digest FROM local_runs WHERE run_id=?`, before.RunID).Scan(&persistedDigest); err != nil || persistedDigest != corruptDigest {
+		t.Fatalf("refusal partially repaired state: digest=%q err=%v", persistedDigest, err)
+	}
+	document.Reconciliation.DestructiveAcknowledged = true
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := store.Get(context.Background(), before.RunID)
+	if err != nil || staged.State != StateStopping || !staged.DeleteRequested || staged.SnapshotDigest != before.SnapshotDigest {
+		t.Fatalf("staged malformed replacement = %#v %v", staged, err)
+	}
+	backend.mu.Lock()
+	callsBefore := backend.deleteCalls
+	backend.mu.Unlock()
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.deleteCalls != callsBefore+1 || len(backend.deletedRuns) == 0 || backend.deletedRuns[len(backend.deletedRuns)-1].SnapshotDigest != before.SnapshotDigest || !backend.deletedRuns[len(backend.deletedRuns)-1].DeleteRequested {
+		t.Fatalf("malformed replacement cleanup = calls:%d runs:%#v", backend.deleteCalls, backend.deletedRuns)
+	}
+}
+
 func TestWorkstationPruneAndImmutableReplacementRequireAcknowledgement(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 8)
