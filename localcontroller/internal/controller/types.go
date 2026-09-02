@@ -29,15 +29,16 @@ const (
 )
 
 var (
-	ErrInvalidRequest    = errors.New("invalid local-run request")
-	ErrNotFound          = errors.New("local run not found")
-	ErrGone              = errors.New("local run was deleted")
-	ErrConflict          = errors.New("local run conflict")
-	ErrActiveGroup       = errors.New("local run active group already exists")
-	ErrCapacityExceeded  = errors.New("local run capacity exceeded")
-	ErrInvalidTransition = errors.New("invalid local-run state transition")
-	ErrOwnershipConflict = errors.New("local-run reconciliation ownership conflict")
-	ErrStoreUnavailable  = errors.New("local-run store unavailable")
+	ErrInvalidRequest       = errors.New("invalid local-run request")
+	ErrNotFound             = errors.New("local run not found")
+	ErrGone                 = errors.New("local run was deleted")
+	ErrConflict             = errors.New("local run conflict")
+	ErrActiveGroup          = errors.New("local run active group already exists")
+	ErrCapacityExceeded     = errors.New("local run capacity exceeded")
+	ErrInvalidTransition    = errors.New("invalid local-run state transition")
+	ErrOwnershipConflict    = errors.New("local-run reconciliation ownership conflict")
+	ErrStoreUnavailable     = errors.New("local-run store unavailable")
+	ErrDestructiveReconcile = errors.New("destructive workstation reconciliation requires acknowledgement")
 )
 
 func (state State) valid() bool {

@@ -205,6 +205,111 @@ func TestConfiguredWorkstationRestartsFromTerminalState(t *testing.T) {
 	}
 }
 
+func TestMalformedTerminalWorkstationCannotPoisonManagementAndBootstrapRecovers(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
+	path := filepath.Join(t.TempDir(), "local-controller.yaml")
+	if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := LoadScheduler(path, store)
+	if err != nil || scheduler.BootstrapWorkstations(context.Background()) != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	reconcileToRunning(t, reconciler, store, "nvt")
+	if _, err := store.Cancel(context.Background(), "nvt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE local_runs SET snapshot_digest=? WHERE run_id='nvt'`, strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := store.Create(context.Background(), CreateInput{IdempotencyKey: "unrelated-key-123", ResolvedRun: testResolvedRun(t, "unrelated", false)}); err != nil || !result.Created {
+		t.Fatalf("unrelated management poisoned: %#v %v", result, err)
+	}
+	if listed, err := store.List(context.Background(), 10, ""); err != nil || len(listed.Runs) != 1 || listed.Runs[0].RunID != "unrelated" {
+		t.Fatalf("malformed terminal row was not isolated: %#v %v", listed, err)
+	}
+	if err := scheduler.BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatalf("bootstrap recovery: %v", err)
+	}
+	recovered, err := store.Get(context.Background(), "nvt")
+	if err != nil || recovered.State != StatePending {
+		t.Fatalf("recovered workstation = %#v %v", recovered, err)
+	}
+}
+
+func TestWorkstationPruneAndImmutableReplacementRequireAcknowledgement(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 8)
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("keep", "Keep"), testWorkstation("remove", "Remove")}
+	path := filepath.Join(t.TempDir(), "local-controller.yaml")
+	write := func() *Scheduler {
+		if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		scheduler, err := LoadScheduler(path, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scheduler
+	}
+	scheduler := write()
+	if err := scheduler.BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	reconcileToRunning(t, reconciler, store, "keep")
+	reconcileToRunning(t, reconciler, store, "remove")
+	producer := createRun(t, store, "producer-history", false)
+	document.Workstations = document.Workstations[:1]
+	document.Reconciliation = workstationReconciliation{Prune: true}
+	pruning := write()
+	if err := pruning.BootstrapWorkstations(context.Background()); !errors.Is(err, ErrDestructiveReconcile) || !strings.Contains(err.Error(), "prune=remove") {
+		t.Fatalf("prune refusal = %v", err)
+	}
+	if run, _ := store.Get(context.Background(), "remove"); run.State != StateRunning {
+		t.Fatalf("refusal mutated remove: %#v", run)
+	}
+	document.Reconciliation.DestructiveAcknowledged = true
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := store.Get(context.Background(), "remove"); run.State != StateStopping || !run.DeleteRequested {
+		t.Fatalf("prune intent = %#v", run)
+	}
+	if run, _ := store.Get(context.Background(), producer.RunID); run.State != StatePending {
+		t.Fatalf("producer was pruned: %#v", run)
+	}
+
+	document.Reconciliation = workstationReconciliation{ReplaceOnImmutableChange: true}
+	document.Workstations[0].Principal.DisplayName = "Immutable replacement"
+	if err := write().BootstrapWorkstations(context.Background()); !errors.Is(err, ErrDestructiveReconcile) || !strings.Contains(err.Error(), "replace=keep") {
+		t.Fatalf("replacement refusal = %v", err)
+	}
+	document.Reconciliation.DestructiveAcknowledged = true
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := store.Get(context.Background(), "keep"); run.State != StateStopping || run.LastReason != "immutable-replacement-requested" {
+		t.Fatalf("replacement intent = %#v", run)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := store.Get(context.Background(), "keep"); run.State != StatePending && run.State != StatePreparing || run.DeleteRequested {
+		t.Fatalf("replacement promotion = %#v", run)
+	}
+}
+
 func TestConfiguredWorkstationAppliesCompatibleUpdateWhileRestartingFromTerminalState(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)
