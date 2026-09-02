@@ -10,6 +10,25 @@ scalar tags, excessive depth/node/byte counts, invalid names and enums, unsafe
 paths, unresolved references, mutable OCI image tags, and undeclared
 secret-bearing fields.
 
+Workstation convergence is explicitly opt-in:
+
+```yaml
+reconciliation:
+  workstations:
+    prune: false
+    replaceOnImmutableChange: false
+```
+
+Both flags default to false. `prune` removes only controller records that match
+the local administrator-workstation identity and are absent from the complete
+desired set. `replaceOnImmutableChange` stages an incompatible desired snapshot
+behind durable cleanup of the previous exact-owned backend resources. Neither
+mode applies to producer-created runs, unrelated history, or another local
+project. Destructive actions require `ALLOW_DESTRUCTIVE_RECONCILE=1`; without
+it the controller reports the exact prune and replacement names and commits no
+part of the plan. Decode, validation, compilation, input-resolution, and
+desired-state errors occur before destructive intent is published.
+
 The document defines logical secrets by file reference, runtime/dynamic accounts,
 generic static broker providers,
 explicit named retention policies, reusable profiles, named provider-neutral

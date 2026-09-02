@@ -205,6 +205,258 @@ func TestConfiguredWorkstationRestartsFromTerminalState(t *testing.T) {
 	}
 }
 
+func TestMalformedTerminalWorkstationCannotPoisonManagementAndBootstrapRecovers(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
+	path := filepath.Join(t.TempDir(), "local-controller.yaml")
+	if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := LoadScheduler(path, store)
+	if err != nil || scheduler.BootstrapWorkstations(context.Background()) != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	reconcileToRunning(t, reconciler, store, "nvt")
+	if _, err := store.Cancel(context.Background(), "nvt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE local_runs SET snapshot_digest=? WHERE run_id='nvt'`, strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := store.Create(context.Background(), CreateInput{IdempotencyKey: "unrelated-key-123", ResolvedRun: testResolvedRun(t, "unrelated", false)}); err != nil || !result.Created {
+		t.Fatalf("unrelated management poisoned: %#v %v", result, err)
+	}
+	if listed, err := store.List(context.Background(), 10, ""); err != nil || len(listed.Runs) != 1 || listed.Runs[0].RunID != "unrelated" {
+		t.Fatalf("malformed terminal row was not isolated: %#v %v", listed, err)
+	}
+	if err := scheduler.BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatalf("bootstrap recovery: %v", err)
+	}
+	recovered, err := store.Get(context.Background(), "nvt")
+	if err != nil || recovered.State != StatePending {
+		t.Fatalf("recovered workstation = %#v %v", recovered, err)
+	}
+}
+
+func TestMalformedTerminalImmutableChangeRequiresAcknowledgedCleanup(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("malformed-replace", "Original")}
+	path := filepath.Join(t.TempDir(), "local-controller.yaml")
+	write := func() *Scheduler {
+		if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		scheduler, err := LoadScheduler(path, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scheduler
+	}
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	reconcileToRunning(t, reconciler, store, "malformed-replace")
+	before, err := store.Get(context.Background(), "malformed-replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Cancel(context.Background(), before.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	corruptDigest := strings.Repeat("0", 64)
+	if _, err := store.db.Exec(`UPDATE local_runs SET snapshot_digest=? WHERE run_id=?`, corruptDigest, before.RunID); err != nil {
+		t.Fatal(err)
+	}
+	document.Workstations[0].Principal.DisplayName = "Replacement"
+	if err := write().BootstrapWorkstations(context.Background()); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unconfigured malformed replacement = %v", err)
+	}
+	document.Reconciliation.ReplaceOnImmutableChange = true
+	if err := write().BootstrapWorkstations(context.Background()); !errors.Is(err, ErrDestructiveReconcile) || !strings.Contains(err.Error(), "replace=malformed-replace") {
+		t.Fatalf("unacknowledged malformed replacement = %v", err)
+	}
+	var persistedDigest string
+	if err := store.db.QueryRow(`SELECT snapshot_digest FROM local_runs WHERE run_id=?`, before.RunID).Scan(&persistedDigest); err != nil || persistedDigest != corruptDigest {
+		t.Fatalf("refusal partially repaired state: digest=%q err=%v", persistedDigest, err)
+	}
+	document.Reconciliation.DestructiveAcknowledged = true
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := store.Get(context.Background(), before.RunID)
+	if err != nil || staged.State != StateStopping || !staged.DeleteRequested || staged.SnapshotDigest != before.SnapshotDigest {
+		t.Fatalf("staged malformed replacement = %#v %v", staged, err)
+	}
+	backend.mu.Lock()
+	callsBefore := backend.deleteCalls
+	backend.mu.Unlock()
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.deleteCalls != callsBefore+1 || len(backend.deletedRuns) == 0 || backend.deletedRuns[len(backend.deletedRuns)-1].SnapshotDigest != before.SnapshotDigest || !backend.deletedRuns[len(backend.deletedRuns)-1].DeleteRequested {
+		t.Fatalf("malformed replacement cleanup = calls:%d runs:%#v", backend.deleteCalls, backend.deletedRuns)
+	}
+}
+
+func TestWorkstationPruneAndImmutableReplacementRequireAcknowledgement(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 8)
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("keep", "Keep"), testWorkstation("remove", "Remove")}
+	path := filepath.Join(t.TempDir(), "local-controller.yaml")
+	write := func() *Scheduler {
+		if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		scheduler, err := LoadScheduler(path, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scheduler
+	}
+	scheduler := write()
+	if err := scheduler.BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	reconcileToRunning(t, reconciler, store, "keep")
+	reconcileToRunning(t, reconciler, store, "remove")
+	producer := createRun(t, store, "producer-history", false)
+	malformed := createRun(t, store, "malformed-history", false)
+	malformed = claimRun(t, store, malformed, "history-controller")
+	malformed = transitionRun(t, store, malformed, "history-controller", StatePreparing)
+	malformed = claimRun(t, store, malformed, "history-controller")
+	stopping, err := store.UpdateStatus(context.Background(), StatusInput{RunID: malformed.RunID, Owner: "history-controller", ExpectedRevision: malformed.Revision, State: StateStopping, TerminalTarget: StateFailed, Reason: "history-failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopping = claimRun(t, store, stopping, "history-controller")
+	if _, err := store.UpdateStatus(context.Background(), StatusInput{RunID: stopping.RunID, Owner: "history-controller", ExpectedRevision: stopping.Revision, State: StateFailed, Reason: "history-cleanup-complete"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE local_runs SET snapshot_digest=? WHERE run_id=?`, strings.Repeat("0", 64), malformed.RunID); err != nil {
+		t.Fatal(err)
+	}
+	document.Workstations = document.Workstations[:1]
+	document.Reconciliation = workstationReconciliation{Prune: true}
+	pruning := write()
+	if err := pruning.BootstrapWorkstations(context.Background()); !errors.Is(err, ErrDestructiveReconcile) || !strings.Contains(err.Error(), "prune=remove") {
+		t.Fatalf("prune refusal = %v", err)
+	}
+	if run, _ := store.Get(context.Background(), "remove"); run.State != StateRunning {
+		t.Fatalf("refusal mutated remove: %#v", run)
+	}
+	document.Reconciliation.DestructiveAcknowledged = true
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := store.Get(context.Background(), "remove"); run.State != StateStopping || !run.DeleteRequested {
+		t.Fatalf("prune intent = %#v", run)
+	}
+	if run, _ := store.Get(context.Background(), producer.RunID); run.State != StatePending {
+		t.Fatalf("producer was pruned: %#v", run)
+	}
+
+	document.Reconciliation = workstationReconciliation{ReplaceOnImmutableChange: true}
+	document.Workstations[0].Principal.DisplayName = "Immutable replacement"
+	if err := write().BootstrapWorkstations(context.Background()); !errors.Is(err, ErrDestructiveReconcile) || !strings.Contains(err.Error(), "replace=keep") {
+		t.Fatalf("replacement refusal = %v", err)
+	}
+	document.Reconciliation.DestructiveAcknowledged = true
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := store.Get(context.Background(), "keep"); run.State != StateStopping || run.LastReason != "immutable-replacement-requested" {
+		t.Fatalf("replacement intent = %#v", run)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := store.Get(context.Background(), "keep"); run.State != StatePending && run.State != StatePreparing || run.DeleteRequested {
+		t.Fatalf("replacement promotion = %#v", run)
+	}
+}
+
+func TestTerminalImmutableReplacementCleansOldOwnershipBeforePromotion(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("terminal", "Terminal")}
+	path := filepath.Join(t.TempDir(), "local-controller.yaml")
+	write := func() *Scheduler {
+		if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		scheduler, err := LoadScheduler(path, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scheduler
+	}
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	reconcileToRunning(t, reconciler, store, "terminal")
+	before, err := store.Get(context.Background(), "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Cancel(context.Background(), "terminal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := store.Get(context.Background(), "terminal")
+	if err != nil || !terminal.State.terminal() {
+		t.Fatalf("terminal state = %#v %v", terminal, err)
+	}
+
+	document.Workstations[0].Principal.DisplayName = "Replacement"
+	document.Reconciliation = workstationReconciliation{ReplaceOnImmutableChange: true, DestructiveAcknowledged: true}
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := store.Get(context.Background(), "terminal")
+	if err != nil || staged.State != StateStopping || !staged.DeleteRequested || staged.SnapshotDigest != before.SnapshotDigest {
+		t.Fatalf("staged terminal replacement = %#v %v", staged, err)
+	}
+	backend.mu.Lock()
+	callsBefore := backend.deleteCalls
+	backend.mu.Unlock()
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	if backend.deleteCalls != callsBefore+1 || len(backend.deletedRuns) == 0 || backend.deletedRuns[len(backend.deletedRuns)-1].SnapshotDigest != before.SnapshotDigest || !backend.deletedRuns[len(backend.deletedRuns)-1].DeleteRequested {
+		t.Fatalf("terminal replacement cleanup = calls:%d runs:%#v", backend.deleteCalls, backend.deletedRuns)
+	}
+	backend.mu.Unlock()
+	promoted, err := store.Get(context.Background(), "terminal")
+	if err != nil || promoted.DeleteRequested || promoted.SnapshotDigest == before.SnapshotDigest || promoted.State == StateRunning {
+		t.Fatalf("promoted replacement = %#v %v", promoted, err)
+	}
+}
+
 func TestConfiguredWorkstationAppliesCompatibleUpdateWhileRestartingFromTerminalState(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)

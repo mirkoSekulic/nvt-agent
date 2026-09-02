@@ -64,7 +64,7 @@ func main() {
 		logger.Fatal("startup failed reason=api-authorization-unavailable")
 	}
 	if err := scheduler.BootstrapWorkstations(ctx); err != nil {
-		logger.Fatal("startup failed reason=workstation-configuration-unavailable")
+		logger.Fatalf("startup failed reason=workstation-configuration-unavailable detail=%v", err)
 	}
 
 	server := &http.Server{

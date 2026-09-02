@@ -45,6 +45,7 @@ var (
 
 type Manifest struct {
 	APIVersion        string                     `json:"apiVersion"`
+	Reconciliation    Reconciliation             `json:"reconciliation,omitempty"`
 	Secrets           map[string]Secret          `json:"secrets,omitempty"`
 	Accounts          map[string]Account         `json:"accounts,omitempty"`
 	BrokerProviders   map[string]BrokerProvider  `json:"brokerProviders,omitempty"`
@@ -54,6 +55,17 @@ type Manifest struct {
 	Workstations      []Workstation              `json:"workstations,omitempty"`
 	Workflows         map[string]Workflow        `json:"workflows"`
 	Producers         []Producer                 `json:"producers,omitempty"`
+}
+
+// Reconciliation gates the two destructive workstation convergence modes.
+// Both remain disabled when omitted.
+type Reconciliation struct {
+	Workstations WorkstationReconciliation `json:"workstations,omitempty"`
+}
+
+type WorkstationReconciliation struct {
+	Prune                    bool `json:"prune,omitempty"`
+	ReplaceOnImmutableChange bool `json:"replaceOnImmutableChange,omitempty"`
 }
 
 type RetentionPolicy struct {

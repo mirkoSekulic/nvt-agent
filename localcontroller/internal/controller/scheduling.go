@@ -34,6 +34,7 @@ const (
 // selections.
 type nativeConfiguration struct {
 	APIVersion        string                         `json:"api_version"`
+	Reconciliation    workstationReconciliation      `json:"reconciliation,omitempty"`
 	Defaults          resolvedrun.PlatformDefaults   `json:"defaults"`
 	Profiles          []resolvedrun.Profile          `json:"profiles"`
 	Workflows         []resolvedrun.Workflow         `json:"workflows"`
@@ -41,6 +42,12 @@ type nativeConfiguration struct {
 	RetentionPolicies []resolvedrun.RetentionPolicy  `json:"retention_policies"`
 	Workstations      []workstationConfig            `json:"workstations,omitempty"`
 	Schedules         []scheduleConfig               `json:"schedules,omitempty"`
+}
+
+type workstationReconciliation struct {
+	Prune                    bool `json:"prune,omitempty"`
+	ReplaceOnImmutableChange bool `json:"replace_on_immutable_change,omitempty"`
+	DestructiveAcknowledged  bool `json:"destructive_acknowledged,omitempty"`
 }
 
 type workstationConfig struct {
@@ -90,9 +97,10 @@ type schedule struct {
 }
 
 type Scheduler struct {
-	store        *Store
-	schedules    map[string]schedule
-	workstations []CreateInput
+	store          *Store
+	schedules      map[string]schedule
+	workstations   []CreateInput
+	reconciliation workstationReconciliation
 }
 
 type scheduleAdmissionRequest struct {
@@ -146,7 +154,7 @@ func LoadScheduler(path string, store *Store) (*Scheduler, error) {
 	if len(document.Workstations) > 128 || len(document.Workstations) > store.maxActiveRuns || len(document.Schedules) > 64 {
 		return nil, ErrInvalidRequest
 	}
-	result := &Scheduler{store: store, schedules: map[string]schedule{}}
+	result := &Scheduler{store: store, schedules: map[string]schedule{}, reconciliation: document.Reconciliation}
 	seenRunIDs := map[string]struct{}{}
 	seenTokens := map[[32]byte]struct{}{}
 	workstations := append([]workstationConfig(nil), document.Workstations...)
@@ -230,7 +238,7 @@ func loadNativeConfiguration(path string) (nativeConfiguration, *resolvedrun.Res
 	decoder.DisallowUnknownFields()
 	var document nativeConfiguration
 	if decoder.Decode(&document) != nil || document.APIVersion != NativeConfigAPIVersion ||
-		(len(document.Schedules) == 0 && len(document.Workstations) == 0) || len(document.Schedules) > 64 || len(document.Workstations) > 128 {
+		(len(document.Schedules) == 0 && len(document.Workstations) == 0 && !document.Reconciliation.Prune) || len(document.Schedules) > 64 || len(document.Workstations) > 128 {
 		return nativeConfiguration{}, nil, ErrInvalidRequest
 	}
 	var trailing any
@@ -327,10 +335,10 @@ func (scheduler *Scheduler) BootstrapWorkstations(ctx context.Context) error {
 	if scheduler == nil {
 		return nil
 	}
-	if len(scheduler.workstations) == 0 {
+	if len(scheduler.workstations) == 0 && !scheduler.reconciliation.Prune {
 		return nil
 	}
-	_, err := scheduler.store.CreateBatch(ctx, scheduler.workstations)
+	_, err := scheduler.store.ReconcileWorkstations(ctx, scheduler.workstations, scheduler.reconciliation.Prune, scheduler.reconciliation.ReplaceOnImmutableChange, scheduler.reconciliation.DestructiveAcknowledged)
 	return err
 }
 

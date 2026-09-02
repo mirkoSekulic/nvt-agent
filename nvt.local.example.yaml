@@ -1,5 +1,10 @@
 apiVersion: nvt.dev/local/v1
 
+reconciliation:
+  workstations:
+    prune: false
+    replaceOnImmutableChange: false
+
 retentionPolicies:
   persistent:
     persistence:

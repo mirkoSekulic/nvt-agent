@@ -24,6 +24,7 @@ type Instructions map[string]string
 
 type nativeConfiguration struct {
 	APIVersion        string                         `json:"api_version"`
+	Reconciliation    reconciliation                 `json:"reconciliation,omitempty"`
 	Defaults          resolvedrun.PlatformDefaults   `json:"defaults"`
 	Profiles          []resolvedrun.Profile          `json:"profiles"`
 	Workflows         []resolvedrun.Workflow         `json:"workflows"`
@@ -31,6 +32,12 @@ type nativeConfiguration struct {
 	RetentionPolicies []resolvedrun.RetentionPolicy  `json:"retention_policies"`
 	Workstations      []workstation                  `json:"workstations,omitempty"`
 	Schedules         []schedule                     `json:"schedules,omitempty"`
+}
+
+type reconciliation struct {
+	Prune                    bool `json:"prune,omitempty"`
+	ReplaceOnImmutableChange bool `json:"replace_on_immutable_change,omitempty"`
+	DestructiveAcknowledged  bool `json:"destructive_acknowledged,omitempty"`
 }
 
 type workstation struct {
@@ -82,7 +89,8 @@ func Controller(compiled manifest.Compiled, instructions Instructions) ([]byte, 
 	accounts := accountMap(compiled)
 	repositories := repositoryMap(compiled)
 	result := nativeConfiguration{
-		APIVersion: controllerAPIVersion,
+		APIVersion:     controllerAPIVersion,
+		Reconciliation: reconciliation{Prune: compiled.Controller.Reconciliation.Prune, ReplaceOnImmutableChange: compiled.Controller.Reconciliation.ReplaceOnImmutableChange, DestructiveAcknowledged: compiled.Controller.DestructiveAcknowledged},
 		Defaults: resolvedrun.PlatformDefaults{
 			Image:       "nvt-agent-runtime:latest",
 			Runtime:     resolvedrun.Runtime{Type: "shell", Autonomy: "interactive", User: "root"},
@@ -180,7 +188,7 @@ func Controller(compiled manifest.Compiled, instructions Instructions) ([]byte, 
 }
 
 func validateNativeProjection(configuration nativeConfiguration) error {
-	if (len(configuration.Workstations) == 0 && len(configuration.Schedules) == 0) || len(configuration.Workstations) > 128 || len(configuration.Schedules) > 64 {
+	if (len(configuration.Workstations) == 0 && len(configuration.Schedules) == 0 && !configuration.Reconciliation.Prune) || len(configuration.Workstations) > 128 || len(configuration.Schedules) > 64 {
 		return errors.New("local scheduling projection exceeds native bounds")
 	}
 	resolver, err := resolvedrun.NewResolver(resolvedrun.TrustedConfiguration{

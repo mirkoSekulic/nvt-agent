@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -224,7 +226,13 @@ func (store *Store) validate(ctx context.Context) error {
 			return ErrStoreUnavailable
 		}
 		record, err := scanStoredRun(rows)
-		if err != nil || validateStoredRun(&record) != nil {
+		if err != nil {
+			return ErrStoreUnavailable
+		}
+		if validateStoredRun(&record) != nil {
+			if record.view.State.terminal() {
+				continue
+			}
 			return ErrStoreUnavailable
 		}
 	}
@@ -310,8 +318,9 @@ func validateStoredRun(record *storedRun) error {
 	if len(record.pendingSnapshot) != 0 {
 		digest := sha256.Sum256(record.pendingSnapshot)
 		pending, pendingErr := resolvedrun.DecodeResolvedAgentRun(record.pendingSnapshot)
-		if len(record.pendingSnapshot) > resolvedrun.MaxDocumentBytes || record.pendingDigest != hex.EncodeToString(digest[:]) || pendingErr != nil ||
-			!workstationUpdateCompatible(resolved, pending) || record.view.State != StatePreparing {
+		replacement := record.view.State == StateStopping && record.view.DeleteRequested && record.view.LastReason == "immutable-replacement-requested"
+		if len(record.pendingSnapshot) > resolvedrun.MaxDocumentBytes || record.pendingDigest != hex.EncodeToString(digest[:]) || pendingErr != nil || pending.RunID != resolved.RunID ||
+			(!replacement && (!workstationUpdateCompatible(resolved, pending) || record.view.State != StatePreparing)) {
 			return ErrStoreUnavailable
 		}
 	} else if record.pendingDigest != "" {
@@ -336,6 +345,36 @@ func validateStoredRun(record *storedRun) error {
 		return ErrStoreUnavailable
 	}
 	return nil
+}
+
+func administratorWorkstation(record storedRun) bool {
+	resolved, err := resolvedrun.DecodeResolvedAgentRun(record.snapshot)
+	if err != nil || resolved.Principal.Subject != "workstation-"+record.view.RunID ||
+		!resolved.Persistence.Workspace || !resolved.Persistence.RuntimeState || !resolved.Persistence.DockerData || resolved.TTL != (resolvedrun.TTL{}) {
+		return false
+	}
+	digest := sha256.Sum256([]byte("nvt.workstation/v1\x00" + record.view.RunID))
+	return record.idempotencyKey == "workstation-"+hex.EncodeToString(digest[:])
+}
+
+// repairableMalformedTerminal accepts only terminal rows whose complete store
+// invariant is restored by recomputing the digest of a still-valid immutable
+// snapshot. Any ambiguity in lifecycle or ownership metadata remains fatal.
+func repairableMalformedTerminal(record storedRun) (storedRun, bool) {
+	if !record.view.State.terminal() || record.deletedAt != nil || record.view.DeleteRequested {
+		return storedRun{}, false
+	}
+	resolved, err := resolvedrun.DecodeResolvedAgentRun(record.snapshot)
+	if err != nil || resolved.RunID != record.view.RunID {
+		return storedRun{}, false
+	}
+	digest := sha256.Sum256(record.snapshot)
+	record.view.SnapshotDigest = hex.EncodeToString(digest[:])
+	record.requestDigest = record.view.SnapshotDigest
+	if validateStoredRun(&record) != nil {
+		return storedRun{}, false
+	}
+	return record, true
 }
 
 func populateRunMetadata(view *Run, resolved resolvedrun.ResolvedAgentRun) {
@@ -368,7 +407,7 @@ func (store *Store) Create(ctx context.Context, input CreateInput) (CreateResult
 	if _, err := store.Sweep(ctx); err != nil {
 		return CreateResult{}, err
 	}
-	results, err := store.createBatch(ctx, []CreateInput{input}, false)
+	results, err := store.createBatch(ctx, []CreateInput{input}, false, false, false, false)
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -387,11 +426,17 @@ type preparedCreate struct {
 // boundary for administrator-owned named runs; a rejected document cannot
 // leave a partially installed set behind.
 func (store *Store) CreateBatch(ctx context.Context, inputs []CreateInput) ([]CreateResult, error) {
-	return store.createBatch(ctx, inputs, true)
+	return store.createBatch(ctx, inputs, true, false, false, false)
 }
 
-func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, reclaimCleanupCapacity bool) ([]CreateResult, error) {
-	if len(inputs) == 0 || len(inputs) > store.maxActiveRuns {
+// ReconcileWorkstations atomically validates the complete administrator-owned
+// desired set before recording any prune or immutable-replacement intent.
+func (store *Store) ReconcileWorkstations(ctx context.Context, inputs []CreateInput, prune, replace, acknowledged bool) ([]CreateResult, error) {
+	return store.createBatch(ctx, inputs, true, prune, replace, acknowledged)
+}
+
+func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, reclaimCleanupCapacity, prune, replace, acknowledged bool) ([]CreateResult, error) {
+	if len(inputs) == 0 && !prune || len(inputs) > store.maxActiveRuns {
 		return nil, ErrInvalidRequest
 	}
 	prepared := make([]preparedCreate, 0, len(inputs))
@@ -437,6 +482,8 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 	cancelIndexes := make([]int, 0, len(prepared))
 	restartIndexes := make([]int, 0, len(prepared))
 	restartUpdateIndexes := make([]int, 0, len(prepared))
+	replaceIndexes := make([]int, 0, len(prepared))
+	terminalReplaceIndexes := make([]int, 0, len(prepared))
 	for index, candidate := range prepared {
 		existing, found, queryErr := queryByIdempotency(ctx, tx, candidate.input.IdempotencyKey)
 		if queryErr != nil {
@@ -447,7 +494,15 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 			continue
 		}
 		if validateStoredRun(&existing) != nil {
-			return nil, ErrStoreUnavailable
+			repaired, repairable := repairableMalformedTerminal(existing)
+			if !repairable || repaired.view.RunID != candidate.resolved.RunID {
+				return nil, ErrStoreUnavailable
+			}
+			existing = repaired
+			result, repairErr := tx.ExecContext(ctx, `UPDATE local_runs SET snapshot_digest=?,request_digest=? WHERE run_id=? AND idempotency_key=? AND deleted_at IS NULL AND state IN ('completed','failed','expired')`, existing.view.SnapshotDigest, existing.requestDigest, existing.view.RunID, candidate.input.IdempotencyKey)
+			if repairErr != nil || rowsAffected(result) != 1 {
+				return nil, ErrStoreUnavailable
+			}
 		}
 		if existing.deletedAt != nil {
 			return nil, ErrGone
@@ -461,7 +516,15 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 		if existing.requestDigest != candidate.digest {
 			active, decodeErr := resolvedrun.DecodeResolvedAgentRun(existing.snapshot)
 			if decodeErr != nil || !workstationUpdateCompatible(active, candidate.resolved) || existing.view.DeleteRequested {
-				return nil, ErrConflict
+				if !replace || existing.view.DeleteRequested {
+					return nil, ErrConflict
+				}
+				if existing.view.State.terminal() {
+					terminalReplaceIndexes = append(terminalReplaceIndexes, index)
+					continue
+				}
+				replaceIndexes = append(replaceIndexes, index)
+				continue
 			}
 			if reclaimCleanupCapacity && (existing.view.State == StateCompleted || existing.view.State == StateFailed) {
 				restartUpdateIndexes = append(restartUpdateIndexes, index)
@@ -476,6 +539,48 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 			restartIndexes = append(restartIndexes, index)
 		}
 		results[index] = CreateResult{Run: existing.view, Created: false}
+	}
+	desiredKeys := make(map[string]struct{}, len(prepared))
+	for _, candidate := range prepared {
+		desiredKeys[candidate.input.IdempotencyKey] = struct{}{}
+	}
+	pruneIDs := []string{}
+	if prune {
+		rows, queryErr := tx.QueryContext(ctx, selectRuns+` WHERE deleted_at IS NULL ORDER BY run_id`)
+		if queryErr != nil {
+			return nil, ErrStoreUnavailable
+		}
+		for rows.Next() {
+			record, scanErr := scanStoredRun(rows)
+			if scanErr != nil {
+				_ = rows.Close()
+				return nil, ErrStoreUnavailable
+			}
+			if validateStoredRun(&record) != nil {
+				if record.view.State.terminal() {
+					continue
+				}
+				_ = rows.Close()
+				return nil, ErrStoreUnavailable
+			}
+			if _, desired := desiredKeys[record.idempotencyKey]; !desired && administratorWorkstation(record) && !record.view.DeleteRequested {
+				pruneIDs = append(pruneIDs, record.view.RunID)
+			}
+		}
+		if rows.Err() != nil || rows.Close() != nil {
+			return nil, ErrStoreUnavailable
+		}
+	}
+	if (len(pruneIDs) != 0 || len(replaceIndexes) != 0 || len(terminalReplaceIndexes) != 0) && !acknowledged {
+		replacements := make([]string, 0, len(replaceIndexes)+len(terminalReplaceIndexes))
+		for _, index := range replaceIndexes {
+			replacements = append(replacements, prepared[index].resolved.RunID)
+		}
+		for _, index := range terminalReplaceIndexes {
+			replacements = append(replacements, prepared[index].resolved.RunID)
+		}
+		sort.Strings(replacements)
+		return nil, fmt.Errorf("%w: prune=%s replace=%s", ErrDestructiveReconcile, strings.Join(pruneIDs, ","), strings.Join(replacements, ","))
 	}
 	for _, index := range newIndexes {
 		group := prepared[index].input.ActiveGroup
@@ -503,7 +608,7 @@ AND state IN ('pending','preparing','running','stopping')`, group, group).Scan(&
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM local_runs WHERE deleted_at IS NULL AND state IN `+activeStates).Scan(&active); err != nil {
 		return nil, ErrStoreUnavailable
 	}
-	if active+len(newIndexes)+len(restartIndexes)+len(restartUpdateIndexes) > store.maxActiveRuns {
+	if active+len(newIndexes)+len(restartIndexes)+len(restartUpdateIndexes)+len(terminalReplaceIndexes) > store.maxActiveRuns {
 		return nil, ErrCapacityExceeded
 	}
 	for _, index := range newIndexes {
@@ -580,6 +685,19 @@ run_id,idempotency_key,active_group,request_digest,snapshot,snapshot_digest,owne
 			return nil, ErrStoreUnavailable
 		}
 		results[index] = CreateResult{Run: updated.view, Created: false}
+	}
+	for _, index := range append(replaceIndexes, terminalReplaceIndexes...) {
+		candidate := prepared[index]
+		result, updateErr := tx.ExecContext(ctx, `UPDATE local_runs SET pending_snapshot=?,pending_snapshot_digest=?,state='stopping',delete_requested=1,terminal_target='completed',terminal_expires_at=NULL,revision=revision+1,updated_at=?,reconcile_owner=NULL,reconcile_until=NULL,last_reason='immutable-replacement-requested' WHERE idempotency_key=? AND deleted_at IS NULL`, candidate.snapshot, candidate.digest, formatTimestamp(now), candidate.input.IdempotencyKey)
+		if updateErr != nil || rowsAffected(result) != 1 {
+			return nil, ErrStoreUnavailable
+		}
+	}
+	for _, runID := range pruneIDs {
+		result, updateErr := tx.ExecContext(ctx, `UPDATE local_runs SET state='stopping',delete_requested=1,terminal_target='completed',revision=revision+1,updated_at=?,reconcile_owner=NULL,reconcile_until=NULL,last_reason='workstation-prune-requested',pending_snapshot=NULL,pending_snapshot_digest='' WHERE run_id=? AND deleted_at IS NULL`, formatTimestamp(now), runID)
+		if updateErr != nil || rowsAffected(result) != 1 {
+			return nil, ErrStoreUnavailable
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, ErrStoreUnavailable
@@ -698,25 +816,44 @@ func (store *Store) list(ctx context.Context, limit int, after string, activeOnl
 	if activeOnly {
 		where += ` AND state IN ('pending','preparing','running','stopping')`
 	}
-	rows, err := store.db.QueryContext(ctx, selectRuns+where+` ORDER BY run_id LIMIT ?`, after, limit+1)
-	if err != nil {
-		return ListResult{}, ErrStoreUnavailable
-	}
-	defer rows.Close()
-	result := ListResult{APIVersion: APIVersion, Runs: make([]Run, 0, limit)}
-	for rows.Next() {
-		record, err := scanStoredRun(rows)
-		if err != nil || validateStoredRun(&record) != nil {
+	result := ListResult{APIVersion: APIVersion, Runs: make([]Run, 0, limit+1)}
+	cursor := after
+	for len(result.Runs) <= limit {
+		rows, err := store.db.QueryContext(ctx, selectRuns+where+` ORDER BY run_id LIMIT ?`, cursor, limit+1)
+		if err != nil {
 			return ListResult{}, ErrStoreUnavailable
 		}
-		if len(result.Runs) == limit {
-			result.NextAfter = result.Runs[len(result.Runs)-1].RunID
+		rawCount := 0
+		for rows.Next() {
+			rawCount++
+			record, scanErr := scanStoredRun(rows)
+			if scanErr != nil {
+				_ = rows.Close()
+				return ListResult{}, ErrStoreUnavailable
+			}
+			cursor = record.view.RunID
+			if validateStoredRun(&record) != nil {
+				if record.view.State.terminal() {
+					continue
+				}
+				_ = rows.Close()
+				return ListResult{}, ErrStoreUnavailable
+			}
+			result.Runs = append(result.Runs, record.view)
+			if len(result.Runs) > limit {
+				break
+			}
+		}
+		if rows.Err() != nil || rows.Close() != nil {
+			return ListResult{}, ErrStoreUnavailable
+		}
+		if len(result.Runs) > limit || rawCount < limit+1 {
 			break
 		}
-		result.Runs = append(result.Runs, record.view)
 	}
-	if rows.Err() != nil {
-		return ListResult{}, ErrStoreUnavailable
+	if len(result.Runs) > limit {
+		result.Runs = result.Runs[:limit]
+		result.NextAfter = result.Runs[len(result.Runs)-1].RunID
 	}
 	return result, nil
 }
@@ -842,6 +979,26 @@ reconcile_owner=NULL,reconcile_until=NULL WHERE run_id=? AND revision=?`,
 	}
 	if record.view.State == StateStopping && input.State != record.view.TerminalTarget {
 		return Run{}, ErrInvalidTransition
+	}
+	if record.view.State == StateStopping && input.State.terminal() && len(record.pendingSnapshot) != 0 && record.view.LastReason == "immutable-replacement-requested" {
+		newRevision := record.view.Revision + 1
+		result, updateErr := tx.ExecContext(ctx, `UPDATE local_runs SET snapshot=pending_snapshot,snapshot_digest=pending_snapshot_digest,request_digest=pending_snapshot_digest,ownership_digest=pending_snapshot_digest,pending_snapshot=NULL,pending_snapshot_digest='',state='pending',revision=?,updated_at=?,terminal_expires_at=NULL,reconcile_owner=NULL,reconcile_until=NULL,delete_requested=0,deleted_at=NULL,last_reason='immutable-replacement-cleanup-complete',terminal_target='',lifecycle_cursor='' WHERE run_id=? AND revision=?`, newRevision, formatTimestamp(now), input.RunID, input.ExpectedRevision)
+		if updateErr != nil || rowsAffected(result) != 1 {
+			return Run{}, ErrOwnershipConflict
+		}
+		if err := tx.Commit(); err != nil {
+			return Run{}, ErrStoreUnavailable
+		}
+		resolved, decodeErr := resolvedrun.DecodeResolvedAgentRun(record.pendingSnapshot)
+		if decodeErr != nil {
+			return Run{}, ErrStoreUnavailable
+		}
+		view := record.view
+		view.State, view.Revision, view.UpdatedAt, view.SnapshotDigest = StatePending, newRevision, now, record.pendingDigest
+		view.DeleteRequested, view.TerminalTarget, view.LastReason = false, "", "immutable-replacement-cleanup-complete"
+		view.ReconcileOwner, view.ReconcileUntil = "", nil
+		populateRunMetadata(&view, resolved)
+		return view, nil
 	}
 	resolved, err := resolvedrun.DecodeResolvedAgentRun(record.snapshot)
 	if err != nil {
@@ -1020,7 +1177,14 @@ func sweepTx(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 	records := []storedRun{}
 	for rows.Next() {
 		record, err := scanStoredRun(rows)
-		if err != nil || validateStoredRun(&record) != nil {
+		if err != nil {
+			_ = rows.Close()
+			return 0, ErrStoreUnavailable
+		}
+		if validateStoredRun(&record) != nil {
+			if record.view.State.terminal() {
+				continue
+			}
 			_ = rows.Close()
 			return 0, ErrStoreUnavailable
 		}
