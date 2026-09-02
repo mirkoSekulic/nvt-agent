@@ -270,6 +270,21 @@ func TestWorkstationPruneAndImmutableReplacementRequireAcknowledgement(t *testin
 	reconcileToRunning(t, reconciler, store, "keep")
 	reconcileToRunning(t, reconciler, store, "remove")
 	producer := createRun(t, store, "producer-history", false)
+	malformed := createRun(t, store, "malformed-history", false)
+	malformed = claimRun(t, store, malformed, "history-controller")
+	malformed = transitionRun(t, store, malformed, "history-controller", StatePreparing)
+	malformed = claimRun(t, store, malformed, "history-controller")
+	stopping, err := store.UpdateStatus(context.Background(), StatusInput{RunID: malformed.RunID, Owner: "history-controller", ExpectedRevision: malformed.Revision, State: StateStopping, TerminalTarget: StateFailed, Reason: "history-failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopping = claimRun(t, store, stopping, "history-controller")
+	if _, err := store.UpdateStatus(context.Background(), StatusInput{RunID: stopping.RunID, Owner: "history-controller", ExpectedRevision: stopping.Revision, State: StateFailed, Reason: "history-cleanup-complete"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE local_runs SET snapshot_digest=? WHERE run_id=?`, strings.Repeat("0", 64), malformed.RunID); err != nil {
+		t.Fatal(err)
+	}
 	document.Workstations = document.Workstations[:1]
 	document.Reconciliation = workstationReconciliation{Prune: true}
 	pruning := write()
@@ -307,6 +322,69 @@ func TestWorkstationPruneAndImmutableReplacementRequireAcknowledgement(t *testin
 	}
 	if run, _ := store.Get(context.Background(), "keep"); run.State != StatePending && run.State != StatePreparing || run.DeleteRequested {
 		t.Fatalf("replacement promotion = %#v", run)
+	}
+}
+
+func TestTerminalImmutableReplacementCleansOldOwnershipBeforePromotion(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("terminal", "Terminal")}
+	path := filepath.Join(t.TempDir(), "local-controller.yaml")
+	write := func() *Scheduler {
+		if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		scheduler, err := LoadScheduler(path, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scheduler
+	}
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	reconcileToRunning(t, reconciler, store, "terminal")
+	before, err := store.Get(context.Background(), "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Cancel(context.Background(), "terminal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := store.Get(context.Background(), "terminal")
+	if err != nil || !terminal.State.terminal() {
+		t.Fatalf("terminal state = %#v %v", terminal, err)
+	}
+
+	document.Workstations[0].Principal.DisplayName = "Replacement"
+	document.Reconciliation = workstationReconciliation{ReplaceOnImmutableChange: true, DestructiveAcknowledged: true}
+	if err := write().BootstrapWorkstations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := store.Get(context.Background(), "terminal")
+	if err != nil || staged.State != StateStopping || !staged.DeleteRequested || staged.SnapshotDigest != before.SnapshotDigest {
+		t.Fatalf("staged terminal replacement = %#v %v", staged, err)
+	}
+	backend.mu.Lock()
+	callsBefore := backend.deleteCalls
+	backend.mu.Unlock()
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	if backend.deleteCalls != callsBefore+1 || len(backend.deletedRuns) == 0 || backend.deletedRuns[len(backend.deletedRuns)-1].SnapshotDigest != before.SnapshotDigest || !backend.deletedRuns[len(backend.deletedRuns)-1].DeleteRequested {
+		t.Fatalf("terminal replacement cleanup = calls:%d runs:%#v", backend.deleteCalls, backend.deletedRuns)
+	}
+	backend.mu.Unlock()
+	promoted, err := store.Get(context.Background(), "terminal")
+	if err != nil || promoted.DeleteRequested || promoted.SnapshotDigest == before.SnapshotDigest || promoted.State == StateRunning {
+		t.Fatalf("promoted replacement = %#v %v", promoted, err)
 	}
 }
 

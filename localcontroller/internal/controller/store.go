@@ -531,7 +531,14 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 		}
 		for rows.Next() {
 			record, scanErr := scanStoredRun(rows)
-			if scanErr != nil || validateStoredRun(&record) != nil {
+			if scanErr != nil {
+				_ = rows.Close()
+				return nil, ErrStoreUnavailable
+			}
+			if validateStoredRun(&record) != nil {
+				if record.view.State.terminal() {
+					continue
+				}
 				_ = rows.Close()
 				return nil, ErrStoreUnavailable
 			}
@@ -658,16 +665,9 @@ run_id,idempotency_key,active_group,request_digest,snapshot,snapshot_digest,owne
 		}
 		results[index] = CreateResult{Run: updated.view, Created: false}
 	}
-	for _, index := range replaceIndexes {
+	for _, index := range append(replaceIndexes, terminalReplaceIndexes...) {
 		candidate := prepared[index]
-		result, updateErr := tx.ExecContext(ctx, `UPDATE local_runs SET pending_snapshot=?,pending_snapshot_digest=?,state='stopping',delete_requested=1,terminal_target='completed',revision=revision+1,updated_at=?,reconcile_owner=NULL,reconcile_until=NULL,last_reason='immutable-replacement-requested' WHERE idempotency_key=? AND deleted_at IS NULL`, candidate.snapshot, candidate.digest, formatTimestamp(now), candidate.input.IdempotencyKey)
-		if updateErr != nil || rowsAffected(result) != 1 {
-			return nil, ErrStoreUnavailable
-		}
-	}
-	for _, index := range terminalReplaceIndexes {
-		candidate := prepared[index]
-		result, updateErr := tx.ExecContext(ctx, `UPDATE local_runs SET snapshot=?,snapshot_digest=?,request_digest=?,ownership_digest=?,pending_snapshot=NULL,pending_snapshot_digest='',state='pending',revision=revision+1,updated_at=?,terminal_expires_at=NULL,reconcile_owner=NULL,reconcile_until=NULL,last_reason='immutable-replacement-cleanup-complete',terminal_target='' WHERE idempotency_key=? AND deleted_at IS NULL AND state IN ('completed','failed','expired')`, candidate.snapshot, candidate.digest, candidate.digest, candidate.digest, formatTimestamp(now), candidate.input.IdempotencyKey)
+		result, updateErr := tx.ExecContext(ctx, `UPDATE local_runs SET pending_snapshot=?,pending_snapshot_digest=?,state='stopping',delete_requested=1,terminal_target='completed',terminal_expires_at=NULL,revision=revision+1,updated_at=?,reconcile_owner=NULL,reconcile_until=NULL,last_reason='immutable-replacement-requested' WHERE idempotency_key=? AND deleted_at IS NULL`, candidate.snapshot, candidate.digest, formatTimestamp(now), candidate.input.IdempotencyKey)
 		if updateErr != nil || rowsAffected(result) != 1 {
 			return nil, ErrStoreUnavailable
 		}

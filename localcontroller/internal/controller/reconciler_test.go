@@ -27,6 +27,7 @@ type fakeBackend struct {
 	ensureCalls   int
 	ensuredRuns   []BackendRun
 	deleteCalls   int
+	deletedRuns   []BackendRun
 	ensureStarted chan struct{}
 	ensureRelease chan struct{}
 }
@@ -361,6 +362,7 @@ func (backend *fakeBackend) Delete(_ context.Context, run BackendRun) error {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	backend.deleteCalls++
+	backend.deletedRuns = append(backend.deletedRuns, run)
 	if backend.deleteErr != nil {
 		return backend.deleteErr
 	}
