@@ -24,6 +24,7 @@ const nvtPlaceholder = "NVT-PLACEHOLDER-NOT-A-KEY"
 type roleGrant struct {
 	Provider        string
 	Repositories    []string
+	Resources       []string
 	Materialization string
 	Permissions     map[string]string
 	QuotaRequests   int
@@ -79,6 +80,14 @@ func (f *brokerFixture) writeRoleIdentities(identities map[string]roleIdentity) 
 				for _, repo := range grant.Repositories {
 					builder.WriteString("          - ")
 					builder.WriteString(repo)
+					builder.WriteString("\n")
+				}
+			}
+			if len(grant.Resources) > 0 {
+				builder.WriteString("        resources:\n")
+				for _, resource := range grant.Resources {
+					builder.WriteString("          - ")
+					builder.WriteString(resource)
 					builder.WriteString("\n")
 				}
 			}

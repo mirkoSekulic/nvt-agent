@@ -676,6 +676,36 @@ def preseed_file_content(entry, index):
     return json.dumps(entry.get("json"), indent=2, sort_keys=True) + "\n"
 
 
+def preserve_yaml_selection(entry, index, target, content):
+    policy = entry.get("preserve-yaml-selection")
+    if policy is None:
+        return content
+    if not isinstance(policy, dict) or set(policy) != {"field", "collection", "item-field"}:
+        raise SystemExit(f"preseed.files[{index}].preserve-yaml-selection is invalid")
+    field = optional_string(policy.get("field"), f"preseed.files[{index}].preserve-yaml-selection.field")
+    collection = optional_string(policy.get("collection"), f"preseed.files[{index}].preserve-yaml-selection.collection")
+    item_field = optional_string(policy.get("item-field"), f"preseed.files[{index}].preserve-yaml-selection.item-field")
+    try:
+        replacement = yaml.safe_load(content)
+    except yaml.YAMLError as error:
+        raise SystemExit(f"preseed.files[{index}] replacement YAML is invalid") from error
+    if not isinstance(replacement, dict) or not isinstance(replacement.get(collection), list):
+        raise SystemExit(f"preseed.files[{index}] replacement YAML selection is invalid")
+    if not target.is_file() or target.stat().st_size > 1024 * 1024:
+        return content
+    try:
+        existing = yaml.safe_load(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return content
+    if not isinstance(existing, dict) or not isinstance(existing.get(field), str):
+        return content
+    selected = existing[field]
+    if any(isinstance(item, dict) and item.get(item_field) == selected for item in replacement[collection]):
+        replacement[field] = selected
+        return yaml.safe_dump(replacement, sort_keys=False)
+    return content
+
+
 def apply_preseed_files(preseed):
     files = preseed.get("files") or []
     if not isinstance(files, list):
@@ -686,6 +716,7 @@ def apply_preseed_files(preseed):
             raise SystemExit(f"preseed.files[{index}] must be an object")
         target = preseed_file_target(home, entry.get("path"))
         content = preseed_file_content(entry, index)
+        content = preserve_yaml_selection(entry, index, target, content)
         mode = parse_file_mode(entry.get("mode"), f"preseed.files[{index}]")
         overwrite = optional_bool(entry.get("overwrite"), f"preseed.files[{index}].overwrite", default=False)
         if target.exists() and not overwrite:

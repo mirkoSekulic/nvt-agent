@@ -106,4 +106,34 @@ func resolveAllowedAddresses(ctx context.Context, resolver IPResolver, policy de
 	return ordered, nil
 }
 
+// resolvePinnedAddresses permits private addresses only for an exact trusted
+// inject-route upstream.  The workload cannot supply host, port, CA, or server
+// identity for this path, so it cannot turn private reachability into a proxy.
+func resolvePinnedAddresses(ctx context.Context, resolver IPResolver, host string) ([]netip.Addr, error) {
+	if literal, err := netip.ParseAddr(host); err == nil {
+		literal = literal.Unmap()
+		if !literal.IsValid() || literal.IsUnspecified() || literal.IsMulticast() {
+			return nil, fmt.Errorf("pinned destination address is invalid")
+		}
+		return []netip.Addr{literal}, nil
+	}
+	addresses, err := resolver.LookupNetIP(ctx, "ip", host)
+	if err != nil || len(addresses) == 0 {
+		return nil, fmt.Errorf("resolve pinned destination")
+	}
+	result := make([]netip.Addr, 0, len(addresses))
+	seen := map[netip.Addr]struct{}{}
+	for _, address := range addresses {
+		address = address.Unmap()
+		if !address.IsValid() || address.IsUnspecified() || address.IsMulticast() {
+			return nil, fmt.Errorf("pinned destination resolution is invalid")
+		}
+		if _, exists := seen[address]; !exists {
+			seen[address] = struct{}{}
+			result = append(result, address)
+		}
+	}
+	return result, nil
+}
+
 var _ IPResolver = (*net.Resolver)(nil)

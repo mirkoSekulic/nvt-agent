@@ -167,6 +167,10 @@ Rules:
   (fail closed).
 - `strip_request_headers` lists caller-supplied request headers `egressd`
   must remove before injection (placeholder scrub, see below).
+- Independently of provider output, `egressd` always removes caller-supplied
+  `Authorization`, `Proxy-Authorization`, and every `Impersonate-*` header.
+  This provider-neutral floor prevents a workload credential or Kubernetes
+  impersonation request from reaching any injected upstream.
 - Denials use the same `{"ok":false,"error":"...","message":"..."}` shape and
   status conventions as `protocol/broker.md`. Denial reasons include
   role mismatch, missing pairing, capability not granted to the paired agent,
@@ -284,6 +288,14 @@ NVT_EGRESS_FORWARD_PROXY_URL_CODEX_MAIN=http://codex-main:x@egressd:8473
 Tool wrappers or preseeded runtime profiles that explicitly reference a broker
 provider should use the provider-scoped URL. The plain URL remains valid when a
 CONNECT host maps to a single inject route.
+
+An inject route may additionally carry catalog-frozen `upstream_ca_pem`,
+`upstream_server_name`, and `allow_private_upstream`. The CA pool replaces the
+system roots for that route and the server name is explicit. Private address
+resolution is permitted only for this exact trusted upstream; CONNECT host,
+upstream, port, CA, and TLS identity are all outside workload control. Ordinary
+blind forward-proxy traffic continues to reject private, loopback, link-local,
+and other protected destinations.
 
 Runtime plugins declare the same selector at the generic plugin boundary:
 

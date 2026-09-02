@@ -356,6 +356,10 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 			profile.Egress.ProxyProvider = provider
 			continue
 		}
+		if grant.Purpose == "catalog" {
+			profile.Broker.Grants = append(profile.Broker.Grants, kubeconfigGrant(grant.Provider, grant.Resources))
+			continue
+		}
 		for _, repositoryName := range grant.Repositories {
 			repository := brokerRepositoryByIdentity(repositories, repositoryName, grant.Provider)
 			provider := grant.Provider
@@ -539,6 +543,19 @@ func runtimeGrant(provider, preset string) resolvedrun.BrokerGrant {
 	return resolvedrun.BrokerGrant{Provider: provider, Capabilities: []string{"injection.headers"}, Materialization: "placeholder-file", EgressHosts: hosts}
 }
 
+func kubeconfigGrant(provider string, contexts []string) resolvedrun.BrokerGrant {
+	hosts := make([]string, 0, len(contexts))
+	for _, contextName := range contexts {
+		digest := sha256.Sum256([]byte(provider + "\x00" + contextName))
+		hosts = append(hosts, "k-"+hex.EncodeToString(digest[:10])+".kube.nvt.invalid:443")
+	}
+	return resolvedrun.BrokerGrant{
+		Provider: provider, Resources: append([]string(nil), contexts...),
+		Capabilities: []string{"catalog", "injection.headers"}, Preparations: []string{"catalog"},
+		Materialization: "header-inject", EgressHosts: hosts,
+	}
+}
+
 func repositoryGrant(provider, preset string, mediation *manifest.BrokerProviderMediation, repositories []string, permissions map[string]string) resolvedrun.BrokerGrant {
 	hosts := []string{"github.com:443", "api.github.com:443"}
 	materialization, git := "header-inject", true
@@ -564,6 +581,7 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 		return nil, errors.New("compiled broker intent is invalid")
 	}
 	providers := []map[string]any{}
+	providerPlugins := []any{}
 	for _, named := range compiled.Broker.Accounts {
 		account := named.Account
 		switch account.Preset {
@@ -619,7 +637,15 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 			}
 			config[configKey] = plancontract.PrivateTarget(secretName)
 		}
-		providers = append(providers, map[string]any{"name": named.Name, "plugin": provider.Plugin, "config": config, "allow": map[string]any{"repositories": brokerRepositoriesFor(compiled, named.Name, "")}})
+		allow := map[string]any{"repositories": brokerRepositoriesFor(compiled, named.Name, "")}
+		if provider.Plugin == "kubeconfig" {
+			config["state-dir"] = "/var/lib/nvt/broker/providers/" + named.Name
+			allow = map[string]any{"resources": brokerResourcesFor(compiled, named.Name)}
+			if len(providerPlugins) == 0 {
+				providerPlugins = append(providerPlugins, map[string]any{"name": "kubeconfig", "command": []string{"/opt/nvt-broker/broker/providers/kubeconfig/provider.py"}, "initialize-timeout-seconds": 30, "request-timeout-seconds": 60})
+			}
+		}
+		providers = append(providers, map[string]any{"name": named.Name, "plugin": provider.Plugin, "config": config, "allow": allow})
 	}
 	providerNames := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -632,11 +658,25 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 		}
 		providerNames[name] = struct{}{}
 	}
-	encoded, err := json.Marshal(map[string]any{"provider-plugins": []any{}, "providers": providers})
+	encoded, err := json.Marshal(map[string]any{"provider-plugins": providerPlugins, "providers": providers})
 	if err != nil || len(encoded) > manifest.MaxDocumentBytes {
 		return nil, errors.New("broker configuration is unavailable")
 	}
 	return encoded, nil
+}
+
+func brokerResourcesFor(compiled manifest.Compiled, provider string) []string {
+	values := map[string]struct{}{}
+	for _, profile := range compiled.Broker.Profiles {
+		for _, grant := range profile.Grants {
+			if grant.Provider == provider {
+				for _, resource := range grant.Resources {
+					values[resource] = struct{}{}
+				}
+			}
+		}
+	}
+	return sortedNames(values)
 }
 
 func Gateway(compiled manifest.Compiled) ([]byte, error) {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -391,6 +392,7 @@ func (p *ForwardProxy) init() {
 					Route: Route{
 						Capability:            route.Capability,
 						Upstream:              route.Upstream,
+						InjectionHost:         host,
 						AllowInsecureUpstream: route.AllowInsecureUpstream,
 						MaxRequests:           route.MaxRequests,
 					},
@@ -420,14 +422,32 @@ func (p *ForwardProxy) injectRouteTransport(route ForwardProxyInjectRoute) http.
 		return roundTripError{err: fmt.Errorf("inject route transport cannot enforce destination policy")}
 	}
 	clone := transport.Clone()
+	if route.UpstreamCAPEM != "" {
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM([]byte(route.UpstreamCAPEM)) {
+			return roundTripError{err: fmt.Errorf("inject route has invalid upstream CA")}
+		}
+		clone.TLSClientConfig = &tls.Config{RootCAs: roots, ServerName: route.UpstreamServerName, MinVersion: tls.VersionTLS12}
+	}
 	clone.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, fmt.Errorf("parse inject route destination: %w", err)
 		}
-		return p.dialResolvedTarget(ctx, host, port)
+		return p.dialInjectRouteTarget(ctx, host, port, route.AllowPrivateUpstream)
 	}
 	return clone
+}
+
+func (p *ForwardProxy) dialInjectRouteTarget(ctx context.Context, host, port string, allowPrivate bool) (net.Conn, error) {
+	if !allowPrivate {
+		return p.dialResolvedTarget(ctx, host, port)
+	}
+	addresses, err := resolvePinnedAddresses(ctx, p.resolver(), host)
+	if err != nil {
+		return nil, err
+	}
+	return p.dialResolvedAddresses(ctx, addresses, port)
 }
 
 type roundTripError struct{ err error }

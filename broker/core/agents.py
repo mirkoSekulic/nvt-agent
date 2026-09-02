@@ -148,6 +148,13 @@ class AgentRegistry:
                     if not isinstance(repo, str) or not repo:
                         fail(f"agents[{index}].grants[{grant_index}].repositories[{repo_index}] must be a non-empty string")
                     repositories.append(repo)
+                resources = []
+                for resource_index, resource in enumerate(list_value(grant.get("resources"), f"agents[{index}].grants[{grant_index}].resources")):
+                    if not isinstance(resource, str) or not resource or len(resource.encode()) > 4096:
+                        fail(f"agents[{index}].grants[{grant_index}].resources[{resource_index}] must be a bounded non-empty string")
+                    if resource in resources:
+                        fail(f"agents[{index}].grants[{grant_index}].resources contains a duplicate")
+                    resources.append(resource)
                 raw_permissions = grant.get("permissions")
                 permissions = {}
                 if raw_permissions is not None:
@@ -164,7 +171,7 @@ class AgentRegistry:
                 # broker-side: enforcement is per egressd process
                 # (protocol/injection.md).
                 quota = self._grant_quota(grant.get("quota"), index, grant_index)
-                grant_entry = {"provider": provider, "repositories": repositories, "materialization": materialization, "permissions": permissions}
+                grant_entry = {"provider": provider, "repositories": repositories, "resources": resources, "materialization": materialization, "permissions": permissions}
                 authorization = self._grant_authorization(grant.get("authorization"), index, grant_index)
                 if authorization is not None:
                     grant_entry["authorization"] = authorization

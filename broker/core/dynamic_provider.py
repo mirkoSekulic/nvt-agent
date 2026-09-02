@@ -110,6 +110,9 @@ class DynamicProviderAdapter(ProviderAdapter):
     def placeholder_files(self, agent_id, audit, request_id, grant):
         return self._invoke("placeholder_files", agent_id, audit, request_id, grant)
 
+    def catalog(self, agent_id, audit, request_id, grant):
+        return self._invoke("catalog", agent_id, audit, request_id, grant)
+
     def authorize_injection(self, host, method, path, agent_id, request_id, grant):
         return self._invoke("authorize_injection", host, method, path, agent_id, request_id, grant)
 

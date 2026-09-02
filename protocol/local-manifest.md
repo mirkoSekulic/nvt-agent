@@ -456,6 +456,27 @@ profile, workflow, backend, image, credential, and repository selections are
 denied. Local-controller admission tests independently prove those unknown or
 unauthorized selections create no durable run and never reach a backend.
 
+## Kubeconfig context catalogs
+
+A profile may select exact non-repository resources from a generic
+`brokerProviders` entry whose plugin is `kubeconfig`:
+
+```yaml
+profiles:
+  development:
+    kubernetes:
+      - provider: clusters
+        contexts: [development, shared-services]
+```
+
+The provider binds `private-kubeconfig` through `secrets`; it has no static Git
+`mediation` block. The compiler turns the context names into generic broker
+`resources`, catalog preparation, and deterministic mediated route names.
+Profiles cannot select a context from another provider, and a provider cannot
+publish a context outside its compiled administrator ceiling. See
+[`docs/kubeconfig-mediation.md`](../docs/kubeconfig-mediation.md) for the full
+configuration and security boundary.
+
 ## Example
 
 See `localplatform/manifest/testdata/valid.yaml`. External producer

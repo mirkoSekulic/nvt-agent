@@ -255,7 +255,7 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 		agentEnvironment["NVT_DOCKER_REQUIRED_NETWORKS"] = string(encoded)
 	}
 	for _, grant := range run.Broker.Grants {
-		if len(grant.Preparations) != 0 {
+		if containsPreparation(grant.Preparations, "identity") {
 			agentEnvironment["NVT_PREPARED_PROVIDER_METADATA_FILE"] = "/nvt-config/prepared-provider-metadata.json"
 			break
 		}
@@ -426,7 +426,11 @@ func lowerAlphaNumeric(value byte) bool {
 	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
 }
 
-func renderEgressdConfig(config Config, run resolvedrun.ResolvedAgentRun) ([]byte, error) {
+func renderEgressdConfig(config Config, run resolvedrun.ResolvedAgentRun, routeSets ...[]catalogRoute) ([]byte, error) {
+	var catalogRoutes []catalogRoute
+	if len(routeSets) > 0 {
+		catalogRoutes = routeSets[0]
+	}
 	root := map[string]any{
 		"broker_url": config.BrokerURL, "allow_insecure_broker": run.Egress.AllowInsecureBroker, "routes": []any{},
 		"ca": map[string]any{"cert_file": "/public/ca.crt", "key_file": "/private/ca.key"},
@@ -435,7 +439,7 @@ func renderEgressdConfig(config Config, run resolvedrun.ResolvedAgentRun) ([]byt
 		routes := []any{}
 		port := 8471
 		for _, grant := range run.Broker.Grants {
-			if grant.Materialization != "header-inject" {
+			if grant.Materialization != "header-inject" || containsPreparation(grant.Preparations, "catalog") {
 				continue
 			}
 			route := map[string]any{
@@ -449,10 +453,43 @@ func renderEgressdConfig(config Config, run resolvedrun.ResolvedAgentRun) ([]byt
 			port++
 		}
 		root["routes"] = routes
-	} else {
+	}
+	// Catalog-backed Kubernetes clients carry an explicit per-cluster proxy
+	// URL, so they use the forward proxy even when other mediated capabilities
+	// use legacy redirect listeners.
+	if run.Egress.Transport != "redirect" || len(catalogRoutes) != 0 {
 		injects := []any{}
 		seen := map[string]bool{}
+		catalogByProvider := map[string][]catalogRoute{}
+		for _, route := range catalogRoutes {
+			for _, grant := range run.Broker.Grants {
+				if containsPreparation(grant.Preparations, "catalog") {
+					for _, allowed := range grant.EgressHosts {
+						if strings.TrimSuffix(allowed, ":443") == route.Host {
+							catalogByProvider[grant.Provider] = append(catalogByProvider[grant.Provider], route)
+						}
+					}
+				}
+			}
+		}
 		for _, grant := range run.Broker.Grants {
+			if containsPreparation(grant.Preparations, "catalog") {
+				for _, catalog := range catalogByProvider[grant.Provider] {
+					route := map[string]any{
+						"host": catalog.Host, "capability": grant.Provider, "upstream": catalog.Upstream,
+						"upstream_ca_pem": catalog.CAPEM, "upstream_server_name": catalog.ServerName,
+						"allow_private_upstream": catalog.AllowPrivateUpstream,
+					}
+					if grant.Quota != nil {
+						route["max_requests"] = grant.Quota.Requests
+					}
+					injects = append(injects, route)
+				}
+				continue
+			}
+			if run.Egress.Transport == "redirect" {
+				continue
+			}
 			for _, upstream := range grant.EgressHosts {
 				host := strings.ToLower(strings.Split(upstream, ":")[0])
 				key := host + "\x00" + grant.Provider
@@ -471,8 +508,9 @@ func renderEgressdConfig(config Config, run resolvedrun.ResolvedAgentRun) ([]byt
 			}
 		}
 		forwardProxy := map[string]any{
-			"listen": "0.0.0.0:8470", "transparent_mode": run.Egress.Transport == "transparent", "allow_unmatched_hosts": run.Egress.DomainPolicy == nil,
-			"allow_ports": []int{80, 443}, "max_concurrent_tunnels": run.Egress.MaxConcurrentTunnels, "inject_routes": injects,
+			"listen": "0.0.0.0:8470", "transparent_mode": run.Egress.Transport == "transparent",
+			"allow_unmatched_hosts": run.Egress.Transport != "redirect" && run.Egress.DomainPolicy == nil,
+			"allow_ports":           []int{80, 443}, "max_concurrent_tunnels": run.Egress.MaxConcurrentTunnels, "inject_routes": injects,
 		}
 		if policy := run.Egress.DomainPolicy; policy != nil {
 			forwardProxy["domain_policy"] = map[string]any{

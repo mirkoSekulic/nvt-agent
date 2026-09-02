@@ -337,6 +337,67 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	}
 }
 
+func TestKubeconfigProviderRendersProfileScopedCatalogGrant(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "manifest", "testdata", "valid.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := strings.Replace(string(raw), "accounts:\n", "  cluster-config:\n    file: ./.nvt-local/secrets/kubernetes/config\naccounts:\n", 1)
+	value = strings.Replace(value, "profiles:\n", `  clusters:
+    plugin: kubeconfig
+    config:
+      helper-allowlist: [kubelogin]
+      helper-environment:
+        - name: AZURE_CONFIG_DIR
+          value: state:azure
+    secrets:
+      private-kubeconfig: cluster-config
+profiles:
+`, 1)
+	value = strings.Replace(value, "    egress:\n", "    kubernetes:\n      - provider: clusters\n        contexts: [aks-development, aks-production]\n    egress:\n", 1)
+	value = strings.Replace(value, "allow: [GitHub.COM.,", "allow: [kube.nvt.invalid, GitHub.COM.,", 1)
+	decoded, err := manifest.Decode(strings.NewReader(value))
+	if err != nil {
+		t.Fatalf("decode kubeconfig manifest: %v", err)
+	}
+	compiled, err := manifest.Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker, err := serviceconfig.Broker(compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`"command":["/opt/nvt-broker/broker/providers/kubeconfig/provider.py"]`,
+		`"private-kubeconfig":"` + plancontract.PrivateTarget("cluster-config") + `"`,
+		`"resources":["aks-development","aks-production"]`,
+		`"state-dir":"/var/lib/nvt/broker/providers/clusters"`,
+	} {
+		if !strings.Contains(string(broker), expected) {
+			t.Fatalf("broker config omitted %s: %s", expected, broker)
+		}
+	}
+	controller, err := serviceconfig.Controller(compiled, serviceconfig.Instructions{"development": "instructions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trusted resolvedrun.TrustedConfiguration
+	if err := json.Unmarshal(controller, &trusted); err != nil {
+		t.Fatal(err)
+	}
+	var grant *resolvedrun.BrokerGrant
+	for index := range trusted.Profiles[0].Broker.Grants {
+		if trusted.Profiles[0].Broker.Grants[index].Provider == "clusters" {
+			grant = &trusted.Profiles[0].Broker.Grants[index]
+		}
+	}
+	if grant == nil || strings.Join(grant.Resources, ",") != "aks-development,aks-production" ||
+		strings.Join(grant.Preparations, ",") != "catalog" || len(grant.EgressHosts) != 2 || grant.Materialization != "header-inject" {
+		t.Fatalf("profile kubeconfig grant = %#v", grant)
+	}
+}
+
 func TestExplicitWorkflowWriteRendersForGitHubApp(t *testing.T) {
 	raw, err := os.ReadFile("../manifest/testdata/valid.yaml")
 	if err != nil {
