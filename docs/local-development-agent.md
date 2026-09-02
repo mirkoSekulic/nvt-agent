@@ -57,8 +57,17 @@ gateway. Enroll it there; the broker imports it into canonical private storage.
   credentials and workstation state, including anonymous Docker volumes
   attached to those verified containers.
 
-Removing a workstation from the manifest is non-destructive. Immutable drift
-for an existing workstation fails closed.
+Removing a workstation from the manifest is non-destructive and immutable
+drift fails closed by default. Administrators can opt into Flux-style
+convergence with `reconciliation.workstations.prune` and
+`replaceOnImmutableChange`. `local-init` previews the enabled policy. If the
+controller finds an exact-owned workstation to prune or replace, the apply is
+refused unless `ALLOW_DESTRUCTIVE_RECONCILE=1` was supplied to `local-init` or
+`local-up`; the refusal lists the exact workstation names and performs no
+partial mutation. Producer runs, foreign projects, and unrelated history are
+never candidates. Replacement finishes exact-owned container, network,
+persistent-volume, broker-registration, and controller cleanup before the new
+immutable snapshot becomes runnable.
 
 ## Troubleshooting
 
