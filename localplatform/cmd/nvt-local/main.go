@@ -101,6 +101,11 @@ func (application app) prepare(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nvt.local.yaml cannot be compiled: %w", err)
 	}
+	compiled.Controller.DestructiveAcknowledged = os.Getenv("ALLOW_DESTRUCTIVE_RECONCILE") == "1"
+	if decoded.Reconciliation.Workstations.Prune || decoded.Reconciliation.Workstations.ReplaceOnImmutableChange {
+		fmt.Printf("workstation reconciliation plan: prune=%t replaceOnImmutableChange=%t destructiveAcknowledged=%t\n",
+			decoded.Reconciliation.Workstations.Prune, decoded.Reconciliation.Workstations.ReplaceOnImmutableChange, compiled.Controller.DestructiveAcknowledged)
+	}
 	inputs, err := state.Resolve(path, compiled)
 	if err != nil {
 		return nil, err

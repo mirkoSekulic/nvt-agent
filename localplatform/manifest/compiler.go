@@ -27,13 +27,15 @@ type BrokerIntent struct {
 	Repositories []BrokerRepositoryIntent `json:"repositories"`
 }
 type ControllerIntent struct {
-	Owner              string                       `json:"owner"`
-	RetentionPolicies  []NamedRetentionPolicy       `json:"retentionPolicies"`
-	Profiles           []ControllerProfileIntent    `json:"profiles"`
-	Repositories       []ControllerRepositoryIntent `json:"repositories"`
-	Workstations       []Workstation                `json:"workstations,omitempty"`
-	Workflows          []NamedWorkflow              `json:"workflows"`
-	ProducerAdmissions []ProducerAdmissionIntent    `json:"producerAdmissions,omitempty"`
+	Owner                   string                       `json:"owner"`
+	Reconciliation          WorkstationReconciliation    `json:"reconciliation,omitempty"`
+	DestructiveAcknowledged bool                         `json:"destructiveAcknowledged,omitempty"`
+	RetentionPolicies       []NamedRetentionPolicy       `json:"retentionPolicies"`
+	Profiles                []ControllerProfileIntent    `json:"profiles"`
+	Repositories            []ControllerRepositoryIntent `json:"repositories"`
+	Workstations            []Workstation                `json:"workstations,omitempty"`
+	Workflows               []NamedWorkflow              `json:"workflows"`
+	ProducerAdmissions      []ProducerAdmissionIntent    `json:"producerAdmissions,omitempty"`
 }
 type GatewayIntent struct {
 	Owner                    string                `json:"owner"`
@@ -162,6 +164,7 @@ func Compile(m Manifest) (Compiled, error) {
 		return Compiled{}, err
 	}
 	result := Compiled{Version: APIVersion, Broker: BrokerIntent{Owner: "broker", Profiles: []BrokerProfileIntent{}, Repositories: []BrokerRepositoryIntent{}}, Controller: ControllerIntent{Owner: "local-controller", RetentionPolicies: []NamedRetentionPolicy{}, Profiles: []ControllerProfileIntent{}, Repositories: []ControllerRepositoryIntent{}, Workflows: []NamedWorkflow{}}, Gateway: GatewayIntent{Owner: "gateway"}}
+	result.Controller.Reconciliation = m.Reconciliation.Workstations
 	for _, name := range SortedNames(m.RetentionPolicies) {
 		result.Controller.RetentionPolicies = append(result.Controller.RetentionPolicies, NamedRetentionPolicy{Name: name, Policy: m.RetentionPolicies[name]})
 	}
