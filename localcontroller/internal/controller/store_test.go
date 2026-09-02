@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,46 @@ func TestStoreConcurrencyLimitIsAtomicAndReplayPrecedesCapacity(t *testing.T) {
 	replay, err := store.Create(context.Background(), CreateInput{IdempotencyKey: "idempotency-key-" + winner.RunID, ResolvedRun: testResolvedRun(t, winner.RunID, false)})
 	if err != nil || replay.Created {
 		t.Fatalf("capacity blocked idempotent replay: %#v, %v", replay, err)
+	}
+}
+
+func TestListPaginationContinuesPastMalformedTerminalHistory(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 600)
+	inputs := make([]CreateInput, 0, MaxListLimit+2)
+	for index := 0; index < MaxListLimit+2; index++ {
+		runID := fmt.Sprintf("page-%03d", index)
+		inputs = append(inputs, CreateInput{IdempotencyKey: fmt.Sprintf("pagination-key-%03d", index), ResolvedRun: testResolvedRun(t, runID, false)})
+	}
+	if results, err := store.CreateBatch(context.Background(), inputs); err != nil || len(results) != len(inputs) {
+		t.Fatalf("create pagination fixture: results=%d err=%v", len(results), err)
+	}
+	malformed, err := store.Get(context.Background(), "page-250")
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformed = claimRun(t, store, malformed, "pagination-controller")
+	malformed = transitionRun(t, store, malformed, "pagination-controller", StatePreparing)
+	malformed = claimRun(t, store, malformed, "pagination-controller")
+	malformed, err = store.UpdateStatus(context.Background(), StatusInput{RunID: malformed.RunID, Owner: "pagination-controller", ExpectedRevision: malformed.Revision, State: StateStopping, TerminalTarget: StateFailed, Reason: "pagination-failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformed = claimRun(t, store, malformed, "pagination-controller")
+	if _, err := store.UpdateStatus(context.Background(), StatusInput{RunID: malformed.RunID, Owner: "pagination-controller", ExpectedRevision: malformed.Revision, State: StateFailed, Reason: "pagination-cleanup-complete"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE local_runs SET snapshot_digest=? WHERE run_id=?`, strings.Repeat("0", 64), malformed.RunID); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := store.List(context.Background(), MaxListLimit, "")
+	if err != nil || len(first.Runs) != MaxListLimit || first.NextAfter == "" {
+		t.Fatalf("first page = runs:%d next:%q err:%v", len(first.Runs), first.NextAfter, err)
+	}
+	second, err := store.List(context.Background(), MaxListLimit, first.NextAfter)
+	if err != nil || len(second.Runs) != 1 || second.Runs[0].RunID != "page-501" || second.NextAfter != "" {
+		t.Fatalf("second page = %#v err:%v", second, err)
 	}
 }
 

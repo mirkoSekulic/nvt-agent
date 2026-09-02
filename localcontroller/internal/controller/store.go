@@ -795,31 +795,44 @@ func (store *Store) list(ctx context.Context, limit int, after string, activeOnl
 	if activeOnly {
 		where += ` AND state IN ('pending','preparing','running','stopping')`
 	}
-	rows, err := store.db.QueryContext(ctx, selectRuns+where+` ORDER BY run_id LIMIT ?`, after, limit+1)
-	if err != nil {
-		return ListResult{}, ErrStoreUnavailable
-	}
-	defer rows.Close()
-	result := ListResult{APIVersion: APIVersion, Runs: make([]Run, 0, limit)}
-	for rows.Next() {
-		record, err := scanStoredRun(rows)
+	result := ListResult{APIVersion: APIVersion, Runs: make([]Run, 0, limit+1)}
+	cursor := after
+	for len(result.Runs) <= limit {
+		rows, err := store.db.QueryContext(ctx, selectRuns+where+` ORDER BY run_id LIMIT ?`, cursor, limit+1)
 		if err != nil {
 			return ListResult{}, ErrStoreUnavailable
 		}
-		if validateStoredRun(&record) != nil {
-			if record.view.State.terminal() {
-				continue
+		rawCount := 0
+		for rows.Next() {
+			rawCount++
+			record, scanErr := scanStoredRun(rows)
+			if scanErr != nil {
+				_ = rows.Close()
+				return ListResult{}, ErrStoreUnavailable
 			}
+			cursor = record.view.RunID
+			if validateStoredRun(&record) != nil {
+				if record.view.State.terminal() {
+					continue
+				}
+				_ = rows.Close()
+				return ListResult{}, ErrStoreUnavailable
+			}
+			result.Runs = append(result.Runs, record.view)
+			if len(result.Runs) > limit {
+				break
+			}
+		}
+		if rows.Err() != nil || rows.Close() != nil {
 			return ListResult{}, ErrStoreUnavailable
 		}
-		if len(result.Runs) == limit {
-			result.NextAfter = result.Runs[len(result.Runs)-1].RunID
+		if len(result.Runs) > limit || rawCount < limit+1 {
 			break
 		}
-		result.Runs = append(result.Runs, record.view)
 	}
-	if rows.Err() != nil {
-		return ListResult{}, ErrStoreUnavailable
+	if len(result.Runs) > limit {
+		result.Runs = result.Runs[:limit]
+		result.NextAfter = result.Runs[len(result.Runs)-1].RunID
 	}
 	return result, nil
 }
