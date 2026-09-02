@@ -538,7 +538,7 @@ func renderBindings(run resolvedrun.ResolvedAgentRun) resolvedrun.AgentConfigBin
 	bindings := resolvedrun.AgentConfigBindings{RedirectBaseURLs: map[string]string{}}
 	port := 8471
 	for _, grant := range run.Broker.Grants {
-		if grant.Materialization == "header-inject" {
+		if grant.Materialization == "header-inject" && !containsPreparation(grant.Preparations, "catalog") {
 			bindings.RedirectBaseURLs[grant.Provider] = fmt.Sprintf("https://egressd:%d", port)
 			port++
 		}

@@ -143,10 +143,11 @@ func TestCatalogPreparationMergesSeparateProviderInstances(t *testing.T) {
 func TestRedirectCatalogRendersReachableProxyAndMatchingCAConstraints(t *testing.T) {
 	const host = "k-01234567890123456789.kube.nvt.invalid"
 	run := testMediatedRun(t)
-	run.Broker.Grants = append(run.Broker.Grants, resolvedrun.BrokerGrant{
+	catalogGrant := resolvedrun.BrokerGrant{
 		Provider: "clusters", Resources: []string{"development"}, Capabilities: []string{"catalog", "injection.headers"},
 		Preparations: []string{"catalog"}, Materialization: "header-inject", EgressHosts: []string{host + ":443"},
-	})
+	}
+	run.Broker.Grants = append([]resolvedrun.BrokerGrant{catalogGrant}, run.Broker.Grants...)
 	run.Egress = resolvedrun.Egress{Mode: "mediated", Transport: "redirect", PairedEgressRequired: true, AllowInsecureBroker: true}
 	config := Config{
 		Owner: "test-controller", ExternalNetwork: "agents-proxy", ProxyPort: 4090, ProtectedCIDRs: "127.0.0.0/8 169.254.0.0/16",
@@ -174,5 +175,9 @@ func TestRedirectCatalogRendersReachableProxyAndMatchingCAConstraints(t *testing
 		if !strings.Contains(string(egress), expected) {
 			t.Fatalf("redirect catalog egress config omitted %q: %s", expected, egress)
 		}
+	}
+	bindings := renderBindings(run)
+	if _, exists := bindings.RedirectBaseURLs["clusters"]; exists || bindings.RedirectBaseURLs["git-provider"] != "https://egressd:8471" {
+		t.Fatalf("redirect bindings do not match listener allocation: %#v", bindings.RedirectBaseURLs)
 	}
 }

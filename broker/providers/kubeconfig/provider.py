@@ -7,12 +7,14 @@ bearer credentials are returned solely by injection.headers.
 """
 
 import base64
+import binascii
 import datetime
 import hashlib
 import json
 import os
 import re
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -404,12 +406,7 @@ def parse_cluster(cluster, base_dir):
             raise ProviderFailure("provider-config-invalid") from error
     else:
         raise ProviderFailure("provider-config-invalid", message="kubeconfig cluster must pin certificate authority data")
-    if len(ca_bytes) == 0 or len(ca_bytes) > 256 * 1024 or b"BEGIN CERTIFICATE" not in ca_bytes:
-        raise ProviderFailure("provider-config-invalid")
-    try:
-        ca_pem = ca_bytes.decode("ascii")
-    except UnicodeError as error:
-        raise ProviderFailure("provider-config-invalid") from error
+    ca_pem = certificates_only_pem(ca_bytes)
     port = parsed.port or 443
     if ":" in parsed.hostname:
         upstream = f"[{parsed.hostname}]:{port}"
@@ -419,6 +416,46 @@ def parse_cluster(cluster, base_dir):
     if not isinstance(server_name, str) or not server_name or any(character in server_name for character in "/\\@?# \t\r\n"):
         raise ProviderFailure("provider-config-invalid")
     return upstream, server_name, ca_pem
+
+
+def certificates_only_pem(value):
+    if len(value) == 0 or len(value) > 256 * 1024:
+        raise ProviderFailure("provider-config-invalid")
+    begin = b"-----BEGIN CERTIFICATE-----"
+    end = b"-----END CERTIFICATE-----"
+    position = 0
+    certificates = []
+    while position < len(value):
+        while position < len(value) and value[position] in b" \t\r\n":
+            position += 1
+        if position == len(value):
+            break
+        if not value.startswith(begin, position):
+            raise ProviderFailure("provider-config-invalid")
+        body_start = position + len(begin)
+        body_end = value.find(end, body_start)
+        if body_end < 0:
+            raise ProviderFailure("provider-config-invalid")
+        encoded = b"".join(value[body_start:body_end].split())
+        try:
+            der = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise ProviderFailure("provider-config-invalid") from error
+        if not der:
+            raise ProviderFailure("provider-config-invalid")
+        canonical = base64.b64encode(der).decode("ascii")
+        lines = [canonical[index:index + 64] for index in range(0, len(canonical), 64)]
+        certificates.append(begin.decode("ascii") + "\n" + "\n".join(lines) + "\n" + end.decode("ascii") + "\n")
+        position = body_end + len(end)
+    if not certificates:
+        raise ProviderFailure("provider-config-invalid")
+    result = "".join(certificates)
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cadata=result)
+    except ssl.SSLError as error:
+        raise ProviderFailure("provider-config-invalid") from error
+    return result
 
 
 def required_object(value, key):

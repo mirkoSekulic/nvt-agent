@@ -16,7 +16,26 @@ provider_module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(provider_module)
 
 
-CA = "-----BEGIN CERTIFICATE-----\nZml4dHVyZQ==\n-----END CERTIFICATE-----\n"
+CA = """-----BEGIN CERTIFICATE-----
+MIIDFTCCAf2gAwIBAgIUPx17Hd63iAmiPI8cJl4gykAppSYwDQYJKoZIhvcNAQEL
+BQAwGjEYMBYGA1UEAwwPa3ViZXJuZXRlcy50ZXN0MB4XDTI2MDkwMjIzMzYyMloX
+DTM2MDgzMDIzMzYyMlowGjEYMBYGA1UEAwwPa3ViZXJuZXRlcy50ZXN0MIIBIjAN
+BgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnXgPpqHukq/WVndzrqUcsYMCwNfF
+THbbJfY+smn2ERX0OtYNPpBZuouyUdFhRq5qoHA8J0/Iq5lV5Yqeu7YHvIFPPmfV
+E4gp9bi3vpKMWTvxwvVPItaR7JYHdELnqICJHVDrHm8QBkMaDPTYYL3aA8yM+Ub3
+tI5bSdkW8ImxvNA7DVs59OsZO1ZL92l0vQFoG2mSk2W1FQugbdTsN+rg52LI3hKN
+BfVMHGfh4Z2EGqcNo38ExpMzh8RbiwqErOwMnhvDgZZ+a1HwxmNvbEx6G5nJ9bsS
+RzSr3ffhaU7/F9Z1swjt2rCq80TSPZG8k3KXB+4iLh9Ga4WyuxeZ/aQb8QIDAQAB
+o1MwUTAdBgNVHQ4EFgQUuLSECsJdYO4XYAGhQZU5XhinrJowHwYDVR0jBBgwFoAU
+uLSECsJdYO4XYAGhQZU5XhinrJowDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0B
+AQsFAAOCAQEAdhjsMBCygCSBLuGl62sqjurycifi8ezqMarWuoNoAbXw6aNNl7ZO
+hF14c8Ar3ITUYkEg+IqBGu29kC2oANmBmT1WAGEpuWSddQ+m6Ma4lCjVK48nFHqH
+MCjuvhFPo+QuCbjZPrk9O7T7ow/aknA+ueCRls71em+K4SzriUpPEQq7h1I/nia8
+mfmw2jtaM1EZdUUB3i+38VXjYwZ127y0K2qd+Tx0JgSdAOAtNyzzrzLalbZq7qKN
+3vCjF8ECZQPIoRHDImumImIlYI+SuDhBfrOlDXZ48YCtcXc3/L5iK1ZK2GzOfzCj
+F1Pc0azl1YVeuuP+URvLRmF+Pp1HSFWLog==
+-----END CERTIFICATE-----
+"""
 
 
 def document(context_count=1, user=None):
@@ -141,6 +160,17 @@ class KubeconfigProviderTest(unittest.TestCase):
         provider.token_cache[key] = (token, expiry, datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=61))
         self.assertEqual(provider.injection_headers(request)["headers"]["authorization"], "Bearer token-2")
         self.assertEqual((root / "state" / "calls").read_text(), "2")
+
+    def test_ca_bundle_rejects_private_key_or_trailing_content(self):
+        self.assertEqual(provider_module.certificates_only_pem(("\n" + CA).encode()), CA)
+        for suffix in (
+            "-----BEGIN PRIVATE KEY-----\nZml4dHVyZS1rZXk=\n-----END PRIVATE KEY-----\n",
+            "not-a-certificate\n",
+        ):
+            doc = document()
+            doc["clusters"][0]["cluster"]["certificate-authority-data"] = base64.b64encode((CA + suffix).encode()).decode()
+            with self.assertRaisesRegex(provider_module.ProviderFailure, "provider-config-invalid"):
+                self.make_provider(doc, ["context-000"])
 
 
 if __name__ == "__main__":

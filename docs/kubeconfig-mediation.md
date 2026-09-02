@@ -71,9 +71,12 @@ Each catalog route freezes its exact API endpoint, TLS server identity, and CA
 from trusted kubeconfig input. `egressd` may resolve a private address only for
 that exact route. Under a strict domain policy, the synthetic mediated host is
 still policy-checked while the trusted pinned upstream—including an IP
-literal—is not treated as workload-selected general egress. It always removes agent `Authorization`,
-`Proxy-Authorization`, and `Impersonate-*` headers, injects the provider token,
-and uses its existing bounded 60-second material cache. Broker/provider errors,
+literal—is not treated as workload-selected general egress. CA inputs are
+decoded and re-encoded as certificate-only PEM; private-key blocks and any
+other trailing content fail closed before catalog publication. It always
+removes agent `Authorization`, `Proxy-Authorization`, and `Impersonate-*`
+headers, injects the provider token, and uses its existing bounded 60-second
+material cache. Broker/provider errors,
 expiry, grant removal, and refresh failures fail closed. Existing response
 streaming and HTTP upgrade relays cover reads, watches, streaming logs, exec,
 copy, and port-forward protocol paths.
