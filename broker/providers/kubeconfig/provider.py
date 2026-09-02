@@ -26,6 +26,7 @@ import yaml
 PROTOCOL = "nvt.broker-provider/v1"
 MAX_CONTEXTS = 512
 MAX_HELPER_OUTPUT = 1024 * 1024
+MAX_NO_EXPIRY_CACHE_SECONDS = 60
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -293,12 +294,15 @@ class KubeconfigProvider:
         with self.lock:
             cache_key = (user_name, cluster_name)
             cached = self.token_cache.get(cache_key)
-            if cached and (cached[1] is None or now < cached[1] - datetime.timedelta(seconds=60)):
+            if cached and (
+                cached[1] is not None and now < cached[1] - datetime.timedelta(seconds=60)
+                or cached[1] is None and now < cached[2] + datetime.timedelta(seconds=MAX_NO_EXPIRY_CACHE_SECONDS)
+            ):
                 return cached[0], format_expiry(cached[1])
             token, expiry = self._exec_credential(exec_config, cluster_name)
             if len(self.token_cache) >= MAX_CONTEXTS:
                 self.token_cache.clear()
-            self.token_cache[cache_key] = (token, expiry)
+            self.token_cache[cache_key] = (token, expiry, now)
             return token, format_expiry(expiry)
 
     def _exec_credential(self, config, cluster_name):

@@ -408,6 +408,14 @@ func (c *ForwardProxyConfig) Validate() error {
 			if allowed, _ := c.DomainPolicy.Decide(route.Host); !allowed {
 				return fmt.Errorf("inject_routes[%d].host %q is denied by domain_policy", index, route.Host)
 			}
+			// A private-capable catalog route is already constrained by an
+			// exact trusted upstream, route-specific CA, and TLS server name.
+			// Applying the workload's domain policy to that upstream would make
+			// pinned IP literals impossible to represent; the synthetic CONNECT
+			// host remains subject to the policy above.
+			if route.AllowPrivateUpstream {
+				continue
+			}
 			host, ok := normalizedRouteUpstreamHost(route.Upstream)
 			if !ok {
 				continue // validateForwardProxyRouteOverlap reports the malformed upstream.

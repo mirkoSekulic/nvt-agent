@@ -297,6 +297,12 @@ upstream, port, CA, and TLS identity are all outside workload control. Ordinary
 blind forward-proxy traffic continues to reject private, loopback, link-local,
 and other protected destinations.
 
+When a domain policy is present, the synthetic inject-route host remains
+subject to it. A route with `allow_private_upstream` does not re-apply that
+workload domain policy to its trusted pinned upstream, because an exact private
+IP literal is not a domain-policy entry and is already constrained by the
+route-specific endpoint, CA, and server identity.
+
 Runtime plugins declare the same selector at the generic plugin boundary:
 
 ```yaml

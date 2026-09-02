@@ -314,6 +314,9 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 		caCommand := []string{"--cert-file", "/public/ca.crt", "--key-file", "/private/ca.key"}
 		if run.Egress.Transport == "redirect" {
 			caCommand = append(caCommand, "--leaf-dns-name", "egressd")
+			for _, host := range catalogLeafNames(run) {
+				caCommand = append(caCommand, "--upstream-leaf-name", host)
+			}
 		} else {
 			for _, host := range egressLeafNames(run) {
 				caCommand = append(caCommand, "--upstream-leaf-name", host)
@@ -323,7 +326,7 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 			Image: config.EgressdImage, User: "0:0", NetworkMode: "none", Entrypoint: []string{"/usr/local/bin/egress-ca-init"}, Command: caCommand,
 			Volumes: []string{"egress-private:/private", "egress-public:/public"}, Labels: labels,
 		}
-		if run.Egress.Transport == "forward-proxy" || run.Egress.Transport == "transparent" {
+		if run.Egress.Transport == "forward-proxy" || run.Egress.Transport == "transparent" || hasCatalogGrant(run) {
 			services["captured"] = composeService{
 				Image: config.CapturedImage, User: "65532:65532", NetworkMode: "service:" + namespaceService, Restart: "unless-stopped", Labels: labels,
 				Environment: map[string]string{
@@ -436,6 +439,7 @@ func renderEgressdConfig(config Config, run resolvedrun.ResolvedAgentRun, routeS
 		"ca": map[string]any{"cert_file": "/public/ca.crt", "key_file": "/private/ca.key"},
 	}
 	if run.Egress.Transport == "redirect" {
+		root["ca"].(map[string]any)["leaf_dns_names"] = []string{"egressd"}
 		routes := []any{}
 		port := 8471
 		for _, grant := range run.Broker.Grants {
@@ -563,6 +567,34 @@ func egressLeafNames(run resolvedrun.ResolvedAgentRun) []string {
 	}
 	sort.Strings(values)
 	return values
+}
+
+func catalogLeafNames(run resolvedrun.ResolvedAgentRun) []string {
+	values := []string{}
+	seen := map[string]bool{}
+	for _, grant := range run.Broker.Grants {
+		if !containsPreparation(grant.Preparations, "catalog") {
+			continue
+		}
+		for _, upstream := range grant.EgressHosts {
+			host := strings.ToLower(strings.TrimSuffix(upstream, ":443"))
+			if !seen[host] {
+				seen[host] = true
+				values = append(values, host)
+			}
+		}
+	}
+	sort.Strings(values)
+	return values
+}
+
+func hasCatalogGrant(run resolvedrun.ResolvedAgentRun) bool {
+	for _, grant := range run.Broker.Grants {
+		if containsPreparation(grant.Preparations, "catalog") {
+			return true
+		}
+	}
+	return false
 }
 
 func dockerCPU(value string) string {

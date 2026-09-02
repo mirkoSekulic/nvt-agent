@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"reflect"
 	"strings"
 	"time"
 
@@ -91,6 +92,7 @@ func newBrokerPreparer(rawURL, caFile string, timeout time.Duration) (*brokerPre
 
 func (preparer *brokerPreparer) prepare(ctx context.Context, run resolvedrun.ResolvedAgentRun, token string, rendered json.RawMessage) (json.RawMessage, []byte, []catalogRoute, error) {
 	files := []placeholderFile{}
+	catalogKubeconfigs := []placeholderFile{}
 	routes := []catalogRoute{}
 	seenPaths := map[string]bool{}
 	for _, grant := range run.Broker.Grants {
@@ -181,6 +183,10 @@ func (preparer *brokerPreparer) prepare(ctx context.Context, run resolvedrun.Res
 			if !validCatalogFile(file) || seenPaths[file.Path] {
 				return nil, nil, nil, errors.New("broker preparation unavailable")
 			}
+			if file.Path == ".kube/config" {
+				catalogKubeconfigs = append(catalogKubeconfigs, file)
+				continue
+			}
 			seenPaths[file.Path] = true
 			files = append(files, file)
 		}
@@ -195,6 +201,14 @@ func (preparer *brokerPreparer) prepare(ctx context.Context, run resolvedrun.Res
 		if len(seenRouteHosts) != len(allowedResources) {
 			return nil, nil, nil, errors.New("broker preparation unavailable")
 		}
+	}
+	if len(catalogKubeconfigs) != 0 {
+		merged, err := mergeCatalogKubeconfigs(catalogKubeconfigs)
+		if err != nil || seenPaths[merged.Path] {
+			return nil, nil, nil, errors.New("broker preparation unavailable")
+		}
+		seenPaths[merged.Path] = true
+		files = append(files, merged)
 	}
 	metadata, err := preparer.prepareMetadata(ctx, run, token)
 	if err != nil {
@@ -366,6 +380,108 @@ func bindCatalogFile(file placeholderFile, provider string, routes []catalogRout
 	}
 	file.Content = string(encoded)
 	return file, nil
+}
+
+func mergeCatalogKubeconfigs(files []placeholderFile) (placeholderFile, error) {
+	merged := map[string]any{
+		"apiVersion": "v1", "kind": "Config", "preferences": map[string]any{},
+		"clusters": []any{}, "users": []any{}, "contexts": []any{},
+	}
+	seen := map[string]map[string]any{"clusters": {}, "users": {}, "contexts": {}}
+	currentContext := ""
+	for _, file := range files {
+		var document map[string]any
+		if file.Path != ".kube/config" || yaml.Unmarshal([]byte(file.Content), &document) != nil ||
+			document["apiVersion"] != "v1" || document["kind"] != "Config" || !mapHasOnly(document, "apiVersion", "kind", "preferences", "clusters", "users", "contexts", "current-context") {
+			return placeholderFile{}, errors.New("catalog kubeconfig is invalid")
+		}
+		if preferences, ok := document["preferences"].(map[string]any); !ok || len(preferences) != 0 {
+			return placeholderFile{}, errors.New("catalog kubeconfig contains non-sanitized data")
+		}
+		for _, collection := range []string{"clusters", "users", "contexts"} {
+			items, ok := document[collection].([]any)
+			if !ok || len(items) == 0 {
+				return placeholderFile{}, errors.New("catalog kubeconfig is invalid")
+			}
+			for _, raw := range items {
+				item, ok := raw.(map[string]any)
+				name, nameOK := item["name"].(string)
+				if !ok || !nameOK || name == "" {
+					return placeholderFile{}, errors.New("catalog kubeconfig is invalid")
+				}
+				if !validSanitizedKubeconfigItem(collection, item) {
+					return placeholderFile{}, errors.New("catalog kubeconfig contains non-sanitized data")
+				}
+				if previous, exists := seen[collection][name]; exists {
+					// Empty auth-info entries are intentionally identical across
+					// provider instances and are safe to coalesce. Context names
+					// must remain unambiguous; differing cluster entries are unsafe.
+					if collection == "users" && reflect.DeepEqual(previous, item) {
+						continue
+					}
+					return placeholderFile{}, errors.New("catalog kubeconfig names collide")
+				}
+				seen[collection][name] = item
+				merged[collection] = append(merged[collection].([]any), item)
+			}
+		}
+		if currentContext == "" {
+			value, ok := document["current-context"].(string)
+			if !ok || value == "" {
+				return placeholderFile{}, errors.New("catalog kubeconfig is invalid")
+			}
+			currentContext = value
+		}
+	}
+	if _, ok := seen["contexts"][currentContext]; !ok {
+		return placeholderFile{}, errors.New("catalog kubeconfig current context is invalid")
+	}
+	merged["current-context"] = currentContext
+	encoded, err := yaml.Marshal(merged)
+	if err != nil || len(encoded) > 256<<10 {
+		return placeholderFile{}, errors.New("catalog kubeconfig is invalid")
+	}
+	return placeholderFile{Path: ".kube/config", Content: string(encoded), Mode: "0600"}, nil
+}
+
+func validSanitizedKubeconfigItem(collection string, item map[string]any) bool {
+	switch collection {
+	case "clusters":
+		value, ok := item["cluster"].(map[string]any)
+		server, serverOK := value["server"].(string)
+		proxyURL, proxyOK := value["proxy-url"].(string)
+		return ok && serverOK && server != "" && proxyOK && proxyURL != "" && mapHasOnly(item, "name", "cluster") && mapHasOnly(value, "server", "proxy-url")
+	case "users":
+		value, ok := item["user"].(map[string]any)
+		return ok && len(value) == 0 && mapHasOnly(item, "name", "user")
+	case "contexts":
+		value, ok := item["context"].(map[string]any)
+		cluster, clusterOK := value["cluster"].(string)
+		user, userOK := value["user"].(string)
+		if !ok || !clusterOK || cluster == "" || !userOK || user == "" || !mapHasOnly(item, "name", "context") || !mapHasOnly(value, "cluster", "user", "namespace") {
+			return false
+		}
+		if namespace, exists := value["namespace"]; exists {
+			text, valid := namespace.(string)
+			return valid && text != ""
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func mapHasOnly(value map[string]any, names ...string) bool {
+	allowed := make(map[string]bool, len(names))
+	for _, name := range names {
+		allowed[name] = true
+	}
+	for name := range value {
+		if !allowed[name] {
+			return false
+		}
+	}
+	return true
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {

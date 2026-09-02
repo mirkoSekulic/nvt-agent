@@ -117,6 +117,31 @@ class KubeconfigProviderTest(unittest.TestCase):
         with self.assertRaisesRegex(provider_module.ProviderFailure, "unsupported-kubeconfig-auth"):
             provider.injection_headers({"host": host, "grant": {"resources": ["context-000"]}})
 
+    def test_exec_helper_without_expiry_has_bounded_cache(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        helper = Path(temporary.name) / "helper"
+        helper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,os,pathlib\n"
+            "marker=pathlib.Path(os.environ['HOME'])/'calls'\n"
+            "count=int(marker.read_text())+1 if marker.exists() else 1\n"
+            "marker.write_text(str(count))\n"
+            "print(json.dumps({'apiVersion':'client.authentication.k8s.io/v1','kind':'ExecCredential','status':{'token':'token-'+str(count)}}))\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o700)
+        exec_user = {"exec": {"apiVersion": "client.authentication.k8s.io/v1", "command": str(helper), "interactiveMode": "Never"}}
+        provider, root = self.make_provider(document(user=exec_user), ["context-000"], {"helper-allowlist": [str(helper)]})
+        request = {"host": provider_module.route_host("clusters", "context-000"), "grant": {"resources": ["context-000"]}}
+        self.assertEqual(provider.injection_headers(request)["headers"]["authorization"], "Bearer token-1")
+        self.assertEqual(provider.injection_headers(request)["headers"]["authorization"], "Bearer token-1")
+        key = ("shared-user", "cluster-000")
+        token, expiry, _ = provider.token_cache[key]
+        provider.token_cache[key] = (token, expiry, datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=61))
+        self.assertEqual(provider.injection_headers(request)["headers"]["authorization"], "Bearer token-2")
+        self.assertEqual((root / "state" / "calls").read_text(), "2")
+
 
 if __name__ == "__main__":
     unittest.main()
