@@ -502,6 +502,7 @@ def apply_mediated_egress(egress):
         raise SystemExit("egress.grants must be a list")
     deadline = broker_wait_deadline()
     https_provider = None
+    catalog_provider = None
     enforced = bool(egress.get("enforcement"))
     transport_mode = egress_transport(egress)
     forward_proxy = transport_mode in {"forward-proxy", "transparent"}
@@ -521,6 +522,17 @@ def apply_mediated_egress(egress):
             continue
         if materialization != "header-inject":
             raise SystemExit(f"egress mediated grant {provider} must be materialization header-inject")
+        catalog = grant.get("catalog", False)
+        if not isinstance(catalog, bool):
+            raise SystemExit(f"egress mediated grant {provider} catalog must be a boolean")
+        if catalog:
+            # Catalog preparation already installed a sanitized kubeconfig
+            # whose per-cluster proxy URL selects this provider. It is not a
+            # redirect listener and must never trigger an agent-side broker
+            # routing lookup, but its MITM path still requires the egress CA.
+            if catalog_provider is None:
+                catalog_provider = provider
+            continue
         if forward_proxy:
             # Forward-proxy header-inject grants are reached through
             # HTTP(S)_PROXY and selected by runtime.proxy.provider or a tool
@@ -560,11 +572,11 @@ def apply_mediated_egress(egress):
                 "NVT_EGRESS_FORWARD_PROXY_URL_" + env_suffix(provider),
                 proxy_url_for_provider(proxy_url, provider),
             )
-    if forward_proxy or (enforced and https_provider is not None):
+    if forward_proxy or catalog_provider is not None or (enforced and https_provider is not None):
         # Forward-proxy mode has no https base-url to trigger the install, but
         # the MITM leaf must be trusted system-wide so proxy-env HTTPS clients
         # (curl, requests, node, ...) accept it.
-        install_egress_ca_trust(https_provider or "forward-proxy")
+        install_egress_ca_trust(https_provider or catalog_provider or "forward-proxy")
     target = Path.home() / ".nvt-agent" / "egress.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     metadata = {

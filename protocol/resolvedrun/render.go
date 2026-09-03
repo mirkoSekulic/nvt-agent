@@ -202,7 +202,11 @@ func renderEgress(run ResolvedAgentRun, bindings AgentConfigBindings) map[string
 	grants := make([]any, 0, len(run.Broker.Grants))
 	for _, grant := range run.Broker.Grants {
 		entry := map[string]any{"provider": grant.Provider, "materialization": grant.Materialization}
-		if run.Egress.Transport == "redirect" && grant.Materialization == "header-inject" {
+		catalog := brokerGrantHasPreparation(grant, "catalog")
+		if catalog {
+			entry["catalog"] = true
+		}
+		if run.Egress.Transport == "redirect" && grant.Materialization == "header-inject" && !catalog {
 			entry["base-url"] = bindings.RedirectBaseURLs[grant.Provider]
 			entry["hosts"] = append([]string(nil), grant.EgressHosts...)
 			entry["git"] = grant.Git
@@ -236,7 +240,7 @@ func validateRenderBindings(run ResolvedAgentRun, bindings AgentConfigBindings) 
 		}
 		expected := map[string]struct{}{}
 		for _, grant := range run.Broker.Grants {
-			if grant.Materialization != "header-inject" {
+			if grant.Materialization != "header-inject" || brokerGrantHasPreparation(grant, "catalog") {
 				continue
 			}
 			expected[grant.Provider] = struct{}{}
@@ -258,6 +262,15 @@ func validateRenderBindings(run ResolvedAgentRun, bindings AgentConfigBindings) 
 		return ErrInvalidRenderBinding
 	}
 	return nil
+}
+
+func brokerGrantHasPreparation(grant BrokerGrant, operation string) bool {
+	for _, value := range grant.Preparations {
+		if value == operation {
+			return true
+		}
+	}
+	return false
 }
 
 func validRuntimeEndpoint(value string) bool {

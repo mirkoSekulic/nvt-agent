@@ -180,4 +180,8 @@ func TestRedirectCatalogRendersReachableProxyAndMatchingCAConstraints(t *testing
 	if _, exists := bindings.RedirectBaseURLs["clusters"]; exists || bindings.RedirectBaseURLs["git-provider"] != "https://egressd:8471" {
 		t.Fatalf("redirect bindings do not match listener allocation: %#v", bindings.RedirectBaseURLs)
 	}
+	rendered, err := resolvedrun.RenderAgentConfig(run, bindings)
+	if err != nil || !strings.Contains(string(rendered), `"catalog":true`) {
+		t.Fatalf("redirect catalog agent config = %s, %v", rendered, err)
+	}
 }

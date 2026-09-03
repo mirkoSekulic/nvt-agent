@@ -26,6 +26,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const backendTestCatalogHost = "k-01234567890123456789.kube.nvt.invalid"
+
 type fakeDocker struct {
 	mu                      sync.Mutex
 	objects                 map[string]map[string]string
@@ -413,6 +415,24 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 	observation, err := backend.Inspect(context.Background(), desired)
 	if err != nil || !observation.Ready {
 		t.Fatalf("inspect = %#v %v", observation, err)
+	}
+}
+
+func TestDockerBackendEnsureAcceptsRedirectCatalogGrant(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	catalog := resolvedrun.BrokerGrant{
+		Provider: "clusters", Resources: []string{"development"}, Capabilities: []string{"catalog", "injection.headers"},
+		Preparations: []string{"catalog"}, Materialization: "header-inject", EgressHosts: []string{backendTestCatalogHost + ":443"},
+	}
+	run.Broker.Grants = append([]resolvedrun.BrokerGrant{catalog}, run.Broker.Grants...)
+	run.Egress = resolvedrun.Egress{Mode: "mediated", Transport: "redirect", PairedEgressRequired: true, AllowInsecureBroker: true}
+	if err := resolvedrun.ValidateResolvedAgentRun(run); err != nil {
+		t.Fatalf("redirect catalog run is invalid: %v", err)
+	}
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("a", 64)}
+	observation, err := backend.Ensure(context.Background(), desired)
+	if err != nil || !observation.Ready {
+		t.Fatalf("redirect catalog ensure = %#v, %v; commands=%v", observation, err, docker.commands)
 	}
 }
 
@@ -1624,6 +1644,8 @@ func testBackend(t *testing.T) (*Backend, *fakeDocker, resolvedrun.ResolvedAgent
 			_, _ = io.WriteString(response, `{"ok":true,"files":[{"path":".agent/auth.json","content":"{\"access_token\":\"NVT-PLACEHOLDER-NOT-A-KEY\"}\\n","mode":"0600"}],"hosts":["api.example.test"],"expires_at":null}`)
 		case "/v1/identity":
 			_, _ = io.WriteString(response, `{"ok":true,"name":"Example Bot","email":"bot@example.test"}`)
+		case "/v1/catalog":
+			_, _ = io.WriteString(response, `{"ok":true,"files":[{"path":".kube/config","content":"apiVersion: v1\nkind: Config\npreferences: {}\nclusters:\n- name: development-cluster\n  cluster: {server: https://`+backendTestCatalogHost+`}\nusers:\n- name: development-user\n  user: {}\ncontexts:\n- name: development\n  context: {cluster: development-cluster, user: development-user}\ncurrent-context: development\n","mode":"0600"}],"routes":[{"id":"development","host":"`+backendTestCatalogHost+`","upstream":"10.20.30.40:6443","server_name":"kubernetes.internal","ca_pem":"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n","allow_private_upstream":true}],"expires_at":null}`)
 		default:
 			http.Error(response, "not found", http.StatusNotFound)
 		}
