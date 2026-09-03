@@ -71,7 +71,7 @@ func TestCatalogRouteUsesSyntheticHostForBrokerAuthorization(t *testing.T) {
 		Route:  Route{Capability: "clusters", Upstream: "10.20.30.40:6443", InjectionHost: "k-context.kube.nvt.invalid"},
 		Broker: &BrokerClient{URL: broker.URL, Token: "egress", Client: broker.Client()},
 	}
-	material, err := proxy.material(context.Background(), http.MethodPost, "/api/v1/namespaces")
+	material, err := proxy.material(context.Background(), http.MethodPost, "/api/v1/namespaces", false)
 	if err != nil || !bytes.Equal([]byte(material.Headers["authorization"]), []byte("Bearer injected")) {
 		t.Fatalf("material = %#v, %v", material, err)
 	}

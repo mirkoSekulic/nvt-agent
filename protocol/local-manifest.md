@@ -467,6 +467,8 @@ profiles:
     kubernetes:
       - provider: clusters
         contexts: [development, shared-services]
+        authorization:
+          preset: observe
 ```
 
 The provider binds `private-kubeconfig` through `secrets`; it has no static Git
@@ -476,6 +478,12 @@ Profiles cannot select a context from another provider, and a provider cannot
 publish a context outside its compiled administrator ceiling. See
 [`docs/kubeconfig-mediation.md`](../docs/kubeconfig-mediation.md) for the full
 configuration and security boundary.
+
+`authorization` may be omitted, use the sole versioned `observe` preset, or
+contain concrete `defaultAction` plus operation/resource `rules`. Preset and
+concrete fields are mutually exclusive and unknown fields/presets are rejected.
+The compiler expands `observe` into an immutable default-deny concrete policy
+for the sorted exact context resources; the broker never receives preset data.
 
 ## Example
 

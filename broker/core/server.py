@@ -484,11 +484,14 @@ class Broker:
         host = string_field(payload, "host")
         method = string_field(payload, "method").upper()
         path = string_field(payload, "path")
+        upgrade = payload.get("upgrade", False)
+        if not isinstance(upgrade, bool):
+            raise ProviderError("upgrade-invalid")
         grant = self._injection_grant(paired, capability)
         provider, hosts = self._injection_provider(capability)
         if host not in hosts:
             raise ProviderError("host-not-allowed", f"host {host} is not allowed for {capability}", 403)
-        decision = provider.authorize_injection(host, method, path, paired["id"], request_id, grant)
+        decision = provider.authorize_injection(host, method, path, upgrade, paired["id"], request_id, grant)
         if decision is not None and not decision.get("allowed", True):
             raise ProviderError(
                 "operation-not-allowed",

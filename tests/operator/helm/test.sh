@@ -679,6 +679,9 @@ grep -q 'operator.image must use the 0.2 repository/tag/pullPolicy map; migrate 
 grep -q 'name: default-codex' "${PROFILE_RENDER}"
 grep -q 'provider: codex-main' "${PROFILE_RENDER}"
 grep -q 'provider: github-main-app' "${PROFILE_RENDER}"
+grep -q 'provider: clusters' "${PROFILE_RENDER}"
+grep -q 'resources:' "${PROFILE_RENDER}"
+grep -q 'preset: observe' "${PROFILE_RENDER}"
 grep -q 'egressMaxConcurrentTunnels: 512' "${PROFILE_RENDER}"
 grep -A5 'capabilities:' "${PROFILE_RENDER}" | grep -q 'SYS_PTRACE'
 grep -A4 'requiredNetworks:' "${PROFILE_RENDER}" | grep -q 'name: kind'

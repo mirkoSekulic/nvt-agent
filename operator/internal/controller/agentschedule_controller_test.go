@@ -236,6 +236,16 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if crdPath(t, properties, "allowedProducers", "items", "type") != "string" {
 		t.Fatalf("expected allowedProducers string schema, got %#v", properties["allowedProducers"])
 	}
+	grantProperties := crdPath(t, profileProperties, "broker", "properties", "grants", "items", "properties").(map[string]any)
+	if fmt.Sprint(crdPath(t, grantProperties, "resources", "maxItems")) != "256" ||
+		!reflect.DeepEqual(crdPath(t, grantProperties, "authorization", "properties", "preset", "enum"), []any{"observe"}) {
+		t.Fatalf("expected kubeconfig resource and observe preset schema, got %#v", grantProperties)
+	}
+	authorizationValidations := crdPath(t, grantProperties, "authorization", "x-kubernetes-validations").([]any)
+	if !hasCRDValidation(authorizationValidations, "(has(self.preset) && !has(self.defaultAction) && !has(self.rules)) || (!has(self.preset) && has(self.defaultAction))", "mutually exclusive") {
+		// The helper matches a rule substring and message substring.
+		t.Fatalf("missing preset/concrete exclusivity validation: %#v", authorizationValidations)
+	}
 	workspace := crdPath(t, properties, "template", "properties", "workspace").(map[string]any)
 	if crdPath(t, workspace, "properties", "mode", "default") != "Ephemeral" ||
 		crdPath(t, workspace, "properties", "size", "x-kubernetes-int-or-string") != true ||

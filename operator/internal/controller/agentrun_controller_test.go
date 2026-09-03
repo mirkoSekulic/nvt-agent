@@ -377,13 +377,13 @@ func TestReconcileDeletingLegacyExternalAgentRunRetainsCleanupFinalizers(t *test
 
 func TestBrokerAgentGrantsCarriesOperationAuthorization(t *testing.T) {
 	policy := &nvtv1alpha1.AgentRunBrokerGrantAuthorization{DefaultAction: "deny", Rules: []nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule{{Operation: "execute", Resource: "workflow/deploy"}}}
-	grants := BrokerAgentGrants(&nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{Provider: "automation", Authorization: policy}}})
+	grants := BrokerAgentGrants(&nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{Provider: "automation", Resources: []string{"staging"}, Authorization: policy}}})
 	policy.Rules[0].Resource = "workflow/mutated"
-	if len(grants) != 1 || grants[0].Authorization == nil || grants[0].Authorization.Rules[0].Resource != "workflow/deploy" {
+	if len(grants) != 1 || strings.Join(grants[0].Resources, ",") != "staging" || grants[0].Authorization == nil || grants[0].Authorization.Rules[0].Resource != "workflow/deploy" {
 		t.Fatalf("broker policy dropped or aliased authorization: %#v", grants)
 	}
 	raw, err := RenderBrokerAgentsYAML(brokerAgentsPolicy{Agents: []brokerAgentEntry{{ID: "agent", TokenSHA256: validTestTokenHash("agent"), Grants: grants}}})
-	if err != nil || !strings.Contains(raw, "defaultAction: deny") || !strings.Contains(raw, "resource: workflow/deploy") {
+	if err != nil || !strings.Contains(raw, "resources:\n    - staging") || !strings.Contains(raw, "defaultAction: deny") || !strings.Contains(raw, "resource: workflow/deploy") {
 		t.Fatalf("rendered broker policy omitted authorization: %v\n%s", err, raw)
 	}
 }
@@ -2237,6 +2237,25 @@ func TestValidateAgentRunEgressModeRejectsInvalidQuota(t *testing.T) {
 	}}}
 	if err := ValidateAgentRunEgressMode(agentRun); err == nil || !strings.Contains(err.Error(), "api-main") || !strings.Contains(err.Error(), "quota") {
 		t.Fatalf("expected quota rejection naming the grant, got %v", err)
+	}
+}
+
+func TestValidateAgentRunEgressModeRequiresConcreteAuthorizationAndValidResources(t *testing.T) {
+	run := forwardProxyAgentRun()
+	run.Spec.Broker.Grants[0].Resources = []string{"studio-staging"}
+	run.Spec.Broker.Grants[0].Authorization = &nvtv1alpha1.AgentRunBrokerGrantAuthorization{Preset: "observe"}
+	if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "must be resolved") {
+		t.Fatalf("raw AgentRun authorization preset was accepted: %v", err)
+	}
+	run.Spec.Broker.Grants[0].Authorization = &nvtv1alpha1.AgentRunBrokerGrantAuthorization{
+		DefaultAction: "deny", Rules: []nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule{{Operation: "observe", Resource: "context/studio-staging"}},
+	}
+	if err := ValidateAgentRunEgressMode(run); err != nil {
+		t.Fatalf("concrete AgentRun authorization was rejected: %v", err)
+	}
+	run.Spec.Broker.Grants[0].Resources = []string{"studio-staging", "studio-staging"}
+	if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate context resources were accepted: %v", err)
 	}
 }
 
@@ -5513,6 +5532,15 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	egressHosts := crdPath(t, spec, "broker", "properties", "grants", "items", "properties", "egressHosts").(map[string]any)
 	if egressHosts["type"] != "array" {
 		t.Fatalf("expected egressHosts array schema, got %#v", egressHosts)
+	}
+	grantProperties := crdPath(t, spec, "broker", "properties", "grants", "items", "properties").(map[string]any)
+	if fmt.Sprint(crdPath(t, grantProperties, "resources", "maxItems")) != "256" {
+		t.Fatalf("expected bounded broker resource scope, got %#v", grantProperties["resources"])
+	}
+	authorization := crdPath(t, grantProperties, "authorization").(map[string]any)
+	if _, acceptsPreset := authorization["properties"].(map[string]any)["preset"]; acceptsPreset ||
+		!reflect.DeepEqual(authorization["required"], []any{"defaultAction"}) {
+		t.Fatalf("raw AgentRun authorization must be concrete: %#v", authorization)
 	}
 }
 

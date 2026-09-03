@@ -190,7 +190,7 @@ the sole audit writer; provider-generated audit records are not supported.
   `append_headers` contains only non-secret, comma-separated feature tokens;
   credential headers belong in `headers`. Providers that do not need additive
   composition may omit it.
-- `injection.authorization`: `{host,method,path,agent_id,request_id,grant}` →
+- `injection.authorization`: `{host,method,path,upgrade?,agent_id,request_id,grant}` →
   `{allowed,operation,resource}`. `operation` and `resource` are bounded,
   non-empty opaque strings defined by the provider. A provider declaring this
   capability classifies the request and intersects its administrator-owned
@@ -198,6 +198,10 @@ the sole audit writer; provider-generated audit records are not supported.
   Broker core never interprets either vocabulary. If a grant contains
   operation authorization, an executable provider that did not negotiate this
   capability fails closed before `injection.headers` is invoked.
+  `path` is the actual request URI (path plus query) and optional `upgrade`
+  (omitted/false by default) records
+  whether the original request asked to switch protocols, so a classifier can
+  reject query and handshake variants without receiving sensitive headers.
 - `shutdown`: `{}` → any JSON result. The broker bounds this request, then
   terminates and reaps the child if it does not exit.
 

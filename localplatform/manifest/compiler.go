@@ -103,13 +103,22 @@ type BrokerProfileIntent struct {
 	Grants   []BrokerGrantIntent `json:"grants,omitempty"`
 }
 type BrokerGrantIntent struct {
-	Provider     string                   `json:"provider"`
-	Preset       string                   `json:"preset"`
-	Mediation    *BrokerProviderMediation `json:"mediation,omitempty"`
-	Purpose      string                   `json:"purpose"`
-	Repositories []string                 `json:"repositories"`
-	Resources    []string                 `json:"resources,omitempty"`
-	Permissions  map[string]string        `json:"permissions,omitempty"`
+	Provider      string                    `json:"provider"`
+	Preset        string                    `json:"preset"`
+	Mediation     *BrokerProviderMediation  `json:"mediation,omitempty"`
+	Purpose       string                    `json:"purpose"`
+	Repositories  []string                  `json:"repositories"`
+	Resources     []string                  `json:"resources,omitempty"`
+	Permissions   map[string]string         `json:"permissions,omitempty"`
+	Authorization *BrokerGrantAuthorization `json:"authorization,omitempty"`
+}
+type BrokerGrantAuthorization struct {
+	DefaultAction string                         `json:"defaultAction"`
+	Rules         []BrokerGrantAuthorizationRule `json:"rules,omitempty"`
+}
+type BrokerGrantAuthorizationRule struct {
+	Operation string `json:"operation"`
+	Resource  string `json:"resource"`
 }
 type ControllerProfileIntent struct {
 	Name                      string                               `json:"name"`
@@ -355,7 +364,7 @@ func normalizeDomains(values []string) []string {
 func cloneBrokerGrants(input []BrokerGrantIntent) []BrokerGrantIntent {
 	result := make([]BrokerGrantIntent, len(input))
 	for index, grant := range input {
-		result[index] = BrokerGrantIntent{Provider: grant.Provider, Preset: grant.Preset, Mediation: cloneMediation(grant.Mediation), Purpose: grant.Purpose, Repositories: append([]string(nil), grant.Repositories...), Resources: append([]string(nil), grant.Resources...), Permissions: sortedMap(grant.Permissions)}
+		result[index] = BrokerGrantIntent{Provider: grant.Provider, Preset: grant.Preset, Mediation: cloneMediation(grant.Mediation), Purpose: grant.Purpose, Repositories: append([]string(nil), grant.Repositories...), Resources: append([]string(nil), grant.Resources...), Permissions: sortedMap(grant.Permissions), Authorization: cloneGrantAuthorization(grant.Authorization)}
 	}
 	return result
 }
@@ -402,7 +411,7 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 	for _, access := range accesses {
 		contexts := append([]string(nil), access.Contexts...)
 		sort.Strings(contexts)
-		result = append(result, BrokerGrantIntent{Provider: access.Provider, Preset: "kubeconfig", Purpose: "catalog", Resources: contexts})
+		result = append(result, BrokerGrantIntent{Provider: access.Provider, Preset: "kubeconfig", Purpose: "catalog", Resources: contexts, Authorization: resolveKubernetesAuthorization(access.Authorization, contexts)})
 	}
 	for _, key := range SortedNames(groups) {
 		entry := groups[key]
@@ -415,6 +424,33 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 		}
 		result = append(result, grant)
 	}
+	return result
+}
+
+func resolveKubernetesAuthorization(policy *KubernetesAuthorization, contexts []string) *BrokerGrantAuthorization {
+	if policy == nil {
+		return nil
+	}
+	if policy.Preset == "observe" {
+		resolved := &BrokerGrantAuthorization{DefaultAction: "deny", Rules: make([]BrokerGrantAuthorizationRule, 0, len(contexts))}
+		for _, contextName := range contexts {
+			resolved.Rules = append(resolved.Rules, BrokerGrantAuthorizationRule{Operation: "observe", Resource: "context/" + contextName})
+		}
+		return resolved
+	}
+	resolved := &BrokerGrantAuthorization{DefaultAction: policy.DefaultAction, Rules: make([]BrokerGrantAuthorizationRule, len(policy.Rules))}
+	for index, rule := range policy.Rules {
+		resolved.Rules[index] = BrokerGrantAuthorizationRule{Operation: rule.Operation, Resource: rule.Resource}
+	}
+	return resolved
+}
+
+func cloneGrantAuthorization(policy *BrokerGrantAuthorization) *BrokerGrantAuthorization {
+	if policy == nil {
+		return nil
+	}
+	result := &BrokerGrantAuthorization{DefaultAction: policy.DefaultAction, Rules: make([]BrokerGrantAuthorizationRule, len(policy.Rules))}
+	copy(result.Rules, policy.Rules)
 	return result
 }
 

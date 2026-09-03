@@ -610,6 +610,15 @@ broker:
 The operator mounts only the resulting bounded name/email metadata. It does not
 mount the control-plane broker token or rewrite a runtime plugin configuration.
 
+An `agentSchedule.profiles[].broker.grants[]` kubeconfig grant can instead use
+`resources` plus either `authorization.preset: observe` or concrete
+`authorization.defaultAction`/`rules`. The forms are mutually exclusive. The
+selected AgentSchedule profile resolves the preset into an immutable concrete
+AgentRun policy; direct `broker.config.providers[].allow.authorization` is an
+optional administrator-owned concrete ceiling and direct `broker.agents`
+grants use that same concrete contract. See
+[`docs/kubeconfig-mediation.md`](../../docs/kubeconfig-mediation.md).
+
 The next request after the limit receives 429. An egressd restart resets the
 counter, so this is a resource guard rather than durable accounting.
 

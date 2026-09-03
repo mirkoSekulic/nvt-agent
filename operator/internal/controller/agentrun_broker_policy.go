@@ -63,6 +63,7 @@ func BrokerAgentGrants(broker *nvtv1alpha1.AgentRunBroker) []brokerAgentGrantEnt
 		grants = append(grants, brokerAgentGrantEntry{
 			Provider:        grant.Provider,
 			Repositories:    repositories,
+			Resources:       sortedStrings(grant.Resources),
 			Materialization: string(AgentRunGrantMaterialization(grant)),
 			EgressHosts:     append([]string{}, grant.EgressHosts...),
 			Permissions:     permissions,
@@ -81,6 +82,12 @@ func BrokerAgentGrants(broker *nvtv1alpha1.AgentRunBroker) []brokerAgentGrantEnt
 	})
 
 	return grants
+}
+
+func sortedStrings(values []string) []string {
+	result := append([]string{}, values...)
+	sort.Strings(result)
+	return result
 }
 
 // ParseBrokerAgentsYAML parses broker agents policy YAML.
@@ -197,6 +204,11 @@ func ValidateBrokerAgentsPolicy(policy brokerAgentsPolicy) error {
 					return fmt.Errorf("agents[%d].grants[%d].repositories[%d] must be a non-empty string", agentIndex, grantIndex, repoIndex)
 				}
 			}
+			for resourceIndex, resource := range grant.Resources {
+				if resource == "" || len(resource) > 4096 {
+					return fmt.Errorf("agents[%d].grants[%d].resources[%d] must be a bounded non-empty string", agentIndex, grantIndex, resourceIndex)
+				}
+			}
 			for hostIndex, host := range grant.EgressHosts {
 				if !validEgressHost(host) {
 					return fmt.Errorf("agents[%d].grants[%d].egress-hosts[%d] must be a host or host:port, got %q", agentIndex, grantIndex, hostIndex, host)
@@ -249,6 +261,9 @@ func normalizeBrokerAgentEntry(entry *brokerAgentEntry) {
 	for i := range entry.Grants {
 		if entry.Grants[i].Repositories == nil {
 			entry.Grants[i].Repositories = []string{}
+		}
+		if entry.Grants[i].Resources == nil {
+			entry.Grants[i].Resources = []string{}
 		}
 		if entry.Grants[i].EgressHosts == nil {
 			entry.Grants[i].EgressHosts = []string{}

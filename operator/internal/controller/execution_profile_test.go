@@ -1120,6 +1120,43 @@ func TestProfiledScheduleSnapshotsProviderPreparations(t *testing.T) {
 	}
 }
 
+func TestProfiledScheduleResolvesObservePresetIntoImmutablePolicy(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	grant := &schedule.Spec.Profiles[0].Broker.Grants[0]
+	grant.Resources = []string{"studio-staging", "shared-services"}
+	grant.Authorization = &nvtv1alpha1.AgentRunBrokerGrantAuthorization{Preset: "observe"}
+	fixture := newProfileAdmissionFixture(t, schedule)
+	response := fixture.serve(t, profiledAdmissionBody(t, "observe-profile", nil, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	run := fixture.run(t, decoded.AgentRun.Name)
+	resolved := run.Spec.Broker.Grants[0]
+	if resolved.Authorization == nil || resolved.Authorization.Preset != "" || resolved.Authorization.DefaultAction != "deny" ||
+		len(resolved.Authorization.Rules) != 2 || resolved.Authorization.Rules[0].Operation != "observe" ||
+		resolved.Authorization.Rules[0].Resource != "context/studio-staging" || strings.Join(resolved.Resources, ",") != "studio-staging,shared-services" {
+		t.Fatalf("observe preset was not concretely snapshotted: %#v", resolved)
+	}
+	schedule.Spec.Profiles[0].Broker.Grants[0].Resources[0] = "changed"
+	if run.Spec.Broker.Grants[0].Resources[0] != "studio-staging" {
+		t.Fatal("resolved context resources alias the schedule profile")
+	}
+}
+
+func TestProfiledScheduleRejectsMixedOrUnknownAuthorizationPreset(t *testing.T) {
+	for _, policy := range []*nvtv1alpha1.AgentRunBrokerGrantAuthorization{
+		{Preset: "observe", DefaultAction: "deny"},
+		{Preset: "observe", Rules: []nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule{}},
+		{Preset: "unknown"},
+	} {
+		schedule := testProfiledAgentSchedule()
+		schedule.Spec.Profiles[0].Broker.Grants[0].Resources = []string{"studio-staging"}
+		schedule.Spec.Profiles[0].Broker.Grants[0].Authorization = policy
+		if _, err := validateExecutionProfileSchedule(schedule); !errors.Is(err, errInvalidExecutionProfileConfiguration) {
+			t.Fatalf("invalid authorization preset accepted: %#v err=%v", policy, err)
+		}
+	}
+}
+
 func TestProfiledScheduleRejectsInvalidProviderPreparation(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
 	schedule.Spec.Profiles[0].Broker.Grants[0].Preparations = []nvtv1alpha1.AgentRunBrokerPreparation{{Operation: "token"}}
@@ -1143,6 +1180,7 @@ func TestAgentRunBrokerGrantDeepCopyPreservesEmptySlices(t *testing.T) {
 	grant := nvtv1alpha1.AgentRunBrokerGrant{
 		Provider:     "codex-main",
 		Repositories: []string{},
+		Resources:    []string{},
 		EgressHosts:  []string{},
 		Preparations: []nvtv1alpha1.AgentRunBrokerPreparation{},
 	}
@@ -1150,6 +1188,9 @@ func TestAgentRunBrokerGrantDeepCopyPreservesEmptySlices(t *testing.T) {
 	copy := grant.DeepCopy()
 	if copy.Repositories == nil {
 		t.Fatal("deep copy changed explicit empty repositories into nil")
+	}
+	if copy.Resources == nil {
+		t.Fatal("deep copy changed explicit empty resources into nil")
 	}
 	if copy.EgressHosts == nil {
 		t.Fatal("deep copy changed explicit empty egress hosts into nil")

@@ -116,7 +116,7 @@ class GithubAppProvider:
         default, rules = policy
         return default == "allow" or (operation, resource) in rules
 
-    def _authorize_operation(self, method, path, grant):
+    def _authorize_operation(self, method, path, grant, upgrade=False):
         raw_grant_policy = (grant or {}).get("authorization")
         grant_policy = self._operation_policy(raw_grant_policy, "grant.authorization")
         if self.operation_authorization is None and grant_policy is None:
@@ -125,7 +125,7 @@ class GithubAppProvider:
         # dot segments, query variants, GraphQL, and unrelated writes remain
         # unclassified and therefore fail closed under either restrictive layer.
         match = re.fullmatch(r"/repos/([^/%]+)/([^/%]+)/actions/workflows/([^/%]+)/dispatches", path)
-        if method != "POST" or match is None:
+        if method != "POST" or upgrade or match is None:
             raise ProviderError("operation-unclassified", status=403)
         owner, repository, workflow = match.groups()
         repo = f"{owner}/{repository}"
@@ -136,8 +136,8 @@ class GithubAppProvider:
         allowed = allowed and self._policy_allows(grant_policy, operation, resource)
         return {"allowed": allowed, "operation": operation, "resource": resource}
 
-    def authorize_injection(self, host, method, path, agent_id, request_id, grant):
-        return self._authorize_operation(method, path, grant)
+    def authorize_injection(self, host, method, path, upgrade, agent_id, request_id, grant):
+        return self._authorize_operation(method, path, grant, upgrade)
 
     def _provider_value(self, key):
         value = self.config.get(key)

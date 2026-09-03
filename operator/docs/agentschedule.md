@@ -79,6 +79,27 @@ Forward-proxy and transparent execution profiles may set the generic
 the AgentRun with the other profile-owned egress settings. Omission uses
 egressd's default of 256 active tunnels with bounded burst queueing.
 
+Kubeconfig-backed diagnostic profiles may select exact context resources and
+use the reviewed observation preset:
+
+```yaml
+broker:
+  grants:
+    - provider: clusters
+      repositories: []
+      resources: [studio-staging-aks]
+      materialization: header-inject
+      egressHosts: [k-<stable-route>.kube.nvt.invalid:443]
+      authorization:
+        preset: observe
+```
+
+The explicit `defaultAction`/`rules` form is also accepted. It is mutually
+exclusive with `preset`; unknown presets fail profile validation. The operator
+expands `observe` to a concrete default-deny rule for each exact
+`context/<name>` before creating the AgentRun, so the selected run is an
+immutable snapshot and the broker sees no preset protocol.
+
 The same profiles may define an optional administrator-owned
 `egressDomainPolicy`:
 

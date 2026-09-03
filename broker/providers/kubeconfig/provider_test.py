@@ -61,7 +61,7 @@ def document(context_count=1, user=None):
 
 
 class KubeconfigProviderTest(unittest.TestCase):
-    def make_provider(self, doc, resources, extra_config=None):
+    def make_provider(self, doc, resources, extra_config=None, authorization=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -72,10 +72,13 @@ class KubeconfigProviderTest(unittest.TestCase):
             "state-dir": str(root / "state"),
             **(extra_config or {}),
         }
+        allow = {"resources": resources}
+        if authorization is not None:
+            allow["authorization"] = authorization
         value = provider_module.KubeconfigProvider({
             "provider_instance_name": "clusters",
             "config": config,
-            "allow": {"resources": resources},
+            "allow": allow,
         })
         return value, root
 
@@ -102,6 +105,85 @@ class KubeconfigProviderTest(unittest.TestCase):
         other = provider_module.route_host("clusters", "context-001")
         with self.assertRaisesRegex(provider_module.ProviderFailure, "resource-not-granted"):
             provider.injection_headers({"host": other, "grant": {"resources": ["context-000"]}})
+
+    def test_observe_policy_classifies_safe_reads_for_arbitrary_resources(self):
+        policy = {"defaultAction": "deny", "rules": [{"operation": "observe", "resource": "context/context-000"}]}
+        provider, _ = self.make_provider(document(), ["context-000"], authorization=policy)
+        request = {
+            "host": provider_module.route_host("clusters", "context-000"),
+            "grant": {"resources": ["context-000"], "authorization": policy},
+        }
+        paths = [
+            "/version", "/api", "/apis", "/api/v1", "/apis/apps/v1",
+            "/openapi/v3/apis/example.dev/v1", "/readyz?verbose=true",
+            "/api/v1/pods", "/api/v1/namespaces/team/pods?watch=true&resourceVersion=10",
+            "/api/v1/watch/namespaces/team/pods?resourceVersion=10",
+            "/api/v1/namespaces/team/pods/api/log?follow=true",
+            "/api/v1/namespaces/team/events?fieldSelector=involvedObject.name%3Dapi",
+            "/apis/widgets.example.dev/v1/namespaces/team/widgets",
+            "/apis/widgets.example.dev/v1/namespaces/team/secrets",
+            "/apis/widgets.example.dev/v1/widgets/sample/status",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                decision = provider.injection_authorization({**request, "method": "GET", "path": path})
+                self.assertEqual(decision, {"allowed": True, "operation": "observe", "resource": "context/context-000"})
+
+    def test_observe_policy_fails_closed_before_credential_materialization(self):
+        policy = {"defaultAction": "deny", "rules": [{"operation": "observe", "resource": "context/context-000"}]}
+        provider, _ = self.make_provider(document(), ["context-000"], authorization=policy)
+        request = {
+            "host": provider_module.route_host("clusters", "context-000"),
+            "grant": {"resources": ["context-000"], "authorization": policy},
+        }
+        denied = [
+            ("GET", "/api/v1/secrets"),
+            ("GET", "/api/v1/namespaces/team/secrets/name"),
+            ("POST", "/api/v1/namespaces/team/configmaps"),
+            ("PUT", "/api/v1/namespaces/team/configmaps/name"),
+            ("PATCH", "/api/v1/namespaces/team/pods/name/status"),
+            ("DELETE", "/apis/example.dev/v1/widgets"),
+            ("GET", "/api/v1/namespaces/team/pods/name/exec"),
+            ("GET", "/api/v1/namespaces/team/pods/name/attach"),
+            ("GET", "/api/v1/namespaces/team/pods/name/portforward"),
+            ("GET", "/api/v1/nodes/name/proxy"),
+            ("GET", "/api/v1/proxy"),
+            ("GET", "/api/v1/namespaces/team/services/name/proxy"),
+            ("GET", "/api%2fv1/pods"),
+            ("GET", "/api/v1/../secrets"),
+            ("GET", "//api/v1/pods"),
+            ("GET", "/api/v1/pods?watch=true&watch=false"),
+            ("GET", "/api/v1/pods?"),
+            ("GET", "/api/v1/pods/one/unknown"),
+        ]
+        for method, path in denied:
+            with self.subTest(method=method, path=path):
+                decision = provider.injection_authorization({**request, "method": method, "path": path})
+                self.assertEqual(decision, {"allowed": False, "operation": "unclassified", "resource": "context/context-000"})
+        decision = provider.injection_authorization({**request, "method": "GET", "path": "/api/v1/pods", "upgrade": True})
+        self.assertFalse(decision["allowed"])
+        self.assertEqual(decision["operation"], "unclassified")
+        self.assertEqual(provider.token_cache, {})
+
+    def test_provider_and_grant_authorization_intersect_for_exact_context(self):
+        allow_first = {"defaultAction": "deny", "rules": [{"operation": "observe", "resource": "context/context-000"}]}
+        deny_all = {"defaultAction": "deny", "rules": []}
+        provider, _ = self.make_provider(document(), ["context-000"], authorization=allow_first)
+        request = {"host": provider_module.route_host("clusters", "context-000"), "method": "GET", "path": "/api/v1/pods"}
+        self.assertFalse(provider.injection_authorization({**request, "grant": {"resources": ["context-000"], "authorization": deny_all}})["allowed"])
+
+        provider, _ = self.make_provider(document(), ["context-000"], authorization=deny_all)
+        self.assertFalse(provider.injection_authorization({**request, "grant": {"resources": ["context-000"], "authorization": allow_first}})["allowed"])
+
+    def test_absent_authorization_preserves_unrestricted_compatibility(self):
+        provider, _ = self.make_provider(document(), ["context-000"])
+        decision = provider.injection_authorization({
+            "host": provider_module.route_host("clusters", "context-000"),
+            "method": "POST", "path": "/api/v1/namespaces",
+            "grant": {"resources": ["context-000"]},
+        })
+        self.assertTrue(decision["allowed"])
+        self.assertEqual(decision["operation"], "unrestricted")
 
     def test_exec_helper_state_is_private_per_instance_and_cached(self):
         temporary = tempfile.TemporaryDirectory()

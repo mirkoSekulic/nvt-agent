@@ -310,6 +310,19 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		}
 	}
 	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		seenResources := map[string]struct{}{}
+		if len(grant.Resources) > 256 {
+			return fmt.Errorf("broker grant %s resources exceeds 256 entries", grant.Provider)
+		}
+		for _, resource := range grant.Resources {
+			if resource == "" || len(resource) > 4096 {
+				return fmt.Errorf("broker grant %s resources require bounded non-empty values", grant.Provider)
+			}
+			if _, duplicate := seenResources[resource]; duplicate {
+				return fmt.Errorf("broker grant %s resources contains a duplicate", grant.Provider)
+			}
+			seenResources[resource] = struct{}{}
+		}
 		for _, preparation := range grant.Preparations {
 			if preparation.Operation != nvtv1alpha1.AgentRunBrokerPreparationIdentity {
 				return fmt.Errorf("broker grant %s preparation operation must be identity, got %q", grant.Provider, preparation.Operation)
@@ -344,6 +357,9 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 			}
 		}
 		if grant.Authorization != nil {
+			if grant.Authorization.Preset != "" {
+				return fmt.Errorf("broker grant %s authorization.preset must be resolved before AgentRun admission", grant.Provider)
+			}
 			if grant.Authorization.DefaultAction != "allow" && grant.Authorization.DefaultAction != "deny" {
 				return fmt.Errorf("broker grant %s authorization.defaultAction must be allow or deny", grant.Provider)
 			}

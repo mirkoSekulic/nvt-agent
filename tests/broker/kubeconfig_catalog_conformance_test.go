@@ -46,12 +46,19 @@ providers:
       state-dir: %q
     allow:
       resources: [allowed, denied]
+      authorization:
+        defaultAction: deny
+        rules:
+          - {operation: observe, resource: context/allowed}
 `, provider, privateConfig, filepath.Join(f.home, "provider-state"))
 	if err := os.WriteFile(f.config, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f.writeRoleIdentities(map[string]roleIdentity{
-		"agent":  {Token: "agent-token", Role: "agent", Grants: []roleGrant{{Provider: "clusters", Resources: []string{"allowed"}, Materialization: "header-inject"}}},
+		"agent": {Token: "agent-token", Role: "agent", Grants: []roleGrant{{
+			Provider: "clusters", Resources: []string{"allowed"}, Materialization: "header-inject",
+			Authorization: map[string]any{"defaultAction": "deny", "rules": []any{map[string]any{"operation": "observe", "resource": "context/allowed"}}},
+		}}},
 		"egress": {Token: "egress-token", Role: "egress", PairedAgent: "agent"},
 	})
 	f.start()
@@ -76,6 +83,29 @@ providers:
 	})
 	if status != 200 || fmt.Sprint(injected["headers"]) != "map[authorization:Bearer real-kubernetes-token]" {
 		t.Fatalf("paired injection status=%d body=%v", status, injected)
+	}
+	for _, denied := range []struct{ method, path string }{
+		{"GET", "/api/v1/secrets"},
+		{"POST", "/api/v1/namespaces/development/configmaps"},
+		{"GET", "/api/v1/namespaces/development/pods/name/exec"},
+		{"GET", "/apis/example.dev/v1/namespaces/development/widgets/name/proxy"},
+	} {
+		status, body := f.postJSONWithToken("egress-token", "/v1/injection/headers", map[string]any{
+			"capability": "clusters", "host": allowedHost, "method": denied.method, "path": denied.path,
+		})
+		if status == 200 || body["error"] != "operation-not-allowed" {
+			t.Fatalf("unsafe Kubernetes request %s %s status=%d body=%v", denied.method, denied.path, status, body)
+		}
+	}
+	var normalizedDenial map[string]any
+	for _, entry := range readAudit(t, f.audit) {
+		if entry["operation"] == "injection.headers" && entry["allowed"] == false && entry["normalized_operation"] == "unclassified" {
+			normalizedDenial = entry
+		}
+	}
+	if normalizedDenial == nil || normalizedDenial["normalized_resource"] != "context/allowed" ||
+		strings.Contains(fmt.Sprint(normalizedDenial), "real-kubernetes-token") {
+		t.Fatalf("sanitized normalized Kubernetes denial missing from audit: %v", normalizedDenial)
 	}
 	deniedHost := kubeRouteHost("clusters", "denied")
 	if status, body := f.postJSONWithToken("egress-token", "/v1/injection/headers", map[string]any{

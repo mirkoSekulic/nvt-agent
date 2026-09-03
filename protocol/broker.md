@@ -594,6 +594,24 @@ core intersects that ceiling with the authenticated agent grant and passes the
 effective repository scope into the provider per request. Empty grants and empty
 intersections deny.
 
+## Kubeconfig Provider Authorization
+
+The executable `kubeconfig` provider accepts optional concrete
+`defaultAction`/`rules` authorization at both `allow.authorization` (the
+administrator ceiling) and `grant.authorization` (the immutable agent grant).
+It normalizes an authorized observation request as `observe` on the exact
+synthetic route's `context/<name>` resource. When both policies exist they are
+intersected; omission of both preserves the earlier context-scoped behavior.
+
+With either policy present, classification is default-deny. Canonical GETs for
+discovery, version, OpenAPI, health, built-in or arbitrary custom resources,
+events, and pod logs are observable. Secrets, non-GET mutation, exec, attach,
+port-forward, proxy, token/credential subresources, upgrade handshakes,
+unknown subresources, encoded/dot-segment paths, and ambiguous queries fail
+before `injection.headers` can execute. The vocabulary is provider-owned;
+broker core transports and audits only bounded normalized strings. See
+[`docs/kubeconfig-mediation.md`](../docs/kubeconfig-mediation.md).
+
 ## Durable Broker Seed Reconciliation
 
 Production deployments may mount a generic read-only seed directory beside

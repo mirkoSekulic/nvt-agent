@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -99,14 +100,14 @@ func (p *Proxy) now() time.Time {
 	return time.Now()
 }
 
-// material returns valid injectable material for one (method, path),
-// refetching when the cache is stale. The cache is keyed by method and path
-// because that is the scope the broker authorized: reusing material across
+// material returns valid injectable material for one (method, request URI,
+// upgrade intent), refetching when the cache is stale. The cache is keyed by
+// all three values because that is the scope the broker authorized: reusing material across
 // paths would bypass provider method/path policy. It fails closed: fetch
 // errors and already-expired material are errors, never masked by stale or
 // unauthorized reuse.
-func (p *Proxy) material(ctx context.Context, method, path string) (*Material, error) {
-	key := method + " " + path
+func (p *Proxy) material(ctx context.Context, method, path string, upgrade bool) (*Material, error) {
+	key := method + " " + path + " " + strconv.FormatBool(upgrade)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if entry, ok := p.cache[key]; ok {
@@ -115,7 +116,7 @@ func (p *Proxy) material(ctx context.Context, method, path string) (*Material, e
 		}
 		delete(p.cache, key)
 	}
-	material, err := p.Broker.FetchHeaders(ctx, p.Route.Capability, p.brokerInjectionHost(), method, path)
+	material, err := p.Broker.FetchHeaders(ctx, p.Route.Capability, p.brokerInjectionHost(), method, path, upgrade)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +152,7 @@ func (p *Proxy) entryValidLocked(entry *cacheEntry) bool {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	material, err := p.material(r.Context(), r.Method, r.URL.Path)
+	material, err := p.material(r.Context(), r.Method, r.URL.RequestURI(), isUpgradeRequest(r))
 	if err != nil {
 		// err carries broker reasons only, never header values.
 		log.Printf("egressd %s: injection material unavailable: %v", p.Route.Capability, err)

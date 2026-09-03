@@ -29,7 +29,28 @@ profiles:
     kubernetes:
       - provider: clusters
         contexts: [development-aks, shared-services-aks]
+        authorization:
+          preset: observe
 ```
+
+`authorization` is optional; omission preserves the existing context-scoped,
+otherwise unrestricted behavior. `preset: observe` is compiler sugar for a
+snapshotted generic default-deny policy with one `observe` rule for each exact
+`context/<name>` resource. The preset and concrete form are mutually exclusive:
+
+```yaml
+authorization:
+  defaultAction: deny
+  rules:
+    - operation: observe
+      resource: context/development-aks
+```
+
+The local compiler resolves the preset before writing trusted controller or
+broker grant configuration. AgentSchedule profiles do the same when they
+create an AgentRun; raw AgentRuns and direct `agents.yaml` grants carry only
+the concrete `defaultAction`/`rules` form. This snapshots preset semantics for
+the lifetime of a run.
 
 Context, cluster, auth-info, namespace, and current-context names are retained.
 Users in the published file are empty objects and cluster servers are stable
@@ -78,8 +99,51 @@ removes agent `Authorization`, `Proxy-Authorization`, and `Impersonate-*`
 headers, injects the provider token, and uses its existing bounded 60-second
 material cache. Broker/provider errors,
 expiry, grant removal, and refresh failures fail closed. Existing response
-streaming and HTTP upgrade relays cover reads, watches, streaming logs, exec,
-copy, and port-forward protocol paths.
+streaming and HTTP upgrade relays remain available to unrestricted grants. An
+`observe` grant allows canonical discovery/version/OpenAPI/health GETs,
+GET/LIST/WATCH reads of built-in and arbitrary custom resources, events,
+describe-related reads, and pod logs. It denies Secret reads, every mutation,
+exec, attach, port-forward, proxy and upgrade requests, token subresources,
+unknown subresources, encoded or dot-segment paths, and ambiguous queries
+before credential materialization. Flux and other clients need no special
+configuration: inspection works only where it reduces to these Kubernetes API
+reads, while reconcile/suspend/resume/create/delete/bootstrap-style writes are
+denied.
+
+Direct broker administrators may add the same concrete policy as a provider
+ceiling. Both layers must allow the normalized operation/resource:
+
+`broker.yaml` provider excerpt:
+
+```yaml
+providers:
+  - name: clusters
+    plugin: kubeconfig
+    allow:
+      resources: [development-aks]
+      authorization:
+        defaultAction: deny
+        rules:
+          - {operation: observe, resource: context/development-aks}
+```
+
+`agents.yaml` grant excerpt:
+
+```yaml
+agents:
+  - id: diagnostics
+    token-sha256: sha256:<hash>
+    grants:
+      - provider: clusters
+        resources: [development-aks]
+        materialization: header-inject
+        authorization:
+          defaultAction: deny
+          rules:
+            - {operation: observe, resource: context/development-aks}
+```
+
+This is defense in depth and does not replace least-privilege Kubernetes RBAC.
 
 The local backend supplies the explicit loopback proxy and matching durable-CA
 constraints for forward-proxy, transparent, and redirect transports.
