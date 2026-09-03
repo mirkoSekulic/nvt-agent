@@ -424,6 +424,29 @@ class Broker:
         )
         return {"ok": True, "files": files, "hosts": hosts, "expires_at": expires_at}
 
+    def catalog(self, request_id, payload, authorization):
+        # Catalogs are explicitly non-secret trusted preparation output.  They
+        # may contain sanitized files, pinned endpoints, and public CA data,
+        # but never injectable credentials.
+        agent = self.authenticate_role(authorization, "agent")
+        provider_name = string_field(payload, "provider")
+        grant = self._injection_grant(agent, provider_name)
+        provider = self.provider(provider_name)
+        if not provider.supports("catalog"):
+            raise ProviderError("catalog-not-supported", status=403)
+        files, routes, expires_at = provider.catalog(agent["id"], self.audit, request_id, grant)
+        self.audit.write(
+            request_id=request_id,
+            agent=agent["id"],
+            provider=provider_name,
+            operation="catalog",
+            allowed=True,
+            expires_at=expires_at,
+            file_count=len(files),
+            route_count=len(routes),
+        )
+        return {"ok": True, "files": files, "routes": routes, "expires_at": expires_at}
+
     def _injection_grant(self, subject, capability):
         grant = self.agents.grant(subject, capability)
         if grant is None:
@@ -778,6 +801,10 @@ def make_handler(broker):
                     return
                 if self.path == "/v1/placeholder-files":
                     response = broker.placeholder_files(request_id, payload, self.headers.get("authorization"))
+                    self.write_json(200, response)
+                    return
+                if self.path == "/v1/catalog":
+                    response = broker.catalog(request_id, payload, self.headers.get("authorization"))
                     self.write_json(200, response)
                     return
                 if self.path == "/v1/injection/headers":

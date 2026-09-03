@@ -108,6 +108,7 @@ type BrokerGrantIntent struct {
 	Mediation    *BrokerProviderMediation `json:"mediation,omitempty"`
 	Purpose      string                   `json:"purpose"`
 	Repositories []string                 `json:"repositories"`
+	Resources    []string                 `json:"resources,omitempty"`
 	Permissions  map[string]string        `json:"permissions,omitempty"`
 }
 type ControllerProfileIntent struct {
@@ -188,6 +189,11 @@ func Compile(m Manifest) (Compiled, error) {
 		profile.Tools.Packages = append([]string(nil), profile.Tools.Packages...)
 		profile.Tools.Mise = append([]string(nil), profile.Tools.Mise...)
 		profile.Capabilities = append([]string(nil), profile.Capabilities...)
+		profile.Kubernetes = append([]KubernetesAccess(nil), profile.Kubernetes...)
+		for index := range profile.Kubernetes {
+			profile.Kubernetes[index].Contexts = append([]string(nil), profile.Kubernetes[index].Contexts...)
+			sort.Strings(profile.Kubernetes[index].Contexts)
+		}
 		profile.Plugins = append([]Plugin(nil), profile.Plugins...)
 		if profile.Egress != nil {
 			egress := *profile.Egress
@@ -211,6 +217,7 @@ func Compile(m Manifest) (Compiled, error) {
 		sort.Strings(profile.Tools.Packages)
 		sort.Strings(profile.Tools.Mise)
 		sort.Strings(profile.Capabilities)
+		sort.Slice(profile.Kubernetes, func(i, j int) bool { return profile.Kubernetes[i].Provider < profile.Kubernetes[j].Provider })
 		sort.Slice(profile.Plugins, func(i, j int) bool { return profile.Plugins[i].Name < profile.Plugins[j].Name })
 		grants := compileBrokerGrants(m, name)
 		result.Broker.Profiles = append(result.Broker.Profiles, BrokerProfileIntent{Name: name, Accounts: append([]string(nil), profile.Accounts...), Grants: grants})
@@ -348,7 +355,7 @@ func normalizeDomains(values []string) []string {
 func cloneBrokerGrants(input []BrokerGrantIntent) []BrokerGrantIntent {
 	result := make([]BrokerGrantIntent, len(input))
 	for index, grant := range input {
-		result[index] = BrokerGrantIntent{Provider: grant.Provider, Preset: grant.Preset, Mediation: cloneMediation(grant.Mediation), Purpose: grant.Purpose, Repositories: append([]string(nil), grant.Repositories...), Permissions: sortedMap(grant.Permissions)}
+		result[index] = BrokerGrantIntent{Provider: grant.Provider, Preset: grant.Preset, Mediation: cloneMediation(grant.Mediation), Purpose: grant.Purpose, Repositories: append([]string(nil), grant.Repositories...), Resources: append([]string(nil), grant.Resources...), Permissions: sortedMap(grant.Permissions)}
 	}
 	return result
 }
@@ -389,6 +396,13 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 	result := make([]BrokerGrantIntent, 0, len(groups)+1)
 	if runtimeAccount := m.Profiles[profileName].Runtime.Account; runtimeAccount != "" {
 		result = append(result, BrokerGrantIntent{Provider: runtimeAccount, Preset: m.Accounts[runtimeAccount].Preset, Purpose: "runtime-injection"})
+	}
+	accesses := append([]KubernetesAccess(nil), m.Profiles[profileName].Kubernetes...)
+	sort.Slice(accesses, func(i, j int) bool { return accesses[i].Provider < accesses[j].Provider })
+	for _, access := range accesses {
+		contexts := append([]string(nil), access.Contexts...)
+		sort.Strings(contexts)
+		result = append(result, BrokerGrantIntent{Provider: access.Provider, Preset: "kubeconfig", Purpose: "catalog", Resources: contexts})
 	}
 	for _, key := range SortedNames(groups) {
 		entry := groups[key]

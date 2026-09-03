@@ -98,6 +98,7 @@ type Broker struct {
 type BrokerGrant struct {
 	Provider              string                    `json:"provider"`
 	Repositories          []string                  `json:"repositories,omitempty"`
+	Resources             []string                  `json:"resources,omitempty"`
 	Capabilities          []string                  `json:"capabilities,omitempty"`
 	Preparations          []string                  `json:"preparations,omitempty"`
 	Materialization       string                    `json:"materialization,omitempty"`

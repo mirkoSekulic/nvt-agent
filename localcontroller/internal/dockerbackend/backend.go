@@ -281,7 +281,7 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 	if err := backend.ensureGatewayAttachment(operationContext, names.internalNet, labels); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
-	rendered, preparedMetadata, err := backend.preparer.prepare(operationContext, run, tokens.agent, rendered)
+	rendered, preparedMetadata, catalogRoutes, err := backend.preparer.prepare(operationContext, run, tokens.agent, rendered)
 	if err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
@@ -303,7 +303,7 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	if run.Egress.Mode == "mediated" {
-		egressConfig, err := renderEgressdConfig(backend.config, run)
+		egressConfig, err := renderEgressdConfig(backend.config, run, catalogRoutes)
 		if err != nil {
 			return controller.BackendObservation{}, errors.New("egress configuration unavailable")
 		}

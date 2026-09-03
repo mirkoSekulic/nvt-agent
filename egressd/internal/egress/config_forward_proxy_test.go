@@ -100,3 +100,28 @@ func TestLoadForwardProxyDomainPolicyConfig(t *testing.T) {
 		t.Fatalf("domain policy not parsed: %#v", loaded.ForwardProxy)
 	}
 }
+
+func TestStrictDomainPolicyAcceptsTrustedPinnedPrivateIPRoute(t *testing.T) {
+	ca, err := NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := ForwardProxyInjectRoute{
+		Host: "k-01234567890123456789.kube.nvt.invalid", Capability: "clusters", Upstream: "10.20.30.40:6443",
+		UpstreamCAPEM: string(ca.certPEM), UpstreamServerName: "kubernetes.internal", AllowPrivateUpstream: true,
+	}
+	config := &Config{
+		BrokerURL: "https://broker:7347", Routes: []Route{}, CA: &CAConfig{ServeAddr: "0.0.0.0:8470"},
+		ForwardProxy: &ForwardProxyConfig{
+			Listen: "0.0.0.0:8473", DomainPolicy: &DomainPolicy{DefaultAction: "deny", Allow: []string{"kube.nvt.invalid"}},
+			InjectRoutes: []ForwardProxyInjectRoute{route},
+		},
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("trusted pinned private route was rejected: %v", err)
+	}
+	config.ForwardProxy.InjectRoutes[0].AllowPrivateUpstream = false
+	if err := config.Validate(); err == nil {
+		t.Fatal("ordinary IP-literal inject route bypassed the strict domain policy")
+	}
+}

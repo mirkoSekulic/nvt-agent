@@ -50,6 +50,8 @@ class InProcessProviderAdapter(ProviderAdapter):
             return hasattr(self._provider, "files")
         if capability == "placeholder-files":
             return hasattr(self._provider, "placeholder_files")
+        if capability == "catalog":
+            return hasattr(self._provider, "catalog")
         if capability == "injection":
             return bool(self.injection_hosts) and callable(getattr(self._provider, "injection_headers", None))
         return False
@@ -83,6 +85,9 @@ class InProcessProviderAdapter(ProviderAdapter):
 
     def placeholder_files(self, agent_id, audit, request_id, grant):
         return self._provider.placeholder_files(agent_id, audit, request_id, grant)
+
+    def catalog(self, agent_id, audit, request_id, grant):
+        return self._provider.catalog(agent_id, audit, request_id, grant)
 
     def authorize_injection(self, host, method, path, agent_id, request_id, grant):
         operation = getattr(self._provider, "authorize_injection", None)

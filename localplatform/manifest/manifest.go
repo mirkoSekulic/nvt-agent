@@ -116,16 +116,24 @@ type BrokerProviderMediation struct {
 }
 
 type Profile struct {
-	Runtime                   Runtime        `json:"runtime"`
-	Accounts                  []string       `json:"accounts,omitempty"`
-	CredentialProviders       []string       `json:"credentialProviders,omitempty"`
-	DefaultCredentialProvider string         `json:"defaultCredentialProvider,omitempty"`
-	Tools                     Tools          `json:"tools,omitempty"`
-	Capabilities              []string       `json:"capabilities,omitempty"`
-	Instructions              *FileRef       `json:"instructions,omitempty"`
-	Editor                    Editor         `json:"editor,omitempty"`
-	Plugins                   []Plugin       `json:"plugins,omitempty"`
-	Egress                    *ProfileEgress `json:"egress,omitempty"`
+	Runtime                   Runtime            `json:"runtime"`
+	Accounts                  []string           `json:"accounts,omitempty"`
+	CredentialProviders       []string           `json:"credentialProviders,omitempty"`
+	DefaultCredentialProvider string             `json:"defaultCredentialProvider,omitempty"`
+	Tools                     Tools              `json:"tools,omitempty"`
+	Capabilities              []string           `json:"capabilities,omitempty"`
+	Instructions              *FileRef           `json:"instructions,omitempty"`
+	Editor                    Editor             `json:"editor,omitempty"`
+	Plugins                   []Plugin           `json:"plugins,omitempty"`
+	Egress                    *ProfileEgress     `json:"egress,omitempty"`
+	Kubernetes                []KubernetesAccess `json:"kubernetes,omitempty"`
+}
+
+// KubernetesAccess selects an exact set of context resources from one generic
+// kubeconfig provider.  It carries names only, never kubeconfig data.
+type KubernetesAccess struct {
+	Provider string   `json:"provider"`
+	Contexts []string `json:"contexts"`
 }
 
 type ProfileEgress struct {
@@ -433,6 +441,22 @@ func (m Manifest) Validate() error {
 		}
 		if err := uniqueRefs(profile.CredentialProviders, m.BrokerProviders, "credential provider"); err != nil {
 			return fmt.Errorf("profile %q: %w", name, err)
+		}
+		seenKubeProviders := map[string]bool{}
+		for _, access := range profile.Kubernetes {
+			provider, ok := m.BrokerProviders[access.Provider]
+			if !ok || provider.Plugin != "kubeconfig" || seenKubeProviders[access.Provider] || len(access.Contexts) == 0 || len(access.Contexts) > MaxItems {
+				return fmt.Errorf("profile %q has invalid Kubernetes access", name)
+			}
+			seenKubeProviders[access.Provider] = true
+			if err := uniqueStrings(access.Contexts); err != nil {
+				return fmt.Errorf("profile %q Kubernetes contexts: %w", name, err)
+			}
+			for _, contextName := range access.Contexts {
+				if contextName == "" || len(contextName) > MaxStringBytes || strings.ContainsAny(contextName, "\x00\r\n") {
+					return fmt.Errorf("profile %q has invalid Kubernetes context", name)
+				}
+			}
 		}
 		if !validRuntimeAccount(profile, m.Accounts) {
 			return fmt.Errorf("profile %q has an invalid runtime account", name)
@@ -1053,12 +1077,20 @@ func validateBrokerProvider(name string, provider BrokerProvider, secrets map[st
 		return fmt.Errorf("broker provider %q must declare secret bindings", name)
 	}
 	for configKey, secretName := range provider.Secrets {
-		if !validConfigKey(configKey) || !secretKeyPattern.MatchString(configKey) || !has(secrets, secretName) {
+		secretKey := secretKeyPattern.MatchString(configKey) || provider.Plugin == "kubeconfig" && configKey == "private-kubeconfig"
+		if !validConfigKey(configKey) || !secretKey || !has(secrets, secretName) {
 			return fmt.Errorf("broker provider %q has an invalid secret binding", name)
 		}
 		if _, exists := provider.Config[configKey]; exists {
 			return fmt.Errorf("broker provider %q config duplicates secret binding %q", name, configKey)
 		}
+	}
+	if provider.Plugin == "kubeconfig" {
+		mediation := provider.Mediation
+		if len(provider.Secrets) != 1 || provider.Secrets["private-kubeconfig"] == "" || len(mediation.Hosts) != 0 || mediation.Materialization != "" || mediation.Git || mediation.Username != "" || mediation.TargetMode != "" {
+			return fmt.Errorf("broker provider %q has invalid kubeconfig provider configuration", name)
+		}
+		return nil
 	}
 	mediation := provider.Mediation
 	if len(mediation.Hosts) == 0 || mediation.Materialization != "header-inject" || !mediation.Git || mediation.Username == "" || strings.ContainsAny(mediation.Username, ":\x00\r\n") || !oneOf(mediation.TargetMode, "github", "literal") {

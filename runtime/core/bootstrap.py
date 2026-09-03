@@ -502,6 +502,7 @@ def apply_mediated_egress(egress):
         raise SystemExit("egress.grants must be a list")
     deadline = broker_wait_deadline()
     https_provider = None
+    catalog_provider = None
     enforced = bool(egress.get("enforcement"))
     transport_mode = egress_transport(egress)
     forward_proxy = transport_mode in {"forward-proxy", "transparent"}
@@ -521,6 +522,17 @@ def apply_mediated_egress(egress):
             continue
         if materialization != "header-inject":
             raise SystemExit(f"egress mediated grant {provider} must be materialization header-inject")
+        catalog = grant.get("catalog", False)
+        if not isinstance(catalog, bool):
+            raise SystemExit(f"egress mediated grant {provider} catalog must be a boolean")
+        if catalog:
+            # Catalog preparation already installed a sanitized kubeconfig
+            # whose per-cluster proxy URL selects this provider. It is not a
+            # redirect listener and must never trigger an agent-side broker
+            # routing lookup, but its MITM path still requires the egress CA.
+            if catalog_provider is None:
+                catalog_provider = provider
+            continue
         if forward_proxy:
             # Forward-proxy header-inject grants are reached through
             # HTTP(S)_PROXY and selected by runtime.proxy.provider or a tool
@@ -560,11 +572,11 @@ def apply_mediated_egress(egress):
                 "NVT_EGRESS_FORWARD_PROXY_URL_" + env_suffix(provider),
                 proxy_url_for_provider(proxy_url, provider),
             )
-    if forward_proxy or (enforced and https_provider is not None):
+    if forward_proxy or catalog_provider is not None or (enforced and https_provider is not None):
         # Forward-proxy mode has no https base-url to trigger the install, but
         # the MITM leaf must be trusted system-wide so proxy-env HTTPS clients
         # (curl, requests, node, ...) accept it.
-        install_egress_ca_trust(https_provider or "forward-proxy")
+        install_egress_ca_trust(https_provider or catalog_provider or "forward-proxy")
     target = Path.home() / ".nvt-agent" / "egress.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     metadata = {
@@ -676,6 +688,36 @@ def preseed_file_content(entry, index):
     return json.dumps(entry.get("json"), indent=2, sort_keys=True) + "\n"
 
 
+def preserve_yaml_selection(entry, index, target, content):
+    policy = entry.get("preserve-yaml-selection")
+    if policy is None:
+        return content
+    if not isinstance(policy, dict) or set(policy) != {"field", "collection", "item-field"}:
+        raise SystemExit(f"preseed.files[{index}].preserve-yaml-selection is invalid")
+    field = optional_string(policy.get("field"), f"preseed.files[{index}].preserve-yaml-selection.field")
+    collection = optional_string(policy.get("collection"), f"preseed.files[{index}].preserve-yaml-selection.collection")
+    item_field = optional_string(policy.get("item-field"), f"preseed.files[{index}].preserve-yaml-selection.item-field")
+    try:
+        replacement = yaml.safe_load(content)
+    except yaml.YAMLError as error:
+        raise SystemExit(f"preseed.files[{index}] replacement YAML is invalid") from error
+    if not isinstance(replacement, dict) or not isinstance(replacement.get(collection), list):
+        raise SystemExit(f"preseed.files[{index}] replacement YAML selection is invalid")
+    if not target.is_file() or target.stat().st_size > 1024 * 1024:
+        return content
+    try:
+        existing = yaml.safe_load(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return content
+    if not isinstance(existing, dict) or not isinstance(existing.get(field), str):
+        return content
+    selected = existing[field]
+    if any(isinstance(item, dict) and item.get(item_field) == selected for item in replacement[collection]):
+        replacement[field] = selected
+        return yaml.safe_dump(replacement, sort_keys=False)
+    return content
+
+
 def apply_preseed_files(preseed):
     files = preseed.get("files") or []
     if not isinstance(files, list):
@@ -686,6 +728,7 @@ def apply_preseed_files(preseed):
             raise SystemExit(f"preseed.files[{index}] must be an object")
         target = preseed_file_target(home, entry.get("path"))
         content = preseed_file_content(entry, index)
+        content = preserve_yaml_selection(entry, index, target, content)
         mode = parse_file_mode(entry.get("mode"), f"preseed.files[{index}]")
         overwrite = optional_bool(entry.get("overwrite"), f"preseed.files[{index}].overwrite", default=False)
         if target.exists() and not overwrite:

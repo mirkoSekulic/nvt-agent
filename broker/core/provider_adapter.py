@@ -65,6 +65,9 @@ class ProviderAdapter(ABC):
     def placeholder_files(self, agent_id, audit, request_id, grant): ...
 
     @abstractmethod
+    def catalog(self, agent_id, audit, request_id, grant): ...
+
+    @abstractmethod
     def authorize_injection(self, host, method, path, agent_id, request_id, grant): ...
 
     @abstractmethod

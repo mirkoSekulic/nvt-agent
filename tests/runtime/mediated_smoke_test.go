@@ -758,6 +758,54 @@ code-server:
 	}
 }
 
+func TestBootstrapRedirectCatalogInstallsCATrustWithoutRoutingLookup(t *testing.T) {
+	f := newFixture(t)
+	updateLog := filepath.Join(f.home, "update-ca-certificates.log")
+	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\necho called >> "+updateLog+"\nexit 0\n")
+	f.writeBin("brokerctl", "#!/usr/bin/env bash\necho unexpected broker lookup >&2\nexit 99\n")
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	mustWriteFile(t, caFile, testCertificatePEM(t))
+	trustDir := t.TempDir()
+	bundle := filepath.Join(t.TempDir(), "ca-bundle.crt")
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  transport: redirect
+  placeholder: NVT-PLACEHOLDER-NOT-A-KEY
+  grants:
+    - provider: clusters
+      materialization: header-inject
+      catalog: true
+runtime:
+  command: bash
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), true, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_CA_FILE=" + caFile,
+		"NVT_CA_TRUST_DIR=" + trustDir,
+		"NVT_CA_BUNDLE_FILE=" + bundle,
+	}, config)
+	if _, err := os.Stat(updateLog); err != nil {
+		t.Fatalf("redirect catalog did not install CA trust:\n%s", output)
+	}
+	if strings.Contains(output, "unexpected broker lookup") {
+		t.Fatalf("redirect catalog attempted agent-side broker routing:\n%s", output)
+	}
+	metadata := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "egress.json"))
+	if !strings.Contains(metadata, `"catalog": true`) || strings.Contains(metadata, `"base-url"`) {
+		t.Fatalf("redirect catalog metadata is invalid: %s", metadata)
+	}
+}
+
 func TestBootstrapForwardProxyRequiresRuntimeProxyProvider(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 0\n")

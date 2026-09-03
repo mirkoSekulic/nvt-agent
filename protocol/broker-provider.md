@@ -139,7 +139,7 @@ successful result contains:
 ```
 
 The only capability strings are `http.request`, `token`, `identity`, `headers`,
-`files`, `placeholder-files`, `injection.authorization`, and `injection.headers`. Unknown or duplicate
+`files`, `placeholder-files`, `catalog`, `injection.authorization`, and `injection.headers`. Unknown or duplicate
 values fail initialization. Metadata defaults are an empty `injection_hosts`
 list, false `injection_git`, and null `bundle_ttl_seconds`; a non-null TTL is a
 positive integer. Injection metadata requires `injection.headers`. Providers
@@ -178,6 +178,13 @@ the sole audit writer; provider-generated audit records are not supported.
 - `files`: `{agent_id,request_id}` → `{files,expires_at}`.
 - `placeholder-files`: `{agent_id,request_id,grant}` →
   `{files,hosts,expires_at}`.
+- `catalog`: `{agent_id,request_id,grant}` → `{files,routes,expires_at}`.
+  This is bounded, non-secret preparation output. Each route has exactly
+  `id`, `host`, `upstream`, `server_name`, `ca_pem`, and
+  `allow_private_upstream`. `host` must be one of the provider's initialized
+  `injection_hosts`; `ca_pem` is public trust material, never a client key or
+  credential. Core authorizes the provider grant and the provider intersects
+  its administrator ceiling with generic `grant.resources`.
 - `injection.headers`: `{host,method,path,agent_id,request_id,grant}` →
   `{headers,expires_at,strip_request_headers,append_headers?}`.
   `append_headers` contains only non-secret, comma-separated feature tokens;

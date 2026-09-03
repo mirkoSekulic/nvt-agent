@@ -109,8 +109,11 @@ does not inject the Kubernetes `lifecycle-termination` plugin or its
 Backend provisioning supplies only non-secret `AgentConfigBindings`: one
 forward-proxy URL for forward-proxy/transparent, or an exact provider-to-base-
 URL map for redirect header-injection grants. Missing, extra, malformed, or
-wrong-transport bindings fail closed. Endpoint allocation remains outside the
-portable desired value.
+wrong-transport bindings fail closed. Catalog-prepared grants are marked in the
+rendered egress metadata and excluded from redirect URL bindings because their
+sanitized kubeconfig carries its explicit per-cluster forward proxy. Bootstrap
+skips redirect routing lookup for those grants while still installing the
+egress CA. Endpoint allocation remains outside the portable desired value.
 
 The execution backend has only a stable name and provider-neutral kind in this
 portable value. Backend implementation/configuration remains trusted

@@ -405,13 +405,16 @@ func validateBrokerAndEgress(broker Broker, egress Egress) error {
 			return errors.New("broker grant provider is duplicated")
 		}
 		providers[grant.Provider] = struct{}{}
-		if len(grant.Repositories) > maxGrantValues || len(grant.Capabilities) > maxGrantValues ||
+		if len(grant.Repositories) > maxGrantValues || len(grant.Resources) > maxGrantValues || len(grant.Capabilities) > maxGrantValues ||
 			len(grant.Preparations) > maxGrantValues || len(grant.EgressHosts) > maxGrantValues ||
 			len(grant.Permissions) > maxGrantValues {
 			return errors.New("broker grant exceeds its limit")
 		}
 		if err := validateUniqueStrings(grant.Repositories, validRepositoryPattern); err != nil {
 			return errors.New("broker grant repositories are invalid")
+		}
+		if err := validateUniqueStrings(grant.Resources, func(value string) bool { return validBoundedText(value, 4096, false) }); err != nil {
+			return errors.New("broker grant resources are invalid")
 		}
 		if err := validateUniqueStrings(grant.Capabilities, validCapability); err != nil {
 			return errors.New("broker grant capabilities are invalid")

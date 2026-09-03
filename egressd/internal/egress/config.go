@@ -6,6 +6,7 @@
 package egress
 
 import (
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -33,6 +34,10 @@ type Route struct {
 	// Upstream is the pinned upstream host[:port]. TLS is re-originated to
 	// this host; the incoming request cannot choose a different one.
 	Upstream string `json:"upstream"`
+	// InjectionHost is an internal broker-authorization identity used when a
+	// trusted forward-proxy route deliberately differs from its upstream.  It
+	// is never accepted from the JSON configuration for direct routes.
+	InjectionHost string `json:"-"`
 	// AllowInsecureUpstream permits a plain-HTTP upstream. Test/dev only.
 	AllowInsecureUpstream bool `json:"allow_insecure_upstream"`
 	// ListenTLSCert and ListenTLSKey optionally make the agent-facing
@@ -148,6 +153,13 @@ type ForwardProxyInjectRoute struct {
 	Upstream string `json:"upstream"`
 	// AllowInsecureUpstream permits a plain-HTTP upstream leg. Test/dev only.
 	AllowInsecureUpstream bool `json:"allow_insecure_upstream"`
+	// UpstreamCAPEM and UpstreamServerName freeze the public TLS trust from a
+	// trusted route catalog.  They never contain client credentials.
+	UpstreamCAPEM      string `json:"upstream_ca_pem"`
+	UpstreamServerName string `json:"upstream_server_name"`
+	// AllowPrivateUpstream is safe only because Upstream is an exact trusted
+	// route value and cannot be selected by the workload.
+	AllowPrivateUpstream bool `json:"allow_private_upstream"`
 	// MaxRequests caps proxied requests on this route (0 = unlimited).
 	MaxRequests int `json:"max_requests"`
 	// RequireCapabilityHint makes this route opt-in per request. CONNECTs to
@@ -316,6 +328,21 @@ func (c *Config) validateForwardProxyRouteOverlap() error {
 		if route.MaxRequests < 0 {
 			return fmt.Errorf("forward_proxy.inject_routes[%d].max_requests must be non-negative", index)
 		}
+		if (route.UpstreamCAPEM == "") != (route.UpstreamServerName == "") {
+			return fmt.Errorf("forward_proxy.inject_routes[%d] must set upstream_ca_pem and upstream_server_name together", index)
+		}
+		if route.UpstreamCAPEM != "" {
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM([]byte(route.UpstreamCAPEM)) {
+				return fmt.Errorf("forward_proxy.inject_routes[%d].upstream_ca_pem is invalid", index)
+			}
+			if strings.ContainsAny(route.UpstreamServerName, "/\\@?# \t\r\n") {
+				return fmt.Errorf("forward_proxy.inject_routes[%d].upstream_server_name is invalid", index)
+			}
+		}
+		if route.AllowPrivateUpstream && (route.UpstreamCAPEM == "" || route.AllowInsecureUpstream) {
+			return fmt.Errorf("forward_proxy.inject_routes[%d] private upstream requires pinned TLS CA and server name", index)
+		}
 		hostCapability := host + "\x00" + route.Capability
 		if injectHostCapabilities[hostCapability] {
 			return fmt.Errorf("forward_proxy.inject_routes[%d].host %q and capability %q are duplicated", index, route.Host, route.Capability)
@@ -380,6 +407,14 @@ func (c *ForwardProxyConfig) Validate() error {
 		for index, route := range c.InjectRoutes {
 			if allowed, _ := c.DomainPolicy.Decide(route.Host); !allowed {
 				return fmt.Errorf("inject_routes[%d].host %q is denied by domain_policy", index, route.Host)
+			}
+			// A private-capable catalog route is already constrained by an
+			// exact trusted upstream, route-specific CA, and TLS server name.
+			// Applying the workload's domain policy to that upstream would make
+			// pinned IP literals impossible to represent; the synthetic CONNECT
+			// host remains subject to the policy above.
+			if route.AllowPrivateUpstream {
+				continue
 			}
 			host, ok := normalizedRouteUpstreamHost(route.Upstream)
 			if !ok {

@@ -85,7 +85,7 @@ func (p *Proxy) quotaExceeded() bool {
 func (p *Proxy) report(method, path string, status int) {
 	p.Reporter.Enqueue(ReportEntry{
 		Capability: p.Route.Capability,
-		Host:       injectionHost(p.Route.Upstream),
+		Host:       p.brokerInjectionHost(),
 		Method:     method,
 		PathClass:  PathClass(path),
 		Status:     status,
@@ -115,7 +115,7 @@ func (p *Proxy) material(ctx context.Context, method, path string) (*Material, e
 		}
 		delete(p.cache, key)
 	}
-	material, err := p.Broker.FetchHeaders(ctx, p.Route.Capability, injectionHost(p.Route.Upstream), method, path)
+	material, err := p.Broker.FetchHeaders(ctx, p.Route.Capability, p.brokerInjectionHost(), method, path)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +130,13 @@ func (p *Proxy) material(ctx context.Context, method, path string) (*Material, e
 	}
 	p.cache[key] = &cacheEntry{material: material, fetchedAt: p.now()}
 	return material, nil
+}
+
+func (p *Proxy) brokerInjectionHost() string {
+	if p.Route.InjectionHost != "" {
+		return p.Route.InjectionHost
+	}
+	return injectionHost(p.Route.Upstream)
 }
 
 func (p *Proxy) entryValidLocked(entry *cacheEntry) bool {
@@ -200,7 +207,7 @@ func (p *Proxy) buildOutbound(r *http.Request, material *Material) (*http.Reques
 	}
 	for name, values := range r.Header {
 		canonical := http.CanonicalHeaderKey(name)
-		if hopByHopHeaders[canonical] || strip[canonical] || canonical == "Host" {
+		if hopByHopHeaders[canonical] || strip[canonical] || sensitiveWorkloadHeader(canonical) || canonical == "Host" {
 			continue
 		}
 		if containsPlaceholder(values) {
@@ -219,6 +226,15 @@ func (p *Proxy) buildOutbound(r *http.Request, material *Material) (*http.Reques
 	}
 	outbound.Host = p.Route.Upstream
 	return outbound, nil
+}
+
+// sensitiveWorkloadHeader is provider-neutral.  Caller credentials and every
+// Kubernetes impersonation header are stripped even if a provider omits them
+// from its replacement metadata.
+func sensitiveWorkloadHeader(name string) bool {
+	canonical := http.CanonicalHeaderKey(name)
+	return canonical == "Authorization" || canonical == "Proxy-Authorization" ||
+		strings.HasPrefix(canonical, "Impersonate-")
 }
 
 func appendHeaderTokens(header http.Header, name, value string) {

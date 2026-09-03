@@ -482,6 +482,40 @@ Rules:
   agent-owned.
 - Error shape and status conventions match `/v1/token`.
 
+### POST /v1/catalog
+
+Agent role only. This endpoint publishes bounded, explicitly non-secret
+preparation data from a provider that negotiated `catalog`:
+
+```json
+{"provider":"clusters"}
+```
+
+```json
+{
+  "ok": true,
+  "files": [{"path":".kube/config","content":"...","mode":"0600"}],
+  "routes": [{
+    "id":"development",
+    "host":"k-01234567890123456789.kube.nvt.invalid",
+    "upstream":"10.20.30.40:6443",
+    "server_name":"kubernetes.internal",
+    "ca_pem":"-----BEGIN CERTIFICATE-----\n...",
+    "allow_private_upstream":true
+  }],
+  "expires_at": null
+}
+```
+
+The agent grant must use a mediated materialization. Generic
+`grant.resources` is the bounded non-repository scope delivered to the
+provider. Catalog output may contain sanitized configuration, stable route
+identifiers, exact endpoints, and public CA certificates. It must never contain
+tokens, authorization headers, client certificates or keys, executable
+credential configuration, refresh state, or provider-private paths. The local
+backend consumes catalogs before starting the workload and does not mount its
+broker identity into the agent.
+
 ### POST /v1/identity
 
 Returns commit identity metadata for a broker provider after applying the same

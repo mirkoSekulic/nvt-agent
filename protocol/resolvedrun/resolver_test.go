@@ -580,6 +580,13 @@ func TestEgressTransportContractMatchesRuntime(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if transport == "redirect" {
+				run.Broker.Grants = append(run.Broker.Grants, BrokerGrant{
+					Provider: "clusters", Resources: []string{"development"}, Capabilities: []string{"catalog", "injection.headers"},
+					Preparations: []string{"catalog"}, Materialization: "header-inject",
+					EgressHosts: []string{"k-01234567890123456789.kube.nvt.invalid:443"},
+				})
+			}
 			bindings := AgentConfigBindings{ForwardProxyURL: "http://127.0.0.1:15002"}
 			if transport == "redirect" {
 				bindings = AgentConfigBindings{RedirectBaseURLs: map[string]string{
@@ -604,6 +611,10 @@ func TestEgressTransportContractMatchesRuntime(t *testing.T) {
 				if firstGrant["base-url"] != "https://egress-source.internal:14431" ||
 					egress["operator-prepared"] != true || len(firstGrant["hosts"].([]any)) == 0 {
 					t.Fatalf("enforced redirect is not bootstrap-consumable without broker lookup: egress=%#v grant=%#v", egress, firstGrant)
+				}
+				catalogGrant := egress["grants"].([]any)[len(egress["grants"].([]any))-1].(map[string]any)
+				if catalogGrant["catalog"] != true || catalogGrant["base-url"] != nil || catalogGrant["hosts"] != nil {
+					t.Fatalf("catalog grant rendered as an ordinary redirect: %#v", catalogGrant)
 				}
 			} else if runtime["proxy"].(map[string]any)["provider"] != "runtime-main" || egress["enforcement"] != true {
 				t.Fatalf("tunnel transport lacks enforced proxy rendering: runtime=%#v egress=%#v", runtime, egress)

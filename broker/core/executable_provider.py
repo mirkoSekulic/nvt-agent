@@ -31,6 +31,7 @@ CAPABILITIES = {
     "headers",
     "files",
     "placeholder-files",
+    "catalog",
     "injection.headers",
     "injection.authorization",
 }
@@ -244,6 +245,18 @@ class ExecutableProviderAdapter(ProviderAdapter):
         self._string_list(result["hosts"], "placeholder-files result hosts")
         self._optional_string(result["expires_at"], "placeholder-files result expires_at")
         return result["files"], result["hosts"], result["expires_at"]
+
+    def catalog(self, agent_id, audit, request_id, grant):
+        self._ensure_capability("catalog")
+        result = self._request("catalog", {
+            "agent_id": agent_id, "request_id": request_id, "grant": grant,
+        })
+        result = self._object(result, "catalog result")
+        self._require_keys(result, {"files", "routes", "expires_at"}, "catalog result")
+        self._file_list(result["files"], "catalog result files", path_key="path")
+        self._catalog_routes(result["routes"])
+        self._optional_string(result["expires_at"], "catalog result expires_at")
+        return result["files"], result["routes"], result["expires_at"]
 
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant):
         self._ensure_capability("injection.headers")
@@ -713,6 +726,23 @@ class ExecutableProviderAdapter(ProviderAdapter):
                 self._protocol_error(f"{field} is invalid")
             if "mode" in item:
                 self._bounded_string(item["mode"], field, 16)
+
+    def _catalog_routes(self, value):
+        if not isinstance(value, list) or len(value) > 1024:
+            self._protocol_error("catalog result routes is invalid")
+        seen = set()
+        required = {"id", "host", "upstream", "server_name", "ca_pem", "allow_private_upstream"}
+        for route in value:
+            if not isinstance(route, dict) or set(route) != required:
+                self._protocol_error("catalog result routes is invalid")
+            for key in ("id", "host", "upstream", "server_name"):
+                self._bounded_string(route[key], "catalog result route", MAX_TEXT_LENGTH)
+            self._bounded_string(route["ca_pem"], "catalog result route ca_pem", 256 * 1024)
+            if not isinstance(route["allow_private_upstream"], bool):
+                self._protocol_error("catalog result routes is invalid")
+            if route["host"] in seen or route["host"] not in self._injection_hosts:
+                self._protocol_error("catalog result routes is invalid")
+            seen.add(route["host"])
 
     @staticmethod
     def _protocol_error(message):

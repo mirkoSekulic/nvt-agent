@@ -36,6 +36,7 @@ type brokerAgent struct {
 type brokerGrant struct {
 	Provider              string                    `yaml:"provider"`
 	Repositories          []string                  `yaml:"repositories,omitempty"`
+	Resources             []string                  `yaml:"resources,omitempty"`
 	Capabilities          []string                  `yaml:"capabilities,omitempty"`
 	Preparations          []string                  `yaml:"preparations,omitempty"`
 	Materialization       string                    `yaml:"materialization,omitempty"`
@@ -97,6 +98,7 @@ func (registry brokerRegistry) upsert(ctx context.Context, run resolvedrun.Resol
 	for _, grant := range run.Broker.Grants {
 		entry := brokerGrant{
 			Provider: grant.Provider, Repositories: append([]string(nil), grant.Repositories...),
+			Resources:    append([]string(nil), grant.Resources...),
 			Capabilities: append([]string(nil), grant.Capabilities...), Preparations: append([]string(nil), grant.Preparations...),
 			Materialization: grant.Materialization, EgressHosts: append([]string(nil), grant.EgressHosts...), Git: grant.Git,
 			AllowInsecureUpstream: grant.AllowInsecureUpstream,
