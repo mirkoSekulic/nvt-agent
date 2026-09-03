@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/url"
 	"regexp"
-	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -382,11 +381,8 @@ func resolveBrokerAuthorizationPresets(broker *nvtv1alpha1.AgentRunBroker) {
 		if grant.Authorization == nil || grant.Authorization.Preset != "observe" {
 			continue
 		}
-		resources := append([]string(nil), grant.Resources...)
-		sort.Strings(resources)
-		grant.Resources = resources
-		rules := make([]nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule, 0, len(resources))
-		for _, resource := range resources {
+		rules := make([]nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule, 0, len(grant.Resources))
+		for _, resource := range grant.Resources {
 			rules = append(rules, nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule{
 				Operation: "observe", Resource: "context/" + resource,
 			})
