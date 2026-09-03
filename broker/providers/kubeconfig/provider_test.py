@@ -116,6 +116,7 @@ class KubeconfigProviderTest(unittest.TestCase):
         paths = [
             "/version", "/api", "/apis", "/api/v1", "/apis/apps/v1",
             "/openapi/v3/apis/example.dev/v1", "/readyz?verbose=true",
+            "/readyz?verbose", "/readyz?verbose&exclude=etcd",
             "/api/v1/pods", "/api/v1/namespaces/team/pods?watch=true&resourceVersion=10",
             "/api/v1/watch/namespaces/team/pods?resourceVersion=10",
             "/api/v1/namespaces/team/pods/api/log?follow=true",
@@ -153,6 +154,7 @@ class KubeconfigProviderTest(unittest.TestCase):
             ("GET", "/api/v1/../secrets"),
             ("GET", "//api/v1/pods"),
             ("GET", "/api/v1/pods?watch=true&watch=false"),
+            ("GET", "/readyz?verbose&&exclude=etcd"),
             ("GET", "/api/v1/pods?"),
             ("GET", "/api/v1/pods/one/unknown"),
         ]

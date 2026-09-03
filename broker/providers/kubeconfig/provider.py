@@ -519,8 +519,15 @@ def validate_canonical_query(query):
         return
     if re.fullmatch(r"(?:[^%]|%[0-9A-Fa-f]{2})*", query) is None:
         raise ProviderFailure("operation-unclassified", 403)
+    fields = query.split("&")
+    if len(fields) > 64 or any(not field for field in fields):
+        raise ProviderFailure("operation-unclassified", 403)
     try:
-        pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=True, max_num_fields=64)
+        # Kubernetes health endpoints document flag-style fields such as
+        # ``?verbose``. With blank values retained, the non-strict parser maps
+        # those fields to an empty value. Empty fields are rejected above so
+        # relaxing this does not make ambiguous separators canonical.
+        pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=False, max_num_fields=64)
     except ValueError as error:
         raise ProviderFailure("operation-unclassified", 403) from error
     if not pairs or len({key for key, _ in pairs}) != len(pairs):
