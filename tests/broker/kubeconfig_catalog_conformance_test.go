@@ -89,6 +89,7 @@ providers:
 		{"POST", "/api/v1/namespaces/development/configmaps"},
 		{"GET", "/api/v1/namespaces/development/pods/name/exec"},
 		{"GET", "/apis/example.dev/v1/namespaces/development/widgets/name/proxy"},
+		{"GET", "/api/v1/pods?watch=true&watch=false"},
 	} {
 		status, body := f.postJSONWithToken("egress-token", "/v1/injection/headers", map[string]any{
 			"capability": "clusters", "host": allowedHost, "method": denied.method, "path": denied.path,

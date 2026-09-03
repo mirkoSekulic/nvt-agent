@@ -123,6 +123,7 @@ class KubeconfigProviderTest(unittest.TestCase):
             "/api/v1/namespaces/team/events?fieldSelector=involvedObject.name%3Dapi",
             "/apis/widgets.example.dev/v1/namespaces/team/widgets",
             "/apis/widgets.example.dev/v1/namespaces/team/secrets",
+            "/apis/rbac.authorization.k8s.io/v1/clusterroles/system:aggregate-to-admin",
             "/apis/widgets.example.dev/v1/widgets/sample/status",
         ]
         for path in paths:
@@ -150,6 +151,7 @@ class KubeconfigProviderTest(unittest.TestCase):
             ("GET", "/api/v1/nodes/name/proxy"),
             ("GET", "/api/v1/proxy"),
             ("GET", "/api/v1/namespaces/team/services/name/proxy"),
+            ("GET", "/api/v1/namespaces/demo/finalize"),
             ("GET", "/api%2fv1/pods"),
             ("GET", "/api/v1/../secrets"),
             ("GET", "//api/v1/pods"),

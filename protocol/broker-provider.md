@@ -187,6 +187,8 @@ the sole audit writer; provider-generated audit records are not supported.
   its administrator ceiling with generic `grant.resources`.
 - `injection.headers`: `{host,method,path,agent_id,request_id,grant}` →
   `{headers,expires_at,strip_request_headers,append_headers?}`.
+  `path` is the request's path component without its query, preserving the
+  materialization contract used by existing providers.
   `append_headers` contains only non-secret, comma-separated feature tokens;
   credential headers belong in `headers`. Providers that do not need additive
   composition may omit it.

@@ -147,10 +147,11 @@ Response:
 Rules:
 
 - The endpoint is provider-agnostic. The broker maps `capability` to a
-  provider; the provider computes injectable headers for
-  `(host, method, path, upgrade)`. `path` is the actual request URI including
-  its query, and `upgrade` is true only for an original protocol-upgrade
-  handshake. `egressd` contains no provider-specific logic —
+  provider. `path` is the actual request URI including its query, and
+  `upgrade` is true only for an original protocol-upgrade handshake. The
+  broker passes the full URI to `injection.authorization`, but preserves the
+  established path-only contract for `injection.headers` materializers by
+  removing the query first. `egressd` contains no provider-specific logic —
   new providers are broker plugins with zero egressd changes.
 - `host` is the pinned upstream **hostname without a port**. Provider
   `injection-hosts` entries are bare hostnames, and `egressd` strips any

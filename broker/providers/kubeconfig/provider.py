@@ -30,7 +30,10 @@ MAX_CONTEXTS = 512
 MAX_HELPER_OUTPUT = 1024 * 1024
 MAX_NO_EXPIRY_CACHE_SECONDS = 60
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]*$")
+# Canonical, unescaped RFC 3986 path-segment characters, excluding percent.
+# Kubernetes path-segment names such as ``system:aggregate-to-admin`` may use
+# ':' even though most ObjectMeta names use a narrower DNS spelling.
+SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9._~!$&'()*+,;=:@-]+$")
 SAFE_QUERY_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9.-]*$")
 
 
@@ -497,7 +500,10 @@ def classify_kubernetes_observation(method, raw_path, upgrade=False):
     # resource[/name[/subresource]], or a namespaced tail
     # namespaces/<namespace>/resource[/name[/subresource]]. The namespaces
     # resource itself uses the former shape.
-    if tail[0] == "namespaces" and len(tail) >= 3:
+    if core_api and tail[0] == "namespaces" and len(tail) >= 3 and tail[2] in ("finalize", "status"):
+        resource_name = tail[0]
+        remainder = tail[1:]
+    elif tail[0] == "namespaces" and len(tail) >= 3:
         resource_name = tail[2]
         remainder = tail[3:]
     else:
