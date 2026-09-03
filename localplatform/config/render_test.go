@@ -354,7 +354,7 @@ func TestKubeconfigProviderRendersProfileScopedCatalogGrant(t *testing.T) {
       private-kubeconfig: cluster-config
 profiles:
 `, 1)
-	value = strings.Replace(value, "    egress:\n", "    kubernetes:\n      - provider: clusters\n        contexts: [aks-development, aks-production]\n    egress:\n", 1)
+	value = strings.Replace(value, "    egress:\n", "    kubernetes:\n      - provider: clusters\n        contexts: [aks-development, aks-production]\n        authorization:\n          preset: observe\n    egress:\n", 1)
 	value = strings.Replace(value, "allow: [GitHub.COM.,", "allow: [kube.nvt.invalid, GitHub.COM.,", 1)
 	decoded, err := manifest.Decode(strings.NewReader(value))
 	if err != nil {
@@ -393,7 +393,9 @@ profiles:
 		}
 	}
 	if grant == nil || strings.Join(grant.Resources, ",") != "aks-development,aks-production" ||
-		strings.Join(grant.Preparations, ",") != "catalog" || len(grant.EgressHosts) != 2 || grant.Materialization != "header-inject" {
+		strings.Join(grant.Preparations, ",") != "catalog" || len(grant.EgressHosts) != 2 || grant.Materialization != "header-inject" ||
+		grant.Authorization == nil || grant.Authorization.DefaultAction != "deny" || len(grant.Authorization.Rules) != 2 ||
+		grant.Authorization.Rules[0].Operation != "observe" || grant.Authorization.Rules[0].Resource != "context/aks-development" {
 		t.Fatalf("profile kubeconfig grant = %#v", grant)
 	}
 }

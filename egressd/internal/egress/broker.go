@@ -31,6 +31,7 @@ type injectionRequest struct {
 	Host       string `json:"host"`
 	Method     string `json:"method"`
 	Path       string `json:"path"`
+	Upgrade    bool   `json:"upgrade,omitempty"`
 }
 
 type injectionResponse struct {
@@ -45,12 +46,13 @@ type injectionResponse struct {
 // FetchHeaders requests injectable headers for one (capability, host,
 // method, path). Any failure is returned as an error; callers must fail
 // closed rather than reuse stale material.
-func (b *BrokerClient) FetchHeaders(ctx context.Context, capability, host, method, path string) (*Material, error) {
+func (b *BrokerClient) FetchHeaders(ctx context.Context, capability, host, method, path string, upgrade bool) (*Material, error) {
 	body, err := json.Marshal(injectionRequest{
 		Capability: capability,
 		Host:       host,
 		Method:     method,
 		Path:       path,
+		Upgrade:    upgrade,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode injection request: %w", err)

@@ -72,6 +72,27 @@ creation and mounts the generic, read-only document described in
 It does not inspect or modify runtime plugin configuration. Omit preparations
 to preserve the existing behavior and receive no metadata file or path variable.
 
+Raw AgentRun kubeconfig grants carry their exact context names in `resources`
+and only concrete authorization. For example:
+
+```yaml
+broker:
+  grants:
+    - provider: clusters
+      repositories: []
+      resources: [studio-staging-aks]
+      materialization: header-inject
+      egressHosts: [k-<stable-route>.kube.nvt.invalid:443]
+      authorization:
+        defaultAction: deny
+        rules:
+          - {operation: observe, resource: context/studio-staging-aks}
+```
+
+`authorization.preset` is rejected on a raw AgentRun; presets belong to the
+AgentSchedule/Helm intent layer and must already be resolved. The operator
+copies resources and concrete policy into generated broker `agents.yaml`.
+
 `agent.workspaceInstructions` is optional administrator-provided guidance. The
 operator projects it through the read-only agent configuration volume and the
 runtime appends it to generated `AGENTS.md` before any local

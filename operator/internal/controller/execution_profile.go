@@ -103,8 +103,10 @@ func (StaticExecutionProfileResolver) Resolve(
 		}
 		selected = selection.DefaultProfile
 	}
-	profile := profiles[selected]
-	return &ResolvedExecutionProfile{Profile: *profile.DeepCopy()}, nil
+	selectedValue := profiles[selected]
+	profile := selectedValue.DeepCopy()
+	resolveBrokerAuthorizationPresets(profile.Broker)
+	return &ResolvedExecutionProfile{Profile: *profile}, nil
 }
 
 func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[string]nvtv1alpha1.AgentScheduleExecutionProfile, error) {
@@ -189,6 +191,9 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 			return nil, errInvalidExecutionProfileConfiguration
 		}
 		if err := validateRuntimeDockerNetworks(profile.Runtime); err != nil {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		if err := validateScheduleBrokerAuthorization(profile.Broker); err != nil {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
 		profiles[profile.Name] = profile
@@ -314,6 +319,7 @@ func resolvePrincipalCredentialProfile(
 		return nil, errInvalidExecutionProfileConfiguration
 	}
 	bound.AgentRuntimeConfig = runtimeConfig
+	resolveBrokerAuthorizationPresets(bound.Broker)
 	return &ResolvedExecutionProfile{
 		Profile: *bound,
 		PrincipalCredential: &nvtv1alpha1.AgentRunPrincipalCredentialProvenance{
@@ -321,6 +327,68 @@ func resolvePrincipalCredentialProfile(
 			Generation: resolution.Generation,
 		},
 	}, nil
+}
+
+func validateScheduleBrokerAuthorization(broker *nvtv1alpha1.AgentRunBroker) error {
+	if broker == nil {
+		return nil
+	}
+	for _, grant := range broker.Grants {
+		if len(grant.Resources) > 256 {
+			return errInvalidExecutionProfileConfiguration
+		}
+		resources := map[string]struct{}{}
+		for _, resource := range grant.Resources {
+			if resource == "" || len(resource) > 4096 {
+				return errInvalidExecutionProfileConfiguration
+			}
+			if _, duplicate := resources[resource]; duplicate {
+				return errInvalidExecutionProfileConfiguration
+			}
+			resources[resource] = struct{}{}
+		}
+		policy := grant.Authorization
+		if policy == nil {
+			continue
+		}
+		if policy.Preset != "" {
+			if policy.Preset != "observe" || policy.DefaultAction != "" || policy.Rules != nil || len(grant.Resources) == 0 {
+				return errInvalidExecutionProfileConfiguration
+			}
+			continue
+		}
+		if policy.DefaultAction != "allow" && policy.DefaultAction != "deny" {
+			return errInvalidExecutionProfileConfiguration
+		}
+		if len(policy.Rules) > 256 {
+			return errInvalidExecutionProfileConfiguration
+		}
+		for _, rule := range policy.Rules {
+			if rule.Operation == "" || len(rule.Operation) > 4096 || rule.Resource == "" || len(rule.Resource) > 8192 {
+				return errInvalidExecutionProfileConfiguration
+			}
+		}
+	}
+	return nil
+}
+
+func resolveBrokerAuthorizationPresets(broker *nvtv1alpha1.AgentRunBroker) {
+	if broker == nil {
+		return
+	}
+	for index := range broker.Grants {
+		grant := &broker.Grants[index]
+		if grant.Authorization == nil || grant.Authorization.Preset != "observe" {
+			continue
+		}
+		rules := make([]nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule, 0, len(grant.Resources))
+		for _, resource := range grant.Resources {
+			rules = append(rules, nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule{
+				Operation: "observe", Resource: "context/" + resource,
+			})
+		}
+		grant.Authorization = &nvtv1alpha1.AgentRunBrokerGrantAuthorization{DefaultAction: "deny", Rules: rules}
+	}
 }
 
 func replacePrincipalAccountPlaceholder(

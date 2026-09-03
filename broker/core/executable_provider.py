@@ -278,15 +278,18 @@ class ExecutableProviderAdapter(ProviderAdapter):
         self._string_list(result["strip_request_headers"], "injection.headers result strip_request_headers")
         return result["headers"], result["expires_at"], result["strip_request_headers"], append_headers
 
-    def authorize_injection(self, host, method, path, agent_id, request_id, grant):
+    def authorize_injection(self, host, method, path, upgrade, agent_id, request_id, grant):
         if "injection.authorization" not in self._capabilities:
             if grant.get("authorization") is not None:
                 raise ProviderError("operation-authorization-not-supported", status=403)
             return None
-        result = self._request("injection.authorization", {
+        params = {
             "host": host, "method": method, "path": path, "agent_id": agent_id,
             "request_id": request_id, "grant": grant,
-        })
+        }
+        if upgrade:
+            params["upgrade"] = True
+        result = self._request("injection.authorization", params)
         result = self._object(result, "injection.authorization result")
         self._require_keys(result, {"allowed", "operation", "resource"}, "injection.authorization result")
         if not isinstance(result["allowed"], bool):

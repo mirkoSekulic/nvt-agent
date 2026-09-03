@@ -252,6 +252,9 @@ type AgentRunBroker struct {
 type AgentRunBrokerGrant struct {
 	Provider     string   `json:"provider"`
 	Repositories []string `json:"repositories"`
+	// Resources is the provider-neutral exact resource scope. Kubeconfig grants
+	// use context names; no kubeconfig data or credentials are carried here.
+	Resources []string `json:"resources,omitempty"`
 	// Preparations requests bounded, non-secret provider metadata that the
 	// trusted operator resolves before creating the agent Pod.
 	Preparations []AgentRunBrokerPreparation `json:"preparations,omitempty"`
@@ -287,8 +290,13 @@ type AgentRunBrokerGrant struct {
 
 // AgentRunBrokerGrantAuthorization narrows the provider's administrator-owned ceiling.
 type AgentRunBrokerGrantAuthorization struct {
+	// Preset is accepted only in AgentSchedule execution profiles. Admission
+	// resolves it into the concrete fields below before creating an AgentRun.
+	// Raw AgentRuns must contain concrete policy only.
+	// +kubebuilder:validation:Enum=observe
+	Preset string `json:"preset,omitempty"`
 	// +kubebuilder:validation:Enum=allow;deny
-	DefaultAction string `json:"defaultAction"`
+	DefaultAction string `json:"defaultAction,omitempty"`
 	// +kubebuilder:validation:MaxItems=256
 	Rules []AgentRunBrokerGrantAuthorizationRule `json:"rules,omitempty"`
 }
@@ -306,7 +314,7 @@ func (in *AgentRunBrokerGrantAuthorization) DeepCopy() *AgentRunBrokerGrantAutho
 	if in == nil {
 		return nil
 	}
-	out := &AgentRunBrokerGrantAuthorization{DefaultAction: in.DefaultAction}
+	out := &AgentRunBrokerGrantAuthorization{Preset: in.Preset, DefaultAction: in.DefaultAction}
 	if in.Rules != nil {
 		out.Rules = append([]AgentRunBrokerGrantAuthorizationRule{}, in.Rules...)
 	}
@@ -606,6 +614,9 @@ func (in *AgentRunBrokerGrant) DeepCopy() *AgentRunBrokerGrant {
 	*out = *in
 	if in.Repositories != nil {
 		out.Repositories = append([]string{}, in.Repositories...)
+	}
+	if in.Resources != nil {
+		out.Resources = append([]string{}, in.Resources...)
 	}
 	if in.Preparations != nil {
 		out.Preparations = append([]AgentRunBrokerPreparation{}, in.Preparations...)

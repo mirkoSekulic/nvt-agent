@@ -513,6 +513,14 @@ spec:
                                   items:
                                     type: string
                                     minLength: 1
+                                resources:
+                                  type: array
+                                  maxItems: 256
+                                  x-kubernetes-list-type: set
+                                  items:
+                                    type: string
+                                    minLength: 1
+                                    maxLength: 4096
                                 preparations:
                                   type: array
                                   items:
@@ -551,9 +559,14 @@ spec:
                                       - write
                                 authorization:
                                   type: object
-                                  required:
-                                    - defaultAction
+                                  x-kubernetes-validations:
+                                    - rule: '(has(self.preset) && !has(self.defaultAction) && !has(self.rules)) || (!has(self.preset) && has(self.defaultAction))'
+                                      message: preset and concrete authorization are mutually exclusive
                                   properties:
+                                    preset:
+                                      type: string
+                                      enum:
+                                        - observe
                                     defaultAction:
                                       type: string
                                       enum:

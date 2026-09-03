@@ -123,7 +123,8 @@ Request:
   "capability": "codex-main",
   "host": "chatgpt.com",
   "method": "POST",
-  "path": "/backend-api/responses"
+  "path": "/backend-api/responses",
+  "upgrade": false
 }
 ```
 
@@ -146,8 +147,11 @@ Response:
 Rules:
 
 - The endpoint is provider-agnostic. The broker maps `capability` to a
-  provider; the provider computes injectable headers for
-  `(host, method, path)`. `egressd` contains no provider-specific logic —
+  provider. `path` is the actual request URI including its query, and
+  `upgrade` is true only for an original protocol-upgrade handshake. The
+  broker passes the full URI to `injection.authorization`, but preserves the
+  established path-only contract for `injection.headers` materializers by
+  removing the query first. `egressd` contains no provider-specific logic —
   new providers are broker plugins with zero egressd changes.
 - `host` is the pinned upstream **hostname without a port**. Provider
   `injection-hosts` entries are bare hostnames, and `egressd` strips any
@@ -178,7 +182,7 @@ Rules:
 
 ### Operation and resource authorization
 
-An injection-capable provider may classify `(host, method, path)` into its own
+An injection-capable provider may classify `(host, method, path, upgrade)` into its own
 normalized `operation` and `resource` vocabulary. A grant can carry:
 
 ```yaml
@@ -198,11 +202,12 @@ cannot mint or receive injectable material. Audit records contain normalized
 operation/resource decisions but never credentials, bodies, sensitive query
 values, or raw authorization headers.
 
-The first iteration classifies only method and normalized path. It cannot
+The contract classifies request method, actual path/query, and protocol-upgrade
+intent. It cannot
 restrict JSON request-body fields such as a workflow dispatch `ref` or inputs;
 such fields require a separate bounded, streaming-safe classification contract.
 Each egress process is scoped to one immutable AgentRun grant, and its existing
-material cache remains keyed by method and path, preventing reuse across a
+material cache remains keyed by method, request URI, and upgrade intent, preventing reuse across a
 different request classification or authorization scope.
 
 ### POST /v1/injection/routing

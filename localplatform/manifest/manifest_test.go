@@ -466,6 +466,68 @@ func TestBrokerGrantsDoNotCrossProfilesSharingAnAccount(t *testing.T) {
 	}
 }
 
+func TestKubernetesObservePresetResolvesImmutably(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Secrets["cluster-config"] = Secret{File: "./.nvt-local/secrets/kubernetes/config"}
+	decoded.BrokerProviders["clusters"] = BrokerProvider{Plugin: "kubeconfig", Secrets: map[string]string{"private-kubeconfig": "cluster-config"}}
+	policy := &KubernetesAuthorization{Preset: "observe"}
+	profile := decoded.Profiles["development"]
+	profile.Kubernetes = []KubernetesAccess{{Provider: "clusters", Contexts: []string{"studio-staging"}, Authorization: policy}}
+	decoded.Profiles["development"] = profile
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Preset = "changed"
+	var kubernetes *BrokerGrantIntent
+	for index := range compiled.Broker.Profiles[0].Grants {
+		if compiled.Broker.Profiles[0].Grants[index].Purpose == "catalog" {
+			kubernetes = &compiled.Broker.Profiles[0].Grants[index]
+		}
+	}
+	if kubernetes == nil || kubernetes.Authorization == nil || kubernetes.Authorization.DefaultAction != "deny" ||
+		len(kubernetes.Authorization.Rules) != 1 || kubernetes.Authorization.Rules[0] != (BrokerGrantAuthorizationRule{Operation: "observe", Resource: "context/studio-staging"}) {
+		t.Fatalf("observe preset did not resolve to concrete immutable policy: %#v", kubernetes)
+	}
+}
+
+func TestKubernetesAuthorizationRejectsMixedAndInvalidForms(t *testing.T) {
+	for _, policy := range []*KubernetesAuthorization{
+		{Preset: "unknown"},
+		{Preset: "observe", DefaultAction: "deny"},
+		{Preset: "observe", Rules: []KubernetesAuthorizationRule{}},
+		{},
+		{DefaultAction: "block"},
+	} {
+		if err := validateKubernetesAuthorization(policy); err == nil {
+			t.Fatalf("invalid Kubernetes authorization accepted: %#v", policy)
+		}
+	}
+	if err := validateKubernetesAuthorization(&KubernetesAuthorization{DefaultAction: "deny", Rules: []KubernetesAuthorizationRule{{Operation: "observe", Resource: "context/studio-staging"}}}); err != nil {
+		t.Fatalf("explicit Kubernetes authorization rejected: %v", err)
+	}
+}
+
+func TestKubernetesAuthorizationDecodeRejectsUnknownField(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := strings.Replace(string(raw), "  azure-token:\n", "  cluster-config:\n    file: ./.nvt-local/secrets/kubernetes/config\n  azure-token:\n", 1)
+	value = strings.Replace(value, "  azure:\n    plugin: token", "  clusters:\n    plugin: kubeconfig\n    secrets:\n      private-kubeconfig: cluster-config\n  azure:\n    plugin: token", 1)
+	value = strings.Replace(value, "    egress:\n", "    kubernetes:\n      - provider: clusters\n        contexts: [studio-staging]\n        authorization:\n          preset: observe\n          unexpected: true\n    egress:\n", 1)
+	if _, err := Decode(strings.NewReader(value)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unknown Kubernetes authorization field was not rejected strictly: %v", err)
+	}
+}
+
 func TestRepositoryAccessValidationAndCompilation(t *testing.T) {
 	raw, err := os.ReadFile("testdata/valid.yaml")
 	if err != nil {

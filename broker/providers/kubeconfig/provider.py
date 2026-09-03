@@ -20,7 +20,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 
@@ -30,6 +30,11 @@ MAX_CONTEXTS = 512
 MAX_HELPER_OUTPUT = 1024 * 1024
 MAX_NO_EXPIRY_CACHE_SECONDS = 60
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Canonical, unescaped RFC 3986 path-segment characters, excluding percent.
+# Kubernetes path-segment names such as ``system:aggregate-to-admin`` may use
+# ':' even though most ObjectMeta names use a narrower DNS spelling.
+SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9._~!$&'()*+,;=:@-]+$")
+SAFE_QUERY_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9.-]*$")
 
 
 class ProviderFailure(Exception):
@@ -74,8 +79,11 @@ class KubeconfigProvider:
         allow = params.get("allow") or {}
         if not isinstance(allow, dict) or "resources" not in allow:
             raise ProviderFailure("provider-config-invalid")
+        if set(allow) - {"resources", "authorization"}:
+            raise ProviderFailure("provider-config-invalid")
         self.allowed_ceiling = string_list(allow.get("resources", []), "allow.resources", MAX_CONTEXTS)
         self.allowed_ceiling = set(self.allowed_ceiling)
+        self.operation_authorization = operation_policy(allow.get("authorization"), "allow.authorization")
         kubeconfig_path = Path(required_string(config, "private-kubeconfig"))
         self.state_dir = Path(required_string(config, "state-dir"))
         self.helper_allowlist = set(string_list(config.get("helper-allowlist", []), "helper-allowlist", 64))
@@ -198,7 +206,7 @@ class KubeconfigProvider:
     def initialize_result(self):
         return {
             "protocol_version": PROTOCOL,
-            "capabilities": ["catalog", "injection.headers"],
+            "capabilities": ["catalog", "injection.authorization", "injection.headers"],
             "injection_hosts": sorted(self.routes),
             "injection_git": False,
             "bundle_ttl_seconds": None,
@@ -276,6 +284,37 @@ class KubeconfigProvider:
             "expires_at": expires_at,
             "strip_request_headers": ["authorization", "proxy-authorization"],
         }
+
+    def injection_authorization(self, params):
+        host = required_string(params, "host")
+        method = required_string(params, "method").upper()
+        path = required_string(params, "path")
+        upgrade = params.get("upgrade", False)
+        if not isinstance(upgrade, bool):
+            raise ProviderFailure("provider-request-invalid")
+        route = self.routes.get(host)
+        if route is None:
+            raise ProviderFailure("host-not-allowed", 403)
+        grant = params.get("grant")
+        granted = self.effective_contexts(grant)
+        if route["id"] not in granted:
+            raise ProviderFailure("resource-not-granted", 403)
+        grant_policy = operation_policy((grant or {}).get("authorization"), "grant.authorization", status=403)
+        resource = "context/" + route["id"]
+        if self.operation_authorization is None and grant_policy is None:
+            # Preserve the pre-policy behavior exactly. Negotiating the
+            # capability lets a later grant opt in without making unrestricted
+            # grants subject to the classifier.
+            return {"allowed": True, "operation": "unrestricted", "resource": resource}
+        try:
+            classify_kubernetes_observation(method, path, upgrade)
+        except ProviderFailure as error:
+            if error.reason != "operation-unclassified":
+                raise
+            return {"allowed": False, "operation": "unclassified", "resource": resource}
+        allowed = policy_allows(self.operation_authorization, "observe", resource)
+        allowed = allowed and policy_allows(grant_policy, "observe", resource)
+        return {"allowed": allowed, "operation": "observe", "resource": resource}
 
     def _token(self, user_name, cluster_name):
         user = self.users[user_name]
@@ -382,6 +421,126 @@ class KubeconfigProvider:
 def route_host(instance, context):
     digest = hashlib.sha256((instance + "\0" + context).encode()).hexdigest()[:20]
     return "k-" + digest + ".kube.nvt.invalid"
+
+
+def operation_policy(value, field, status=400):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"defaultAction", "rules"}:
+        raise ProviderFailure("provider-config-invalid" if status == 400 else "grant-invalid", status)
+    default = value.get("defaultAction", "deny")
+    rules = value.get("rules", [])
+    if default not in ("allow", "deny") or not isinstance(rules, list) or len(rules) > 256:
+        raise ProviderFailure("provider-config-invalid" if status == 400 else "grant-invalid", status)
+    normalized = set()
+    for rule in rules:
+        if not isinstance(rule, dict) or set(rule) != {"operation", "resource"}:
+            raise ProviderFailure("provider-config-invalid" if status == 400 else "grant-invalid", status)
+        operation, resource = rule.get("operation"), rule.get("resource")
+        if (not isinstance(operation, str) or not operation or len(operation.encode()) > 4096 or
+                not isinstance(resource, str) or not resource or len(resource.encode()) > 8192):
+            raise ProviderFailure("provider-config-invalid" if status == 400 else "grant-invalid", status)
+        normalized.add((operation, resource))
+    return default, frozenset(normalized)
+
+
+def policy_allows(policy, operation, resource):
+    if policy is None:
+        return True
+    default, rules = policy
+    return default == "allow" or (operation, resource) in rules
+
+
+def classify_kubernetes_observation(method, raw_path, upgrade=False):
+    """Fail closed unless this is one canonical Kubernetes observation request."""
+    if (method != "GET" or upgrade or len(raw_path.encode()) > 8192 or
+            raw_path.count("?") > 1 or raw_path.endswith("?")):
+        raise ProviderFailure("operation-unclassified", 403)
+    parsed = urlsplit(raw_path)
+    path = parsed.path
+    if (parsed.scheme or parsed.netloc or parsed.fragment or not path.startswith("/") or
+            "\\" in path or "%" in path or "//" in path):
+        raise ProviderFailure("operation-unclassified", 403)
+    segments = path.split("/")[1:]
+    if any(not segment or segment in (".", "..") or not SAFE_PATH_SEGMENT.fullmatch(segment) for segment in segments):
+        raise ProviderFailure("operation-unclassified", 403)
+    validate_canonical_query(parsed.query)
+
+    # Non-resource endpoints used for discovery, client negotiation, and
+    # ordinary health checks. The openapi v3 suffix is server-published public
+    # schema data and contains only already-canonical path segments.
+    if path in ("/api", "/apis", "/version", "/openapi/v2", "/openapi/v3"):
+        return
+    if segments[0] in ("healthz", "livez", "readyz"):
+        return
+    if segments[:2] == ["openapi", "v3"] and len(segments) > 2:
+        return
+
+    tail = None
+    core_api = False
+    if len(segments) >= 2 and segments[0] == "api":
+        core_api = True
+        if len(segments) == 2:  # /api/v1 discovery
+            return
+        tail = segments[2:]
+    elif len(segments) >= 3 and segments[0] == "apis":
+        if len(segments) == 3:  # /apis/<group>/<version> discovery
+            return
+        tail = segments[3:]
+    if not tail:
+        raise ProviderFailure("operation-unclassified", 403)
+    if tail[0] == "proxy":
+        raise ProviderFailure("operation-unclassified", 403)
+    if tail[0] == "watch":
+        tail = tail[1:]
+        if not tail:
+            raise ProviderFailure("operation-unclassified", 403)
+
+    # Kubernetes resource URLs have either a cluster-scoped tail
+    # resource[/name[/subresource]], or a namespaced tail
+    # namespaces/<namespace>/resource[/name[/subresource]]. The namespaces
+    # resource itself uses the former shape.
+    if core_api and tail[0] == "namespaces" and len(tail) >= 3 and tail[2] in ("finalize", "status"):
+        resource_name = tail[0]
+        remainder = tail[1:]
+    elif tail[0] == "namespaces" and len(tail) >= 3:
+        resource_name = tail[2]
+        remainder = tail[3:]
+    else:
+        resource_name = tail[0]
+        remainder = tail[1:]
+    if len(remainder) > 2:
+        raise ProviderFailure("operation-unclassified", 403)
+    subresource = remainder[1] if len(remainder) == 2 else None
+    if core_api and resource_name == "secrets":
+        raise ProviderFailure("operation-unclassified", 403)
+    if subresource is not None and subresource not in ("status", "scale", "log"):
+        raise ProviderFailure("operation-unclassified", 403)
+    if subresource == "log" and resource_name != "pods":
+        raise ProviderFailure("operation-unclassified", 403)
+
+
+def validate_canonical_query(query):
+    if not query:
+        return
+    if re.fullmatch(r"(?:[^%]|%[0-9A-Fa-f]{2})*", query) is None:
+        raise ProviderFailure("operation-unclassified", 403)
+    fields = query.split("&")
+    if len(fields) > 64 or any(not field for field in fields):
+        raise ProviderFailure("operation-unclassified", 403)
+    try:
+        # Kubernetes health endpoints document flag-style fields such as
+        # ``?verbose``. With blank values retained, the non-strict parser maps
+        # those fields to an empty value. Empty fields are rejected above so
+        # relaxing this does not make ambiguous separators canonical.
+        pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=False, max_num_fields=64)
+    except ValueError as error:
+        raise ProviderFailure("operation-unclassified", 403) from error
+    if not pairs or len({key for key, _ in pairs}) != len(pairs):
+        raise ProviderFailure("operation-unclassified", 403)
+    for key, value in pairs:
+        if not SAFE_QUERY_KEY.fullmatch(key) or any(character in value for character in "\x00\r\n"):
+            raise ProviderFailure("operation-unclassified", 403)
 
 
 def parse_cluster(cluster, base_dir):
@@ -526,6 +685,8 @@ def main():
                 raise ProviderFailure("provider-unavailable", 503)
             elif method == "catalog":
                 result = provider.catalog(params)
+            elif method == "injection.authorization":
+                result = provider.injection_authorization(params)
             elif method == "injection.headers":
                 result = provider.injection_headers(params)
             elif method == "shutdown":

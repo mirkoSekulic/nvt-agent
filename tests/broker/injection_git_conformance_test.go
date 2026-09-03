@@ -205,7 +205,7 @@ func TestGitInjectionFetchMintsScopedBasicAuth(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(gitIdentities(nil))
 
-	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", gitInjectionRequest("GET", "/my-user/my-repo.git/info/refs"))
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", gitInjectionRequest("GET", "/my-user/my-repo.git/info/refs?service=git-upload-pack"))
 	if status != http.StatusOK || body["ok"] != true {
 		t.Fatalf("info/refs injection denied: status=%d body=%v", status, body)
 	}
@@ -677,7 +677,7 @@ func TestStaticPATInjectionEnforcesRepositoryScope(t *testing.T) {
 	request := func(method, path string) map[string]any {
 		return map[string]any{"capability": "basic-pat-provider", "host": "dev.azure.com", "method": method, "path": path}
 	}
-	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request("GET", "/org/project/_git/repo/info/refs"))
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request("GET", "/org/project/_git/repo/info/refs?service=git-upload-pack"))
 	if status != http.StatusOK || body["ok"] != true {
 		t.Fatalf("scoped PAT fetch was denied: status=%d body=%v", status, body)
 	}
@@ -694,7 +694,7 @@ func TestStaticPATInjectionEnforcesRepositoryScope(t *testing.T) {
 			t.Fatalf("scoped Azure PAT API request %s %s was denied: status=%d body=%v", operation.method, operation.path, status, body)
 		}
 	}
-	githubRequest := map[string]any{"capability": "github-pat-provider", "host": "github.com", "method": "GET", "path": "/my-user/my-repo.git/info/refs"}
+	githubRequest := map[string]any{"capability": "github-pat-provider", "host": "github.com", "method": "GET", "path": "/my-user/my-repo.git/info/refs?service=git-upload-pack"}
 	status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", githubRequest)
 	if status != http.StatusOK || body["ok"] != true {
 		t.Fatalf("scoped GitHub PAT fetch was denied: status=%d body=%v", status, body)

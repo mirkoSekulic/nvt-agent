@@ -357,7 +357,7 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 			continue
 		}
 		if grant.Purpose == "catalog" {
-			profile.Broker.Grants = append(profile.Broker.Grants, kubeconfigGrant(grant.Provider, grant.Resources))
+			profile.Broker.Grants = append(profile.Broker.Grants, kubeconfigGrant(grant.Provider, grant.Resources, grant.Authorization))
 			continue
 		}
 		for _, repositoryName := range grant.Repositories {
@@ -543,17 +543,24 @@ func runtimeGrant(provider, preset string) resolvedrun.BrokerGrant {
 	return resolvedrun.BrokerGrant{Provider: provider, Capabilities: []string{"injection.headers"}, Materialization: "placeholder-file", EgressHosts: hosts}
 }
 
-func kubeconfigGrant(provider string, contexts []string) resolvedrun.BrokerGrant {
+func kubeconfigGrant(provider string, contexts []string, authorization *manifest.BrokerGrantAuthorization) resolvedrun.BrokerGrant {
 	hosts := make([]string, 0, len(contexts))
 	for _, contextName := range contexts {
 		digest := sha256.Sum256([]byte(provider + "\x00" + contextName))
 		hosts = append(hosts, "k-"+hex.EncodeToString(digest[:10])+".kube.nvt.invalid:443")
 	}
-	return resolvedrun.BrokerGrant{
+	grant := resolvedrun.BrokerGrant{
 		Provider: provider, Resources: append([]string(nil), contexts...),
 		Capabilities: []string{"catalog", "injection.headers"}, Preparations: []string{"catalog"},
 		Materialization: "header-inject", EgressHosts: hosts,
 	}
+	if authorization != nil {
+		grant.Authorization = &resolvedrun.BrokerGrantAuthorization{DefaultAction: authorization.DefaultAction}
+		for _, rule := range authorization.Rules {
+			grant.Authorization.Rules = append(grant.Authorization.Rules, resolvedrun.BrokerGrantAuthorizationRule{Operation: rule.Operation, Resource: rule.Resource})
+		}
+	}
+	return grant
 }
 
 func repositoryGrant(provider, preset string, mediation *manifest.BrokerProviderMediation, repositories []string, permissions map[string]string) resolvedrun.BrokerGrant {

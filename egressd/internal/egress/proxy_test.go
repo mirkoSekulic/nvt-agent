@@ -48,10 +48,14 @@ func (b *fakeBroker) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"ok":false,"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
-	var payload map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	var decoded injectionRequest
+	if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	payload := map[string]string{"capability": decoded.Capability, "host": decoded.Host, "method": decoded.Method, "path": decoded.Path}
+	if decoded.Upgrade {
+		payload["upgrade"] = "true"
 	}
 	b.mu.Lock()
 	b.calls++
@@ -479,7 +483,7 @@ func TestNoStaleMaterialAfterExpiry(t *testing.T) {
 }
 
 // TestCacheKeyedByMethodAndPath pins the cache scope: the broker authorizes
-// (capability, host, method, path), so material fetched for one method/path
+// (capability, host, method, request URI), so material fetched for one scope
 // must not be reused for another without re-asking the broker.
 func TestCacheKeyedByMethodAndPath(t *testing.T) {
 	broker := newFakeBroker(t)
@@ -490,6 +494,7 @@ func TestCacheKeyedByMethodAndPath(t *testing.T) {
 	for _, request := range []struct{ method, path string }{
 		{http.MethodGet, "/a"},
 		{http.MethodGet, "/a"},
+		{http.MethodGet, "/a?watch=true"},
 		{http.MethodGet, "/b"},
 		{http.MethodPost, "/a"},
 	} {
@@ -503,8 +508,8 @@ func TestCacheKeyedByMethodAndPath(t *testing.T) {
 		}
 		_ = response.Body.Close()
 	}
-	if calls := broker.callCount(); calls != 3 {
-		t.Fatalf("expected 3 broker fetches for 3 distinct (method, path) scopes, got %d", calls)
+	if calls := broker.callCount(); calls != 4 {
+		t.Fatalf("expected 4 broker fetches for 4 distinct (method, path) scopes, got %d", calls)
 	}
 	broker.mu.Lock()
 	defer broker.mu.Unlock()
@@ -512,7 +517,7 @@ func TestCacheKeyedByMethodAndPath(t *testing.T) {
 	for _, request := range broker.requests {
 		seen[request["method"]+" "+request["path"]] = true
 	}
-	for _, scope := range []string{"GET /a", "GET /b", "POST /a"} {
+	for _, scope := range []string{"GET /a", "GET /a?watch=true", "GET /b", "POST /a"} {
 		if !seen[scope] {
 			t.Fatalf("broker never asked for scope %q; requests: %v", scope, broker.requests)
 		}

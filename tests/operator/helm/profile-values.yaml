@@ -86,6 +86,13 @@ agentSchedule:
             git: true
             preparations:
               - operation: identity
+          - provider: clusters
+            repositories: []
+            resources: [studio-staging-aks]
+            materialization: header-inject
+            egressHosts: [k-fixture.kube.nvt.invalid]
+            authorization:
+              preset: observe
   profileSelection:
     defaultProfile: default-codex
     onNoMatch: useDefault

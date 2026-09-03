@@ -113,8 +113,8 @@ class DynamicProviderAdapter(ProviderAdapter):
     def catalog(self, agent_id, audit, request_id, grant):
         return self._invoke("catalog", agent_id, audit, request_id, grant)
 
-    def authorize_injection(self, host, method, path, agent_id, request_id, grant):
-        return self._invoke("authorize_injection", host, method, path, agent_id, request_id, grant)
+    def authorize_injection(self, host, method, path, upgrade, agent_id, request_id, grant):
+        return self._invoke("authorize_injection", host, method, path, upgrade, agent_id, request_id, grant)
 
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant):
         return self._invoke("injection_headers", host, method, path, agent_id, audit, request_id, grant)

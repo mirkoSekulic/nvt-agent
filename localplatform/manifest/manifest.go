@@ -132,8 +132,22 @@ type Profile struct {
 // KubernetesAccess selects an exact set of context resources from one generic
 // kubeconfig provider.  It carries names only, never kubeconfig data.
 type KubernetesAccess struct {
-	Provider string   `json:"provider"`
-	Contexts []string `json:"contexts"`
+	Provider      string                   `json:"provider"`
+	Contexts      []string                 `json:"contexts"`
+	Authorization *KubernetesAuthorization `json:"authorization,omitempty"`
+}
+
+// KubernetesAuthorization is high-level local intent. Presets are resolved by
+// the compiler and never cross the broker/provider protocol boundary.
+type KubernetesAuthorization struct {
+	Preset        string                        `json:"preset,omitempty"`
+	DefaultAction string                        `json:"defaultAction,omitempty"`
+	Rules         []KubernetesAuthorizationRule `json:"rules,omitempty"`
+}
+
+type KubernetesAuthorizationRule struct {
+	Operation string `json:"operation"`
+	Resource  string `json:"resource"`
 }
 
 type ProfileEgress struct {
@@ -457,6 +471,9 @@ func (m Manifest) Validate() error {
 					return fmt.Errorf("profile %q has invalid Kubernetes context", name)
 				}
 			}
+			if err := validateKubernetesAuthorization(access.Authorization); err != nil {
+				return fmt.Errorf("profile %q Kubernetes authorization: %w", name, err)
+			}
 		}
 		if !validRuntimeAccount(profile, m.Accounts) {
 			return fmt.Errorf("profile %q has an invalid runtime account", name)
@@ -670,6 +687,37 @@ func validateDomainPolicy(policy DomainPolicy) error {
 			}
 			seen[normalized] = true
 		}
+	}
+	return nil
+}
+
+func validateKubernetesAuthorization(policy *KubernetesAuthorization) error {
+	if policy == nil {
+		return nil
+	}
+	if policy.Preset != "" {
+		if policy.Preset != "observe" || policy.DefaultAction != "" || policy.Rules != nil {
+			return errors.New("preset must be observe and is mutually exclusive with defaultAction/rules")
+		}
+		return nil
+	}
+	if policy.DefaultAction != "allow" && policy.DefaultAction != "deny" {
+		return errors.New("defaultAction must be allow or deny")
+	}
+	if len(policy.Rules) > MaxItems {
+		return errors.New("rules exceed their limit")
+	}
+	seen := map[string]struct{}{}
+	for _, rule := range policy.Rules {
+		if rule.Operation == "" || len(rule.Operation) > MaxStringBytes || !utf8.ValidString(rule.Operation) ||
+			rule.Resource == "" || len(rule.Resource) > 8192 || !utf8.ValidString(rule.Resource) {
+			return errors.New("rules require bounded operation and resource")
+		}
+		key := rule.Operation + "\x00" + rule.Resource
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("rules contain a duplicate")
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
 }

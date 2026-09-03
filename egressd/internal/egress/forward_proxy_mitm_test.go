@@ -520,6 +520,11 @@ func TestForwardProxyMITMInjectsUpgradeHandshakeAndRelays(t *testing.T) {
 	if record.path != "/backend-api/codex/responses" {
 		t.Fatalf("upstream path = %q, want codex websocket path", record.path)
 	}
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if len(broker.requests) != 1 || broker.requests[0]["upgrade"] != "true" {
+		t.Fatalf("broker did not receive original upgrade intent: %#v", broker.requests)
+	}
 }
 
 func TestUpgradeRelayIdleTimeoutCleansUpStalledPeers(t *testing.T) {
