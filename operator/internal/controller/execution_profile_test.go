@@ -1147,6 +1147,9 @@ func TestProfiledScheduleRejectsMixedOrUnknownAuthorizationPreset(t *testing.T) 
 		{Preset: "observe", DefaultAction: "deny"},
 		{Preset: "observe", Rules: []nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule{}},
 		{Preset: "unknown"},
+		{ResourcePrefix: "azure/", DefaultAction: "deny"},
+		{Preset: "observe", ResourcePrefix: "*"},
+		{Preset: "observe", ResourcePrefix: "azure/\n"},
 	} {
 		schedule := testProfiledAgentSchedule()
 		schedule.Spec.Profiles[0].Broker.Grants[0].Resources = []string{"studio-staging"}
@@ -1154,6 +1157,22 @@ func TestProfiledScheduleRejectsMixedOrUnknownAuthorizationPreset(t *testing.T) 
 		if _, err := validateExecutionProfileSchedule(schedule); !errors.Is(err, errInvalidExecutionProfileConfiguration) {
 			t.Fatalf("invalid authorization preset accepted: %#v err=%v", policy, err)
 		}
+	}
+}
+
+func TestProfiledScheduleResolvesOpaqueObserveResourcePrefix(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	grant := &schedule.Spec.Profiles[0].Broker.Grants[0]
+	grant.Resources = []string{"arm:/subscriptions/11111111-1111-1111-1111-111111111111", "query-identity/22222222-2222-2222-2222-222222222222"}
+	grant.Authorization = &nvtv1alpha1.AgentRunBrokerGrantAuthorization{Preset: "observe", ResourcePrefix: "azure/"}
+	fixture := newProfileAdmissionFixture(t, schedule)
+	response := fixture.serve(t, profiledAdmissionBody(t, "azure-observe", nil, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	run := fixture.run(t, decoded.AgentRun.Name)
+	resolved := run.Spec.Broker.Grants[0].Authorization
+	if resolved.Preset != "" || resolved.ResourcePrefix != "" || resolved.DefaultAction != "deny" || len(resolved.Rules) != 2 || resolved.Rules[0].Resource != "azure/"+grant.Resources[0] {
+		t.Fatalf("opaque prefix not resolved: %#v", resolved)
 	}
 }
 

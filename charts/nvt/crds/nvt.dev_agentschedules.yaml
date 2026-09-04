@@ -562,7 +562,14 @@ spec:
                                   x-kubernetes-validations:
                                     - rule: '(has(self.preset) && !has(self.defaultAction) && !has(self.rules)) || (!has(self.preset) && has(self.defaultAction))'
                                       message: preset and concrete authorization are mutually exclusive
+                                    - rule: '!has(self.resourcePrefix) || has(self.preset)'
+                                      message: resourcePrefix requires a preset and is resolved before AgentRun admission
                                   properties:
+                                    resourcePrefix:
+                                      type: string
+                                      minLength: 1
+                                      maxLength: 128
+                                      pattern: '^[a-zA-Z0-9:/._-]+$'
                                     preset:
                                       type: string
                                       enum:

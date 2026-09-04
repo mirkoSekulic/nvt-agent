@@ -1,5 +1,8 @@
 # Runtime Plugins
 
+The optional [azure-cli](azure-cli/README.md) plugin exports ordinary `az`
+commands with inert local authentication and broker-mediated Azure access.
+
 Builtin runtime plugins live here and are copied into the image at:
 
 ```text

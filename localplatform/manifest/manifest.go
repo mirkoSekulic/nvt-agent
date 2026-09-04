@@ -104,6 +104,7 @@ type BrokerProvider struct {
 	Plugin    string                  `json:"plugin"`
 	Config    map[string]any          `json:"config,omitempty"`
 	Secrets   map[string]string       `json:"secrets,omitempty"`
+	Allow     map[string]any          `json:"allow,omitempty"`
 	Mediation BrokerProviderMediation `json:"mediation"`
 }
 
@@ -127,6 +128,7 @@ type Profile struct {
 	Plugins                   []Plugin           `json:"plugins,omitempty"`
 	Egress                    *ProfileEgress     `json:"egress,omitempty"`
 	Kubernetes                []KubernetesAccess `json:"kubernetes,omitempty"`
+	Azure                     []AzureAccess      `json:"azure,omitempty"`
 }
 
 // KubernetesAccess selects context resources from one generic kubeconfig
@@ -458,6 +460,9 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("profile %q: %w", name, err)
 		}
 		seenKubeProviders := map[string]bool{}
+		if err := validateAzureAccess(m, profile); err != nil {
+			return fmt.Errorf("profile %q: %w", name, err)
+		}
 		for _, access := range profile.Kubernetes {
 			provider, ok := m.BrokerProviders[access.Provider]
 			contextsPresent := access.Contexts != nil
@@ -508,7 +513,7 @@ func (m Manifest) Validate() error {
 			if err := validateConfig(plugin.Config, 0); err != nil {
 				return fmt.Errorf("profile %q plugin %q config: %w", name, plugin.Name, err)
 			}
-			if plugin.Egress != nil && !((has(m.Accounts, plugin.Egress.Provider) && contains(profile.Accounts, plugin.Egress.Provider)) || (has(m.BrokerProviders, plugin.Egress.Provider) && contains(profile.CredentialProviders, plugin.Egress.Provider))) {
+			if plugin.Egress != nil && !((has(m.Accounts, plugin.Egress.Provider) && contains(profile.Accounts, plugin.Egress.Provider)) || (has(m.BrokerProviders, plugin.Egress.Provider) && contains(profile.CredentialProviders, plugin.Egress.Provider)) || hasAzureAccess(profile, plugin.Egress.Provider)) {
 				return fmt.Errorf("profile %q plugin %q has an invalid egress provider", name, plugin.Name)
 			}
 		}
@@ -1124,6 +1129,12 @@ func validateBrokerProvider(name string, provider BrokerProvider, secrets map[st
 	}
 	if containsSecretReference(provider.Config, secrets) {
 		return fmt.Errorf("broker provider %q config contains an undeclared secret reference", name)
+	}
+	if provider.Plugin == "azure" {
+		return validateAzureProvider(provider)
+	}
+	if provider.Allow != nil {
+		return fmt.Errorf("broker provider %q does not support an explicit allow ceiling", name)
 	}
 	if len(provider.Secrets) == 0 {
 		return fmt.Errorf("broker provider %q must declare secret bindings", name)

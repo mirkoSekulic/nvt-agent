@@ -1,5 +1,9 @@
 # Local development
 
+For broker-mediated Azure CLI enrollment, optional image packaging, local
+`profiles[].azure` configuration and operation/query scope guarantees, see
+[Azure CLI mediation](azure-cli-mediation.md).
+
 The local platform is defined by `nvt.local.yaml`, private inputs beneath
 `.nvt-local/`, and broker-managed OAuth enrollment. Generated configuration,
 credentials, workspaces, Docker data, and sessions live in labeled Docker

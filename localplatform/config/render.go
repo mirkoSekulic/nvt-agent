@@ -350,6 +350,13 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		permissions  map[string]string
 	}{}
 	for _, grant := range intent.BrokerGrants {
+		if grant.Purpose == "azure-injection" {
+			resolved := resolvedrun.BrokerGrant{Provider: grant.Provider, Resources: append([]string(nil), grant.Resources...),
+				Capabilities: []string{"injection.headers"}, Materialization: "header-inject",
+				EgressHosts: []string{"management.azure.com:443", "api.loganalytics.io:443"}, Authorization: resolvedGrantAuthorization(grant.Authorization)}
+			profile.Broker.Grants = append(profile.Broker.Grants, resolved)
+			continue
+		}
 		if grant.Purpose == "runtime-injection" {
 			provider := grant.Provider
 			profile.Broker.Grants = append(profile.Broker.Grants, runtimeGrant(provider, grant.Preset))
@@ -457,7 +464,7 @@ func pluginEgressProvider(intent manifest.ControllerProfileIntent, account strin
 			continue
 		}
 		candidates := []string{account}
-		if grant.Purpose != "runtime-injection" {
+		if grant.Purpose != "runtime-injection" && grant.Purpose != "azure-injection" {
 			candidates = candidates[:0]
 			for _, repositoryName := range grant.Repositories {
 				repository := brokerRepositoryByIdentity(repositories, repositoryName, account)
@@ -557,13 +564,19 @@ func kubeconfigGrant(provider string, contexts []string, authorization *manifest
 		Capabilities: []string{"catalog", "injection.headers"}, Preparations: []string{"catalog"},
 		Materialization: "header-inject", EgressHosts: hosts,
 	}
-	if authorization != nil {
-		grant.Authorization = &resolvedrun.BrokerGrantAuthorization{DefaultAction: authorization.DefaultAction}
-		for _, rule := range authorization.Rules {
-			grant.Authorization.Rules = append(grant.Authorization.Rules, resolvedrun.BrokerGrantAuthorizationRule{Operation: rule.Operation, Resource: rule.Resource})
-		}
-	}
+	grant.Authorization = resolvedGrantAuthorization(authorization)
 	return grant
+}
+
+func resolvedGrantAuthorization(authorization *manifest.BrokerGrantAuthorization) *resolvedrun.BrokerGrantAuthorization {
+	if authorization == nil {
+		return nil
+	}
+	result := &resolvedrun.BrokerGrantAuthorization{DefaultAction: authorization.DefaultAction}
+	for _, rule := range authorization.Rules {
+		result.Rules = append(result.Rules, resolvedrun.BrokerGrantAuthorizationRule{Operation: rule.Operation, Resource: rule.Resource})
+	}
+	return result
 }
 
 func repositoryGrant(provider, preset string, mediation *manifest.BrokerProviderMediation, repositories []string, permissions map[string]string) resolvedrun.BrokerGrant {
@@ -655,10 +668,29 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 			config[configKey] = plancontract.PrivateTarget(secretName)
 		}
 		allow := map[string]any{"repositories": brokerRepositoriesFor(compiled, named.Name, "")}
+		if provider.Plugin == "azure" {
+			config["state-dir"] = "/var/lib/nvt/broker/providers/" + named.Name
+			allow = provider.Allow
+			found := false
+			for _, registered := range providerPlugins {
+				if registered.(map[string]any)["name"] == "azure" {
+					found = true
+				}
+			}
+			if !found {
+				providerPlugins = append(providerPlugins, map[string]any{"name": "azure", "command": []string{"/opt/nvt-broker/broker/providers/azure/provider.py"}, "request-timeout-seconds": 45})
+			}
+		}
 		if provider.Plugin == "kubeconfig" {
 			config["state-dir"] = "/var/lib/nvt/broker/providers/" + named.Name
 			allow = map[string]any{"resources": brokerResourcesFor(compiled, named.Name)}
-			if len(providerPlugins) == 0 {
+			found := false
+			for _, registered := range providerPlugins {
+				if registered.(map[string]any)["name"] == "kubeconfig" {
+					found = true
+				}
+			}
+			if !found {
 				providerPlugins = append(providerPlugins, map[string]any{"name": "kubeconfig", "command": []string{"/opt/nvt-broker/broker/providers/kubeconfig/provider.py"}, "initialize-timeout-seconds": 30, "request-timeout-seconds": 60})
 			}
 		}

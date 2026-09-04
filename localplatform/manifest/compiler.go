@@ -190,6 +190,7 @@ func Compile(m Manifest) (Compiled, error) {
 	for _, name := range SortedNames(m.BrokerProviders) {
 		provider := m.BrokerProviders[name]
 		provider.Config = cloneConfig(provider.Config)
+		provider.Allow = cloneConfig(provider.Allow)
 		provider.Secrets = sortedMap(provider.Secrets)
 		provider.Mediation.Hosts = append([]string(nil), provider.Mediation.Hosts...)
 		sort.Strings(provider.Mediation.Hosts)
@@ -235,6 +236,31 @@ func Compile(m Manifest) (Compiled, error) {
 		sort.Strings(profile.Tools.Mise)
 		sort.Strings(profile.Capabilities)
 		sort.Slice(profile.Kubernetes, func(i, j int) bool { return profile.Kubernetes[i].Provider < profile.Kubernetes[j].Provider })
+		profile.Azure = append([]AzureAccess(nil), profile.Azure...)
+		sort.Slice(profile.Azure, func(i, j int) bool { return profile.Azure[i].Provider < profile.Azure[j].Provider })
+		for index := range profile.Azure {
+			access := &profile.Azure[index]
+			access.Resources = append([]string(nil), access.Resources...)
+			sort.Strings(access.Resources)
+			if access.Authorization != nil {
+				policy := *access.Authorization
+				policy.Rules = append([]KubernetesAuthorizationRule(nil), policy.Rules...)
+				access.Authorization = &policy
+			}
+		}
+		if len(profile.Azure) > 0 {
+			providers := map[string]any{}
+			for _, access := range profile.Azure {
+				config := m.BrokerProviders[access.Provider].Config
+				subscriptions, _ := azureStringList(config["subscriptions"])
+				accounts := []any{}
+				for _, subscription := range subscriptions {
+					accounts = append(accounts, map[string]any{"id": subscription})
+				}
+				providers[access.Provider] = map[string]any{"tenant": config["tenant"], "subscriptions": accounts}
+			}
+			profile.Plugins = append(profile.Plugins, Plugin{Name: "azure-cli", Egress: &PluginEgress{Provider: profile.Azure[0].Provider}, Config: map[string]any{"providers": providers}})
+		}
 		sort.Slice(profile.Plugins, func(i, j int) bool { return profile.Plugins[i].Name < profile.Plugins[j].Name })
 		grants := compileBrokerGrants(m, name)
 		result.Broker.Profiles = append(result.Broker.Profiles, BrokerProfileIntent{Name: name, Accounts: append([]string(nil), profile.Accounts...), Grants: grants})
@@ -486,6 +512,14 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 		}
 	}
 	result := make([]BrokerGrantIntent, 0, len(groups)+1)
+	azureAccess := append([]AzureAccess(nil), m.Profiles[profileName].Azure...)
+	sort.Slice(azureAccess, func(i, j int) bool { return azureAccess[i].Provider < azureAccess[j].Provider })
+	for _, access := range azureAccess {
+		resources := append([]string(nil), access.Resources...)
+		sort.Strings(resources)
+		authorization := resolveProviderAuthorization(access.Authorization, resources, "azure/")
+		result = append(result, BrokerGrantIntent{Provider: access.Provider, Preset: "azure", Purpose: "azure-injection", Resources: resources, Authorization: authorization})
+	}
 	if runtimeAccount := m.Profiles[profileName].Runtime.Account; runtimeAccount != "" {
 		result = append(result, BrokerGrantIntent{Provider: runtimeAccount, Preset: m.Accounts[runtimeAccount].Preset, Purpose: "runtime-injection"})
 	}
@@ -516,13 +550,17 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 }
 
 func resolveKubernetesAuthorization(policy *KubernetesAuthorization, contexts []string) *BrokerGrantAuthorization {
+	return resolveProviderAuthorization(policy, contexts, "context/")
+}
+
+func resolveProviderAuthorization(policy *KubernetesAuthorization, contexts []string, prefix string) *BrokerGrantAuthorization {
 	if policy == nil {
 		return nil
 	}
 	if policy.Preset == "observe" {
 		resolved := &BrokerGrantAuthorization{DefaultAction: "deny", Rules: make([]BrokerGrantAuthorizationRule, 0, len(contexts))}
 		for _, contextName := range contexts {
-			resolved.Rules = append(resolved.Rules, BrokerGrantAuthorizationRule{Operation: "observe", Resource: "context/" + contextName})
+			resolved.Rules = append(resolved.Rules, BrokerGrantAuthorizationRule{Operation: "observe", Resource: prefix + contextName})
 		}
 		return resolved
 	}

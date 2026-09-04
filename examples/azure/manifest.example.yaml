@@ -1,0 +1,51 @@
+apiVersion: nvt.dev/local/v1
+retentionPolicies:
+  persistent:
+    persistence: {workspace: true, runtimeState: true, dockerData: true}
+brokerProviders:
+  azure-dev:
+    plugin: azure
+    config:
+      cloud: AzureCloud
+      tenant: 22222222-2222-2222-2222-222222222222
+      subscriptions: [11111111-1111-1111-1111-111111111111]
+    allow:
+      resources:
+        - arm:/subscriptions/11111111-1111-1111-1111-111111111111
+        # This explicitly allows query reads across the identity's Azure RBAC
+        # scope, including body/KQL cross-workspace targets. It is not a
+        # per-workspace data-isolation boundary.
+        - query-identity/22222222-2222-2222-2222-222222222222
+      authorization:
+        defaultAction: deny
+        rules:
+          - {operation: observe, resource: azure/arm:/subscriptions/11111111-1111-1111-1111-111111111111}
+          - {operation: observe, resource: azure/query-identity/22222222-2222-2222-2222-222222222222}
+profiles:
+  azure-investigation:
+    runtime: {preset: shell, autonomy: trusted-local}
+    editor: {preset: none}
+    azure:
+      - provider: azure-dev
+        resources:
+          - arm:/subscriptions/11111111-1111-1111-1111-111111111111
+          - query-identity/22222222-2222-2222-2222-222222222222
+        authorization: {preset: observe}
+    egress:
+      domainPolicy:
+        defaultAction: deny
+        allow: [management.azure.com, api.loganalytics.io, github.com]
+repositories:
+  project:
+    url: https://github.com/example/project.git
+    checkoutTarget: github.com/example/project
+    path: project
+workflows:
+  inspect-azure:
+    profile: azure-investigation
+    repository: project
+    retention: persistent
+workstations:
+  - name: azure-investigation
+    profile: azure-investigation
+    repositories: []
