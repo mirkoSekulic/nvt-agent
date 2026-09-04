@@ -855,7 +855,7 @@ func validateRepository(value Repository, accounts map[string]Account, providers
 			return errors.New("repository access permissions must not be empty")
 		}
 		for permission, level := range value.Access.Permissions {
-			if !oneOf(permission, "contents", "pull_requests", "workflows") || !oneOf(level, "read", "write") {
+			if !oneOf(permission, "contents", "issues", "pull_requests", "workflows") || !oneOf(level, "read", "write") {
 				return errors.New("repository access has an unsupported permission or level")
 			}
 		}

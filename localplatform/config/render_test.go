@@ -400,12 +400,12 @@ profiles:
 	}
 }
 
-func TestExplicitWorkflowWriteRendersForGitHubApp(t *testing.T) {
+func TestExplicitGitHubPermissionsRenderForGitHubApp(t *testing.T) {
 	raw, err := os.ReadFile("../manifest/testdata/valid.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := strings.Replace(string(raw), "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        contents: write\n        pull_requests: write\n        workflows: write\n  infrastructure:", 1)
+	input := strings.Replace(string(raw), "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        contents: write\n        issues: write\n        pull_requests: write\n        workflows: write\n  infrastructure:", 1)
 	decoded, err := manifest.Decode(strings.NewReader(input))
 	if err != nil {
 		t.Fatal(err)
@@ -423,8 +423,8 @@ func TestExplicitWorkflowWriteRendersForGitHubApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	for label, rendered := range map[string][]byte{"broker": broker, "controller": controller} {
-		if !bytes.Contains(rendered, []byte(`"workflows":"write"`)) {
-			t.Fatalf("%s omitted explicit workflow write: %s", label, rendered)
+		if !bytes.Contains(rendered, []byte(`"issues":"write"`)) || !bytes.Contains(rendered, []byte(`"workflows":"write"`)) {
+			t.Fatalf("%s omitted explicit GitHub permission: %s", label, rendered)
 		}
 	}
 }
