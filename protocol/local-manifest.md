@@ -120,14 +120,16 @@ same URL-validated owner in both broker and controller projections.
 
 GitHub repository authority is declared independently from credential
 acquisition with `repositories.<name>.access.permissions`. Supported permission
-names are `contents`, `pull_requests`, and `workflows`; supported levels are
-`read` and `write`. When `access` is omitted, the pre-1.0 least-privilege
+names are `contents`, `issues`, `pull_requests`, and `workflows`; supported
+levels are `read` and `write`. When `access` is omitted, the pre-1.0 least-privilege
 default is `contents: write` plus `pull_requests: write`. Workflow-file writes
 are never implicit: they require an explicit `workflows: write` declaration,
-which also requires `contents: write`. Every explicit access declaration must
-include at least `contents: read` because checkout is mandatory. Empty access maps, unknown permissions,
-unknown levels, access on an uncredentialed or non-GitHub repository, and
-contradictory workflow-write declarations fail validation.
+which also requires `contents: write`. Creating, editing, or commenting on issues
+requires an explicit `issues: write` declaration. Every explicit access
+declaration must include at least `contents: read` because checkout is mandatory.
+Empty access maps, unknown permissions, unknown levels, access on an
+uncredentialed or non-GitHub repository, and contradictory workflow-write
+declarations fail validation.
 
 For a GitHub App account, the compiler places the exact requested permissions
 in each agent grant and computes the provider ceiling from the union of the
@@ -149,6 +151,7 @@ repositories:
     access:
       permissions:
         contents: write
+        issues: write
         pull_requests: write
         workflows: write
 ```

@@ -704,7 +704,7 @@ func TestRepositoryAccessValidationAndCompilation(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := string(raw)
-	withAccess := strings.Replace(base, "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        contents: write\n        pull_requests: write\n        workflows: write\n  infrastructure:", 1)
+	withAccess := strings.Replace(base, "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        contents: write\n        issues: write\n        pull_requests: write\n        workflows: write\n  infrastructure:", 1)
 	decoded, err := Decode(strings.NewReader(withAccess))
 	if err != nil {
 		t.Fatal(err)
@@ -713,14 +713,16 @@ func TestRepositoryAccessValidationAndCompilation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := compiled.Broker.Repositories[1].Permissions["workflows"]; got != "write" {
-		t.Fatalf("compiled workflow permission = %q", got)
+	permissions := compiled.Broker.Repositories[1].Permissions
+	if permissions["issues"] != "write" || permissions["workflows"] != "write" {
+		t.Fatalf("compiled repository permissions = %#v", permissions)
 	}
 
 	for name, mutation := range map[string]string{
 		"unknown permission":             strings.Replace(withAccess, "workflows: write", "administration: write", 1),
 		"invalid level":                  strings.Replace(withAccess, "workflows: write", "workflows: admin", 1),
 		"contradictory workflow write":   strings.Replace(withAccess, "contents: write", "contents: read", 1),
+		"issues without checkout":        strings.Replace(base, "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        issues: write\n  infrastructure:", 1),
 		"pull requests without checkout": strings.Replace(base, "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        pull_requests: write\n  infrastructure:", 1),
 		"workflow read without checkout": strings.Replace(base, "    account: github\n  infrastructure:", "    account: github\n    access:\n      permissions:\n        workflows: read\n  infrastructure:", 1),
 	} {
