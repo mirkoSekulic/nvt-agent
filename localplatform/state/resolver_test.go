@@ -242,6 +242,12 @@ func paddedKubeconfig(size int, contexts ...string) []byte {
 	return []byte(value.String())
 }
 
+func TestDiscoverKubeconfigContextsRejectsWildcardNames(t *testing.T) {
+	if _, err := discoverKubeconfigContexts(paddedKubeconfig(0, "prod-*")); err == nil {
+		t.Fatal("wildcard kubeconfig context was accepted during discovery")
+	}
+}
+
 func kubeconfigBoundCompiled(secretName, file string) manifest.Compiled {
 	return manifest.Compiled{
 		Broker: manifest.BrokerIntent{Providers: []manifest.NamedBrokerProvider{{Name: "clusters", Provider: manifest.BrokerProvider{

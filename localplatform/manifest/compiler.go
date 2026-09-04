@@ -393,7 +393,7 @@ func ResolveKubernetesSelections(compiled Compiled, catalogs map[string][]string
 				return Compiled{}, fmt.Errorf("Kubernetes provider %q returned an invalid context catalog", access.Provider)
 			}
 			for _, contextName := range contexts {
-				if contextName == "" || len(contextName) > MaxStringBytes || strings.ContainsAny(contextName, "\x00\r\n") {
+				if contextName == "" || len(contextName) > MaxStringBytes || strings.ContainsAny(contextName, "*\x00\r\n") {
 					return Compiled{}, fmt.Errorf("Kubernetes provider %q returned an invalid context catalog", access.Provider)
 				}
 			}

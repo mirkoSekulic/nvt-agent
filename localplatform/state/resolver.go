@@ -239,7 +239,7 @@ func discoverKubeconfigContexts(content []byte) ([]string, error) {
 	contexts := make([]string, 0, len(document.Contexts))
 	seen := map[string]bool{}
 	for _, entry := range document.Contexts {
-		if entry.Name == "" || len(entry.Name) > manifest.MaxStringBytes || strings.ContainsAny(entry.Name, "\x00\r\n") || seen[entry.Name] {
+		if entry.Name == "" || len(entry.Name) > manifest.MaxStringBytes || strings.ContainsAny(entry.Name, "*\x00\r\n") || seen[entry.Name] {
 			return nil, errors.New("invalid kubeconfig catalog")
 		}
 		seen[entry.Name] = true

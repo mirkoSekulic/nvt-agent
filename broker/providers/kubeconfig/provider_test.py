@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -116,6 +117,33 @@ class KubeconfigProviderTest(unittest.TestCase):
         kubeconfig.write_bytes(encoded + b"x")
         with self.assertRaisesRegex(provider_module.ProviderFailure, "provider-config-invalid"):
             provider_module.KubeconfigProvider(params)
+
+    def test_load_document_validates_the_open_descriptor(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        kubeconfig = Path(temporary.name) / "private.yaml"
+        kubeconfig.write_text(yaml.safe_dump(document()), encoding="utf-8")
+        with mock.patch.object(Path, "stat", side_effect=AssertionError("path metadata must not be used")):
+            loaded = provider_module.KubeconfigProvider._load_document(kubeconfig)
+        self.assertEqual(loaded["current-context"], "context-000")
+
+    def test_load_document_allows_projected_secret_symlink(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        revision = root / "..2026_09_04"
+        revision.mkdir()
+        (revision / "private.yaml").write_text(yaml.safe_dump(document()), encoding="utf-8")
+        (root / "..data").symlink_to(revision.name)
+        kubeconfig = root / "private.yaml"
+        kubeconfig.symlink_to("..data/private.yaml")
+        loaded = provider_module.KubeconfigProvider._load_document(kubeconfig)
+        self.assertEqual(loaded["current-context"], "context-000")
+
+    def test_load_document_rejects_non_regular_descriptor_before_parsing(self):
+        with mock.patch.object(provider_module.yaml, "safe_load", side_effect=AssertionError("non-regular input was parsed")):
+            with self.assertRaisesRegex(provider_module.ProviderFailure, "provider-config-invalid"):
+                provider_module.KubeconfigProvider._load_document(Path("/dev/null"))
 
     def test_injection_is_resource_scoped_and_never_uses_agent_headers(self):
         provider, _ = self.make_provider(document(2), ["context-000", "context-001"])

@@ -137,11 +137,14 @@ class KubeconfigProvider:
     @staticmethod
     def _load_document(path):
         try:
-            info = path.stat()
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_KUBECONFIG_BYTES:
+            with path.open("rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise ProviderFailure("provider-config-invalid")
+                content = stream.read(MAX_KUBECONFIG_BYTES + 1)
+            if len(content) > MAX_KUBECONFIG_BYTES:
                 raise ProviderFailure("provider-config-invalid")
-            with path.open("r", encoding="utf-8") as stream:
-                value = yaml.safe_load(stream)
+            value = yaml.safe_load(content.decode("utf-8"))
         except (OSError, UnicodeError, yaml.YAMLError) as error:
             raise ProviderFailure("provider-config-invalid") from error
         if not isinstance(value, dict) or value.get("apiVersion") != "v1" or value.get("kind") != "Config":

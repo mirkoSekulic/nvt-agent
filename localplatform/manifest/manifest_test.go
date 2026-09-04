@@ -564,6 +564,30 @@ func TestKubernetesAllContextsSelectionResolvesToConcreteObserveGrants(t *testin
 	}
 }
 
+func TestResolveKubernetesSelectionsRejectsWildcardCatalogContext(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Secrets["cluster-config"] = Secret{File: "./.nvt-local/secrets/kubernetes/config"}
+	decoded.BrokerProviders["clusters"] = BrokerProvider{Plugin: "kubeconfig", Secrets: map[string]string{"private-kubeconfig": "cluster-config"}}
+	all := true
+	profile := decoded.Profiles["development"]
+	profile.Kubernetes = []KubernetesAccess{{Provider: "clusters", AllContexts: &all, Authorization: &KubernetesAuthorization{Preset: "observe"}}}
+	decoded.Profiles["development"] = profile
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveKubernetesSelections(compiled, map[string][]string{"clusters": {"prod-*"}}); err == nil {
+		t.Fatal("wildcard context from direct catalog input was accepted")
+	}
+}
+
 func TestKubernetesContextSelectionRequiresExactlyOneMode(t *testing.T) {
 	raw, err := os.ReadFile("testdata/valid.yaml")
 	if err != nil {
