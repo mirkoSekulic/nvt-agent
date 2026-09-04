@@ -27,6 +27,16 @@ rotates a near-expiry durable keypair in the named private/public volumes and
 uses a non-secret marker to recover an interruption between file replacements.
 Named volumes ensure the keypair paths are regular files rather than bind-mount
 directories. Workspace and home volumes are independent and remain intact.
+During an approved local configuration rollout, the trusted controller also
+hashes the exact desired name set and records that digest on the CA-owning
+services. A changed digest triggers a stopped-workload reconciliation: the
+initializer must first validate the keypair against the previous
+controller-owned snapshot, then the controller writes the non-secret rotation
+marker and runs the initializer for the new set. A retry first checks whether
+the new generation already landed. Parse errors, key/certificate mismatch, or
+a CA matching neither trusted snapshot remain fail-closed and never authorize
+rotation. The public certificate is replaced before either trust consumer is
+recreated, while private key bytes remain confined to the trusted CA volume.
 
 For Kubernetes, the controller schedules reconciliation at the renewal
 boundary. It deletes both old-generation Pods before atomically replacing the

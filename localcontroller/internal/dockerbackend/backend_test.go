@@ -46,6 +46,10 @@ type fakeDocker struct {
 	failComposeUp           int
 	failComposeUpAfterStart int
 	caRenewal               bool
+	caMalformed             bool
+	caNameSetDigest         string
+	caRotationMarker        bool
+	caRotations             int
 	failRemove              string
 	lifecycleEvents         []string
 	lifecycleCursor         string
@@ -108,6 +112,9 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		return []byte(name + "\n"), nil
 	}
 	if arguments[0] == "cp" {
+		if bytes.Contains(rawInput, []byte(egressCARotationMarker)) {
+			docker.caRotationMarker = true
+		}
 		return nil, nil
 	}
 	if arguments[0] == "start" {
@@ -181,14 +188,31 @@ func labelsMatchFilters(labels map[string]string, arguments []string) bool {
 
 func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 	if contains(arguments, "run") && contains(arguments, "ca-init") {
-		if contains(arguments, "NVT_EGRESS_CA_CHECK_ONLY=1") && docker.caRenewal {
-			return []byte("renewal-required\n"), nil
+		requested := docker.caNameSetDigest
+		if command := caInitOverride(arguments); len(command) != 0 {
+			requested = caNameSetDigestFromCommand(command)
 		}
 		if contains(arguments, "NVT_EGRESS_CA_CHECK_ONLY=1") {
+			if docker.caRenewal || docker.caRotationMarker {
+				return []byte("renewal-required\n"), nil
+			}
+			if docker.caMalformed || docker.caNameSetDigest != "" && requested != docker.caNameSetDigest {
+				return nil, errors.New("durable CA rejected")
+			}
 			return []byte("renew-after=2999-01-01T00:00:00Z\n"), nil
 		}
-		if !contains(arguments, "NVT_EGRESS_CA_CHECK_ONLY=1") {
+		if docker.caMalformed && !docker.caRotationMarker {
+			return nil, errors.New("durable CA rejected")
+		}
+		if docker.caNameSetDigest != "" && requested != docker.caNameSetDigest && !docker.caRotationMarker {
+			return nil, errors.New("durable CA rejected")
+		}
+		if docker.caRenewal || docker.caRotationMarker {
 			docker.caRenewal = false
+			docker.caRotationMarker = false
+			docker.caMalformed = false
+			docker.caNameSetDigest = requested
+			docker.caRotations++
 		}
 		return nil, nil
 	}
@@ -212,8 +236,21 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 		labels = cloneLabels(labels)
 		labels[composeProjectLabel] = project
 		labels[composeServiceLabel] = "agent"
-		if plan, err := os.ReadFile(argumentAfter(arguments, "-f")); err == nil && bytes.Contains(plan, []byte(agentConfinementRevisionLabel+":")) {
-			labels[agentConfinementRevisionLabel] = agentConfinementRevision
+		if plan, err := os.ReadFile(argumentAfter(arguments, "-f")); err == nil {
+			if bytes.Contains(plan, []byte(agentConfinementRevisionLabel+":")) {
+				labels[agentConfinementRevisionLabel] = agentConfinementRevision
+			}
+			var document composeDocument
+			if yaml.Unmarshal(plan, &document) == nil {
+				if caInit, exists := document.Services["ca-init"]; exists {
+					digest := caNameSetDigestFromCommand(caInit.Command)
+					if docker.caNameSetDigest == "" {
+						docker.caNameSetDigest = digest
+					} else if docker.caMalformed || docker.caNameSetDigest != digest {
+						return nil, errors.New("ca-init failed")
+					}
+				}
+			}
 		}
 		docker.containers["fake-agent-id"] = labels
 		docker.agentStatus = ""
@@ -234,6 +271,28 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 		return nil, nil
 	}
 	return nil, errors.New("unsupported compose command")
+}
+
+func caInitOverride(arguments []string) []string {
+	for index, argument := range arguments {
+		if argument == "ca-init" && index+1 < len(arguments) {
+			return arguments[index+1:]
+		}
+	}
+	return nil
+}
+
+func caNameSetDigestFromCommand(command []string) string {
+	names := egressCANameSet{}
+	for index := 0; index+1 < len(command); index++ {
+		switch command[index] {
+		case "--leaf-dns-name":
+			names.leafDNSNames = append(names.leafDNSNames, command[index+1])
+		case "--upstream-leaf-name":
+			names.upstreamDNSNames = append(names.upstreamDNSNames, command[index+1])
+		}
+	}
+	return names.digest()
 }
 
 func (docker *fakeDocker) object(arguments []string) ([]byte, error) {
@@ -464,6 +523,159 @@ func TestMediatedSeedPreservesDurableCAState(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("managed egress seed helper was not created")
+	}
+}
+
+func TestApprovedRolloutRotatesOnlyChangedWorkstationCAAndPreservesPersistentState(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	run.Persistence = resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true}
+	run.Retention = "persistent"
+	run.TTL = resolvedrun.TTL{}
+	if err := resolvedrun.ValidateResolvedAgentRun(run); err != nil {
+		t.Fatal(err)
+	}
+	ownership := strings.Repeat("a", 64)
+	initial := controller.BackendRun{Resolved: run, SnapshotDigest: ownership, DesiredDigest: ownership}
+	if observation, err := backend.Ensure(context.Background(), initial); err != nil || !observation.Ready {
+		t.Fatalf("initial ensure = %#v %v", observation, err)
+	}
+	names := namesFor(backend.config, run.RunID, ownership)
+	unrelatedVolume := "nvt-local-unrelated-egress-private"
+	docker.objects["volume:"+unrelatedVolume] = map[string]string{
+		ownerLabel: backend.config.Owner, runLabel: "other-workstation", digestLabel: strings.Repeat("9", 64),
+	}
+	oldCADigest := docker.caNameSetDigest
+	desiredRun := run
+	desiredRun.Broker.Grants = append([]resolvedrun.BrokerGrant(nil), run.Broker.Grants...)
+	desiredRun.Broker.Grants[0] = run.Broker.Grants[0]
+	desiredRun.Broker.Grants[0].EgressHosts = []string{"api.changed.example.test:443"}
+	if err := resolvedrun.ValidateResolvedAgentRun(desiredRun); err != nil {
+		t.Fatal(err)
+	}
+	desired := controller.BackendRun{
+		Resolved: desiredRun, PreviousResolved: &run, SnapshotDigest: ownership,
+		DesiredDigest: strings.Repeat("b", 64), ConfigurationRollout: true,
+	}
+	docker.commands = nil
+	if observation, err := backend.Ensure(context.Background(), desired); err != nil || !observation.Ready {
+		t.Fatalf("changed-name rollout = %#v %v; commands=%v", observation, err, docker.commands)
+	}
+	if docker.caRotations != 1 || docker.caNameSetDigest == oldCADigest || docker.caNameSetDigest != egressCANameSetFor(desiredRun).digest() || docker.caRotationMarker {
+		t.Fatalf("CA rotation state = rotations:%d old:%s current:%s marker:%t", docker.caRotations, oldCADigest, docker.caNameSetDigest, docker.caRotationMarker)
+	}
+	for _, volume := range []string{names.workspace, names.home, names.dockerData} {
+		if _, exists := docker.objects["volume:"+volume]; !exists {
+			t.Fatalf("persistent volume %q was lost during CA rotation", volume)
+		}
+	}
+	if _, exists := docker.objects["volume:"+unrelatedVolume]; !exists {
+		t.Fatal("CA rotation touched an unrelated workstation volume")
+	}
+	commands := make([]string, 0, len(docker.commands))
+	stopIndex, firstCheckIndex, markerIndex, rotateIndex, startIndex := -1, -1, -1, -1, -1
+	for _, command := range docker.commands {
+		joined := strings.Join(command, " ")
+		commands = append(commands, joined)
+		index := len(commands) - 1
+		if joined == "stop fake-agent-id" && stopIndex < 0 {
+			stopIndex = index
+		}
+		if contains(command, "NVT_EGRESS_CA_CHECK_ONLY=1") && firstCheckIndex < 0 {
+			firstCheckIndex = index
+		}
+		if strings.Contains(joined, "/seed/"+egressCARotationMarker) {
+			markerIndex = index
+		}
+		if contains(command, "ca-init") && contains(command, "run") && !contains(command, "NVT_EGRESS_CA_CHECK_ONLY=1") {
+			rotateIndex = index
+		}
+		if contains(command, "up") {
+			startIndex = index
+		}
+		if strings.HasPrefix(joined, "volume rm ") {
+			t.Fatalf("CA rollout removed a workstation volume: %s", joined)
+		}
+	}
+	joined := strings.Join(commands, "\n")
+	for _, expected := range []string{"stop fake-agent-id", "NVT_EGRESS_CA_CHECK_ONLY=1", egressCARotationMarker, " run --rm ca-init", " up -d --force-recreate"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("CA rollout omitted %q:\n%s", expected, joined)
+		}
+	}
+	if stopIndex < 0 || firstCheckIndex <= stopIndex || markerIndex <= firstCheckIndex || rotateIndex <= markerIndex || startIndex <= rotateIndex {
+		t.Fatalf("CA rollout ordering = stop:%d check:%d marker:%d rotate:%d start:%d\n%s", stopIndex, firstCheckIndex, markerIndex, rotateIndex, startIndex, joined)
+	}
+	if !strings.Contains(commands[markerIndex], names.egressPrivate+":/seed") || strings.Contains(commands[markerIndex], unrelatedVolume) {
+		t.Fatalf("rotation marker did not target only the exact workstation CA volume: %s", commands[markerIndex])
+	}
+	plan, err := os.ReadFile(names.composeFile)
+	if err != nil || !bytes.Contains(plan, []byte(egressCANameSetDigestLabel+": "+egressCANameSetFor(desiredRun).digest())) {
+		t.Fatalf("desired CA name-set digest was not recorded: %v\n%s", err, plan)
+	}
+}
+
+func TestApprovedRolloutPreservesCAWhenNameSetIsUnchanged(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	ownership := strings.Repeat("c", 64)
+	if _, err := backend.Ensure(context.Background(), controller.BackendRun{Resolved: run, SnapshotDigest: ownership, DesiredDigest: ownership}); err != nil {
+		t.Fatal(err)
+	}
+	desiredRun := run
+	desiredRun.WorkspaceInstructions.Workflow = "updated instructions"
+	docker.commands = nil
+	desired := controller.BackendRun{
+		Resolved: desiredRun, PreviousResolved: &run, SnapshotDigest: ownership,
+		DesiredDigest: strings.Repeat("d", 64), ConfigurationRollout: true,
+	}
+	if observation, err := backend.Ensure(context.Background(), desired); err != nil || !observation.Ready {
+		t.Fatalf("unchanged-name rollout = %#v %v", observation, err)
+	}
+	if docker.caRotations != 0 {
+		t.Fatalf("unchanged CA name set rotated %d times", docker.caRotations)
+	}
+	for _, command := range docker.commands {
+		if contains(command, egressCARotationMarker) || contains(command, "NVT_EGRESS_CA_CHECK_ONLY=1") {
+			t.Fatalf("unchanged CA name set entered rotation path: %v", command)
+		}
+	}
+}
+
+func TestChangedCANameSetFailsClosedForMalformedOrMismatchedMaterial(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*fakeDocker)
+	}{
+		{name: "malformed keypair", mutate: func(docker *fakeDocker) { docker.caMalformed = true }},
+		{name: "unexpected valid name set", mutate: func(docker *fakeDocker) { docker.caNameSetDigest = strings.Repeat("f", 64) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend, docker, run, _ := testBackend(t)
+			ownership := strings.Repeat("e", 64)
+			if _, err := backend.Ensure(context.Background(), controller.BackendRun{Resolved: run, SnapshotDigest: ownership, DesiredDigest: ownership}); err != nil {
+				t.Fatal(err)
+			}
+			desiredRun := run
+			desiredRun.Broker.Grants = append([]resolvedrun.BrokerGrant(nil), run.Broker.Grants...)
+			desiredRun.Broker.Grants[0] = run.Broker.Grants[0]
+			desiredRun.Broker.Grants[0].EgressHosts = []string{"api.changed.example.test:443"}
+			test.mutate(docker)
+			docker.commands = nil
+			desired := controller.BackendRun{
+				Resolved: desiredRun, PreviousResolved: &run, SnapshotDigest: ownership,
+				DesiredDigest: strings.Repeat("f", 64), ConfigurationRollout: true,
+			}
+			if _, err := backend.Ensure(context.Background(), desired); !errors.Is(err, controller.ErrBackendRetryable) {
+				t.Fatalf("unsafe CA material error = %v", err)
+			}
+			if docker.caRotations != 0 || docker.caRotationMarker {
+				t.Fatalf("unsafe CA material authorized rotation: rotations=%d marker=%t", docker.caRotations, docker.caRotationMarker)
+			}
+			for _, command := range docker.commands {
+				if contains(command, "up") {
+					t.Fatalf("workload restarted after failed CA validation: %v", command)
+				}
+			}
+		})
 	}
 }
 
