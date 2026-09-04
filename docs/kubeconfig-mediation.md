@@ -28,10 +28,17 @@ profiles:
     # normal runtime fields omitted
     kubernetes:
       - provider: clusters
-        contexts: [development-aks, shared-services-aks]
+        allContexts: true
         authorization:
           preset: observe
 ```
+
+Each access entry must choose exactly one selection mode: a non-empty explicit
+`contexts` list, retained for backward compatibility, or `allContexts: true`.
+`allContexts: false`, an empty list, both fields together, neither field, and
+explicit wildcard-looking names are rejected. A complete two-Azure-identity
+example is in
+[`examples/kubeconfig-all-contexts/manifest.example.yaml`](../examples/kubeconfig-all-contexts/manifest.example.yaml).
 
 `authorization` is optional; omission preserves the existing context-scoped,
 otherwise unrestricted behavior. `preset: observe` is compiler sugar for a
@@ -46,11 +53,16 @@ authorization:
       resource: context/development-aks
 ```
 
-The local compiler resolves the preset before writing trusted controller or
-broker grant configuration. AgentSchedule profiles do the same when they
-create an AgentRun; raw AgentRuns and direct `agents.yaml` grants carry only
-the concrete `defaultAction`/`rules` form. This snapshots preset semantics for
-the lifetime of a run.
+For an explicit list, the local compiler resolves the preset immediately. For
+`allContexts`, trusted local-state preparation reads only the context names
+from the bound private kubeconfig, sorts them, and then emits the same concrete
+resources, deterministic route hosts, and one exact observe rule per context.
+The broad selection, resolved names, and therefore the count remain visible in
+the redacted `compiled.json`, while private kubeconfig bytes do not. Generated
+broker/controller configuration contains only the concrete snapshot. A raw
+AgentRun, its CRD, direct `agents.yaml`, and Kubernetes request authorization
+therefore gain no wildcard or unresolved selection contract. AgentSchedule
+profiles continue to resolve explicit presets before creating an AgentRun.
 
 Context, cluster, auth-info, namespace, and current-context names are retained.
 Users in the published file are empty objects and cluster servers are stable
@@ -67,6 +79,16 @@ merges their sanitized documents into one kubeconfig, retaining the first
 provider's valid current context and coalescing identical empty auth-info
 entries. Context and cluster names must remain unambiguous across instances;
 collisions fail closed instead of silently routing through the wrong identity.
+
+Generic local secret inputs remain limited to 64 KiB. A secret receives the
+512 KiB kubeconfig limit only when the validated provider binding is exactly
+`plugin: kubeconfig` with secret key `private-kubeconfig`. There is no manifest
+size override. If one underlying file is also consumed for any generic secret
+purpose, trusted resolution applies the stricter 64 KiB limit before reading
+it. Files larger than 512 KiB fail closed. The state transport remains bounded
+above this value, and the provider independently enforces the same 512 KiB raw
+kubeconfig limit; existing stable-file, owner, mode, symlink, and zeroization
+checks are unchanged.
 
 The first implementation accepts private static bearer tokens and Kubernetes
 `ExecCredential` helpers returning `status.token`. Helper commands execute
@@ -148,9 +170,12 @@ This is defense in depth and does not replace least-privilege Kubernetes RBAC.
 The local backend supplies the explicit loopback proxy and matching durable-CA
 constraints for forward-proxy, transparent, and redirect transports.
 
-The catalog is snapshotted when the local run is prepared. Updating the trusted
-private kubeconfig requires broker restart and run reconciliation in this first
-delivery; automatic discovery and synchronization are intentionally out of
-scope. If one kubeconfig cluster name is reused by contexts with different
+An `allContexts` selection is snapshotted when `nvt-local init` or `up`
+prepares trusted state. Newly added contexts do not enter broker ceilings or
+profile grants until the private input is updated and the local platform is
+reconciled; each local run then snapshots that prepared concrete catalog.
+Updating the trusted private kubeconfig requires broker restart and run
+reconciliation in this first delivery; automatic discovery and synchronization
+are intentionally out of scope. If one kubeconfig cluster name is reused by contexts with different
 auth-info identities, initialization fails closed because preserving that one
 cluster name cannot also encode two distinct credential routes.

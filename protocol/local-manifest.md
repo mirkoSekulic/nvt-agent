@@ -297,9 +297,13 @@ an in-place write cannot produce a mixed generated instruction.
 Secret files must be below `.nvt-local/secrets/`. Every path component and the
 final file must be non-symlinks. The opened file must remain the same regular
 file through two equal reads, be owned by the invoking effective user, expose
-no group or other permission bits, contain at least one byte, and be no larger
-than 64 KiB. A rename or content change during resolution fails closed. Errors
-identify the unsafe input class without including its contents.
+no group or other permission bits, and contain at least one byte. Generic
+inputs remain limited to 64 KiB. The compiler marks a 512 KiB size class only
+when a validated `plugin: kubeconfig` provider binds that logical secret as
+`private-kubeconfig`; there is no user-configurable byte limit. Reuse by a
+generic consumer keeps the underlying file at the stricter 64 KiB limit,
+regardless of input order. A rename or content change during resolution fails
+closed. Errors identify the unsafe input class without including its contents.
 
 Resolved secret bytes remain in an opaque in-memory input set until they are
 cleared. They are absent from the compiled document, redacted state plan,
@@ -458,7 +462,7 @@ unauthorized selections create no durable run and never reach a backend.
 
 ## Kubeconfig context catalogs
 
-A profile may select exact non-repository resources from a generic
+A profile may select non-repository resources from a generic
 `brokerProviders` entry whose plugin is `kubeconfig`:
 
 ```yaml
@@ -466,14 +470,21 @@ profiles:
   development:
     kubernetes:
       - provider: clusters
-        contexts: [development, shared-services]
+        allContexts: true
         authorization:
           preset: observe
 ```
 
+Exactly one selection mode is required. A non-empty `contexts` list preserves
+the original explicit contract; `allContexts: true` selects every context in
+that provider's private kubeconfig. False, empty, mixed, absent, and wildcard
+explicit selections fail validation.
+
 The provider binds `private-kubeconfig` through `secrets`; it has no static Git
-`mediation` block. The compiler turns the context names into generic broker
-`resources`, catalog preparation, and deterministic mediated route names.
+`mediation` block. Trusted input preparation resolves `allContexts` to sorted,
+bounded context names before generated configuration is written. The compiler
+and preparation step turn the names into generic broker `resources`, catalog
+preparation, and deterministic mediated route names.
 Profiles cannot select a context from another provider, and a provider cannot
 publish a context outside its compiled administrator ceiling. See
 [`docs/kubeconfig-mediation.md`](../docs/kubeconfig-mediation.md) for the full
@@ -482,8 +493,11 @@ configuration and security boundary.
 `authorization` may be omitted, use the sole versioned `observe` preset, or
 contain concrete `defaultAction` plus operation/resource `rules`. Preset and
 concrete fields are mutually exclusive and unknown fields/presets are rejected.
-The compiler expands `observe` into an immutable default-deny concrete policy
-for the sorted exact context resources; the broker never receives preset data.
+The compiler, or trusted preparation after all-context discovery, expands
+`observe` into an immutable default-deny concrete policy for the sorted exact
+context resources; the broker never receives preset data. Redacted compiled
+metadata retains `allContexts: true` alongside the resolved names for audit;
+raw AgentRun and broker authorization contracts remain concrete and unchanged.
 
 ## Example
 

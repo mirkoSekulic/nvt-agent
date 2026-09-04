@@ -97,6 +97,26 @@ class KubeconfigProviderTest(unittest.TestCase):
         self.assertEqual([entry["name"] for entry in parsed["users"]], ["shared-user"])
         self.assertEqual(parsed["users"][0]["user"], {})
 
+    def test_private_kubeconfig_size_boundary_is_512_kib(self):
+        self.assertLess(provider_module.MAX_KUBECONFIG_BYTES, provider_module.MAX_HELPER_OUTPUT)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        kubeconfig = root / "private.yaml"
+        encoded = yaml.safe_dump(document()).encode()
+        encoded += b"#" + (b"x" * (provider_module.MAX_KUBECONFIG_BYTES - len(encoded) - 1))
+        self.assertEqual(len(encoded), provider_module.MAX_KUBECONFIG_BYTES)
+        kubeconfig.write_bytes(encoded)
+        params = {
+            "provider_instance_name": "clusters",
+            "config": {"private-kubeconfig": str(kubeconfig), "state-dir": str(root / "state")},
+            "allow": {"resources": ["context-000"]},
+        }
+        provider_module.KubeconfigProvider(params)
+        kubeconfig.write_bytes(encoded + b"x")
+        with self.assertRaisesRegex(provider_module.ProviderFailure, "provider-config-invalid"):
+            provider_module.KubeconfigProvider(params)
+
     def test_injection_is_resource_scoped_and_never_uses_agent_headers(self):
         provider, _ = self.make_provider(document(2), ["context-000", "context-001"])
         host = provider_module.route_host("clusters", "context-000")
@@ -178,6 +198,17 @@ class KubeconfigProviderTest(unittest.TestCase):
 
         provider, _ = self.make_provider(document(), ["context-000"], authorization=deny_all)
         self.assertFalse(provider.injection_authorization({**request, "grant": {"resources": ["context-000"], "authorization": allow_first}})["allowed"])
+
+    def test_wildcard_authorization_resource_never_matches_a_context(self):
+        wildcard = {"defaultAction": "deny", "rules": [{"operation": "observe", "resource": "context/*"}]}
+        provider, _ = self.make_provider(document(), ["context-000"], authorization=wildcard)
+        decision = provider.injection_authorization({
+            "host": provider_module.route_host("clusters", "context-000"),
+            "method": "GET",
+            "path": "/api/v1/pods",
+            "grant": {"resources": ["context-000"], "authorization": wildcard},
+        })
+        self.assertEqual(decision, {"allowed": False, "operation": "observe", "resource": "context/context-000"})
 
     def test_absent_authorization_preserves_unrestricted_compatibility(self):
         provider, _ = self.make_provider(document(), ["context-000"])

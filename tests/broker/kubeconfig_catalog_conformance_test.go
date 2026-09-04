@@ -31,6 +31,13 @@ contexts:
   - name: denied
     context: {cluster: denied-cluster, user: preserved-user}
 `, ca, ca)
+	if len(document) >= 96<<10 {
+		t.Fatal("kubeconfig fixture unexpectedly exceeds its target size")
+	}
+	document += "#" + strings.Repeat("x", (96<<10)-len(document)-1)
+	if len(document) != 96<<10 {
+		t.Fatal("kubeconfig fixture size is not deterministic")
+	}
 	if err := os.WriteFile(privateConfig, []byte(document), 0o600); err != nil {
 		t.Fatal(err)
 	}

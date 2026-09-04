@@ -16,11 +16,13 @@ import (
 
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
+	"gopkg.in/yaml.v3"
 )
 
 const (
-	MaxInstructionBytes = resolvedrun.MaxWorkspaceInstructionsBytes
-	MaxSecretBytes      = 64 << 10
+	MaxInstructionBytes      = resolvedrun.MaxWorkspaceInstructionsBytes
+	MaxSecretBytes           = 64 << 10
+	MaxKubeconfigSecretBytes = 512 << 10
 )
 
 // Instruction is resolved, non-secret profile guidance. Content is allowed in
@@ -38,6 +40,7 @@ type Instruction struct {
 type Inputs struct {
 	Instructions []Instruction
 	private      map[inputKey][]byte
+	prepared     *manifest.Compiled
 }
 
 type inputKey struct {
@@ -77,6 +80,24 @@ func resolveWithReader(manifestPath string, compiled manifest.Compiled, readInpu
 	seenInstructions := map[inputKey]struct{}{}
 	seenSecrets := map[inputKey]string{}
 	secretSnapshots := map[string][]byte{}
+	secretLimits := map[string]int64{}
+	kubeconfigSecrets := trustedKubeconfigSecrets(compiled)
+	for _, input := range compiled.PrivateInputs {
+		if input.Purpose == "instructions" {
+			continue
+		}
+		if !trustedPrivateOwner(input.Owner) || !safeInputPath(input.File, true) {
+			return fail("secret input ownership or path is unsafe")
+		}
+		source := filepath.Clean(strings.TrimPrefix(input.File, "./"))
+		limit := int64(MaxSecretBytes)
+		if input.Owner == "broker" && input.Purpose == "kubeconfig" && kubeconfigSecrets[input.Name] {
+			limit = MaxKubeconfigSecretBytes
+		}
+		if previous, exists := secretLimits[source]; !exists || limit < previous {
+			secretLimits[source] = limit
+		}
+	}
 	for _, input := range compiled.PrivateInputs {
 		key := inputKey{owner: input.Owner, name: input.Name}
 		if input.Purpose == "instructions" {
@@ -98,9 +119,6 @@ func resolveWithReader(manifestPath string, compiled manifest.Compiled, readInpu
 			result.Instructions = append(result.Instructions, Instruction{Owner: input.Owner, Name: input.Name, Content: content})
 			continue
 		}
-		if !trustedPrivateOwner(input.Owner) || !safeInputPath(input.File, true) {
-			return fail("secret input ownership or path is unsafe")
-		}
 		source := filepath.Clean(strings.TrimPrefix(input.File, "./"))
 		if previous, exists := seenSecrets[key]; exists {
 			if previous != source {
@@ -111,7 +129,7 @@ func resolveWithReader(manifestPath string, compiled manifest.Compiled, readInpu
 		content, exists := secretSnapshots[source]
 		if !exists {
 			var readErr error
-			content, readErr = readInput(root, source, MaxSecretBytes, true, true)
+			content, readErr = readInput(root, source, secretLimits[source], true, true)
 			if readErr != nil || len(content) == 0 {
 				clear(content)
 				return fail("secret input is missing, unsafe, or oversized")
@@ -121,6 +139,11 @@ func resolveWithReader(manifestPath string, compiled manifest.Compiled, readInpu
 		seenSecrets[key] = source
 		result.private[key] = content
 	}
+	prepared, err := prepareKubernetesSelections(compiled, result)
+	if err != nil {
+		return fail(err.Error())
+	}
+	result.prepared = &prepared
 	sort.Slice(result.Instructions, func(i, j int) bool {
 		if result.Instructions[i].Owner != result.Instructions[j].Owner {
 			return result.Instructions[i].Owner < result.Instructions[j].Owner
@@ -128,6 +151,102 @@ func resolveWithReader(manifestPath string, compiled manifest.Compiled, readInpu
 		return result.Instructions[i].Name < result.Instructions[j].Name
 	})
 	return result, nil
+}
+
+func trustedKubeconfigSecrets(compiled manifest.Compiled) map[string]bool {
+	classes := map[string]string{}
+	for _, account := range compiled.Broker.Accounts {
+		if account.Account.PrivateKeySecret != "" {
+			classes[account.Account.PrivateKeySecret] = "generic"
+		}
+	}
+	for _, named := range compiled.Broker.Providers {
+		for configKey, secretName := range named.Provider.Secrets {
+			class := "generic"
+			if named.Provider.Plugin == "kubeconfig" && configKey == "private-kubeconfig" && len(named.Provider.Secrets) == 1 {
+				class = "kubeconfig"
+			}
+			if previous := classes[secretName]; previous == "generic" || previous != "" && previous != class {
+				class = "generic"
+			}
+			classes[secretName] = class
+		}
+	}
+	result := map[string]bool{}
+	for secretName, class := range classes {
+		if class == "kubeconfig" {
+			result[secretName] = true
+		}
+	}
+	return result
+}
+
+// PreparedCompiled returns the behavior-active compiled configuration after
+// trusted, non-secret kubeconfig context discovery has completed.
+func (inputs *Inputs) PreparedCompiled() (manifest.Compiled, error) {
+	if inputs == nil || inputs.prepared == nil {
+		return manifest.Compiled{}, errors.New("prepared local configuration is unavailable")
+	}
+	return *inputs.prepared, nil
+}
+
+func prepareKubernetesSelections(compiled manifest.Compiled, inputs *Inputs) (manifest.Compiled, error) {
+	required := map[string]bool{}
+	for _, profile := range compiled.Controller.Profiles {
+		for _, access := range profile.Profile.Kubernetes {
+			if access.AllContexts != nil && *access.AllContexts {
+				required[access.Provider] = true
+			}
+		}
+	}
+	if len(required) == 0 {
+		return compiled, nil
+	}
+	providerSecrets := map[string]string{}
+	for _, named := range compiled.Broker.Providers {
+		if named.Provider.Plugin == "kubeconfig" {
+			providerSecrets[named.Name] = named.Provider.Secrets["private-kubeconfig"]
+		}
+	}
+	catalogs := map[string][]string{}
+	for provider := range required {
+		secretName := providerSecrets[provider]
+		content := inputs.private[inputKey{owner: "broker", name: secretName}]
+		if secretName == "" || len(content) == 0 {
+			return manifest.Compiled{}, errors.New("kubeconfig context discovery is unavailable")
+		}
+		contexts, err := discoverKubeconfigContexts(content)
+		if err != nil {
+			return manifest.Compiled{}, errors.New("kubeconfig context discovery failed")
+		}
+		catalogs[provider] = contexts
+	}
+	return manifest.ResolveKubernetesSelections(compiled, catalogs)
+}
+
+func discoverKubeconfigContexts(content []byte) ([]string, error) {
+	var document struct {
+		APIVersion string `yaml:"apiVersion"`
+		Kind       string `yaml:"kind"`
+		Contexts   []struct {
+			Name string `yaml:"name"`
+		} `yaml:"contexts"`
+	}
+	if !utf8.Valid(content) || yaml.Unmarshal(content, &document) != nil || document.APIVersion != "v1" || document.Kind != "Config" ||
+		len(document.Contexts) == 0 || len(document.Contexts) > manifest.MaxItems {
+		return nil, errors.New("invalid kubeconfig catalog")
+	}
+	contexts := make([]string, 0, len(document.Contexts))
+	seen := map[string]bool{}
+	for _, entry := range document.Contexts {
+		if entry.Name == "" || len(entry.Name) > manifest.MaxStringBytes || strings.ContainsAny(entry.Name, "\x00\r\n") || seen[entry.Name] {
+			return nil, errors.New("invalid kubeconfig catalog")
+		}
+		seen[entry.Name] = true
+		contexts = append(contexts, entry.Name)
+	}
+	sort.Strings(contexts)
+	return contexts, nil
 }
 
 func safeInputPath(value string, secret bool) bool {

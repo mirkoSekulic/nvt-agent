@@ -111,6 +111,10 @@ func (application app) prepare(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	defer inputs.Close()
+	compiled, err = inputs.PreparedCompiled()
+	if err != nil {
+		return nil, err
+	}
 	for _, item := range compiled.Producers {
 		if item.Kind != "oci" {
 			continue

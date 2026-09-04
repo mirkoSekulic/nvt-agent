@@ -27,6 +27,7 @@ import yaml
 
 PROTOCOL = "nvt.broker-provider/v1"
 MAX_CONTEXTS = 512
+MAX_KUBECONFIG_BYTES = 512 * 1024
 MAX_HELPER_OUTPUT = 1024 * 1024
 MAX_NO_EXPIRY_CACHE_SECONDS = 60
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -137,7 +138,7 @@ class KubeconfigProvider:
     def _load_document(path):
         try:
             info = path.stat()
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_HELPER_OUTPUT:
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_KUBECONFIG_BYTES:
                 raise ProviderFailure("provider-config-invalid")
             with path.open("r", encoding="utf-8") as stream:
                 value = yaml.safe_load(stream)

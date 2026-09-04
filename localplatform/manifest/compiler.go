@@ -3,7 +3,10 @@ package manifest
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sort"
+	"strings"
 )
 
 // Compiled is deterministic intent for the later renderer slices. It contains
@@ -109,6 +112,7 @@ type BrokerGrantIntent struct {
 	Purpose       string                    `json:"purpose"`
 	Repositories  []string                  `json:"repositories"`
 	Resources     []string                  `json:"resources,omitempty"`
+	AllContexts   bool                      `json:"allContexts,omitempty"`
 	Permissions   map[string]string         `json:"permissions,omitempty"`
 	Authorization *BrokerGrantAuthorization `json:"authorization,omitempty"`
 }
@@ -201,6 +205,10 @@ func Compile(m Manifest) (Compiled, error) {
 		profile.Kubernetes = append([]KubernetesAccess(nil), profile.Kubernetes...)
 		for index := range profile.Kubernetes {
 			profile.Kubernetes[index].Contexts = append([]string(nil), profile.Kubernetes[index].Contexts...)
+			if profile.Kubernetes[index].AllContexts != nil {
+				value := *profile.Kubernetes[index].AllContexts
+				profile.Kubernetes[index].AllContexts = &value
+			}
 			sort.Strings(profile.Kubernetes[index].Contexts)
 		}
 		profile.Plugins = append([]Plugin(nil), profile.Plugins...)
@@ -299,28 +307,31 @@ func Compile(m Manifest) (Compiled, error) {
 		result.Controller.ProducerAdmissions = append(result.Controller.ProducerAdmissions, ProducerAdmissionIntent{Producer: producer.Name, Identity: "producer:" + producer.Name, Workflow: producer.Workflow, CommandWorkflows: workflows, Credential: credential, AllowedPrincipalIssuers: issuers})
 		result.GeneratedPrivateInputs = append(result.GeneratedPrivateInputs, GeneratedPrivateInputIntent{"local-platform-state", credential, "schedule-admission-token", []string{"local-controller", "producer:" + producer.Name}})
 	}
-	seenBrokerSecrets := map[string]struct{}{}
+	brokerSecretPurposes := map[string]string{}
 	for _, name := range SortedNames(m.Accounts) {
 		account := m.Accounts[name]
 		for _, secretName := range []string{account.PrivateKeySecret} {
 			if secretName != "" {
-				if _, exists := seenBrokerSecrets[secretName]; exists {
-					continue
-				}
-				seenBrokerSecrets[secretName] = struct{}{}
-				result.PrivateInputs = append(result.PrivateInputs, PrivateInputIntent{"broker", secretName, m.Secrets[secretName].File, "secret"})
+				brokerSecretPurposes[secretName] = "secret"
 			}
 		}
 	}
 	for _, name := range SortedNames(m.BrokerProviders) {
-		for _, configKey := range SortedNames(m.BrokerProviders[name].Secrets) {
-			secretName := m.BrokerProviders[name].Secrets[configKey]
-			if _, exists := seenBrokerSecrets[secretName]; exists {
-				continue
+		provider := m.BrokerProviders[name]
+		for _, configKey := range SortedNames(provider.Secrets) {
+			secretName := provider.Secrets[configKey]
+			purpose := "secret"
+			if provider.Plugin == "kubeconfig" && configKey == "private-kubeconfig" {
+				purpose = "kubeconfig"
 			}
-			seenBrokerSecrets[secretName] = struct{}{}
-			result.PrivateInputs = append(result.PrivateInputs, PrivateInputIntent{"broker", secretName, m.Secrets[secretName].File, "secret"})
+			if previous := brokerSecretPurposes[secretName]; previous == "secret" || previous != "" && previous != purpose {
+				purpose = "secret"
+			}
+			brokerSecretPurposes[secretName] = purpose
 		}
+	}
+	for _, secretName := range SortedNames(brokerSecretPurposes) {
+		result.PrivateInputs = append(result.PrivateInputs, PrivateInputIntent{"broker", secretName, m.Secrets[secretName].File, brokerSecretPurposes[secretName]})
 	}
 	for _, name := range SortedNames(m.Profiles) {
 		if ref := m.Profiles[name].Instructions; ref != nil {
@@ -350,6 +361,78 @@ func Compile(m Manifest) (Compiled, error) {
 	return result, nil
 }
 
+// ResolveKubernetesSelections expands trusted all-context selections into the
+// same concrete grants produced for explicit context lists. The caller owns
+// kubeconfig discovery; this function only accepts bounded, non-secret names.
+func ResolveKubernetesSelections(compiled Compiled, catalogs map[string][]string) (Compiled, error) {
+	encoded, err := compiled.CanonicalJSON()
+	if err != nil {
+		return Compiled{}, errors.New("compiled Kubernetes selection is unavailable")
+	}
+	var resolved Compiled
+	if err := json.Unmarshal(encoded, &resolved); err != nil {
+		return Compiled{}, errors.New("compiled Kubernetes selection is unavailable")
+	}
+	brokerProfiles := map[string]*BrokerProfileIntent{}
+	for index := range resolved.Broker.Profiles {
+		brokerProfiles[resolved.Broker.Profiles[index].Name] = &resolved.Broker.Profiles[index]
+	}
+	usedCatalogs := map[string]bool{}
+	for profileIndex := range resolved.Controller.Profiles {
+		profile := &resolved.Controller.Profiles[profileIndex]
+		brokerProfile := brokerProfiles[profile.Name]
+		if brokerProfile == nil {
+			return Compiled{}, errors.New("compiled Kubernetes profile is inconsistent")
+		}
+		for _, access := range profile.Profile.Kubernetes {
+			if access.AllContexts == nil || !*access.AllContexts {
+				continue
+			}
+			contexts, ok := catalogs[access.Provider]
+			if !ok || len(contexts) == 0 || len(contexts) > MaxItems || uniqueStrings(contexts) != nil {
+				return Compiled{}, fmt.Errorf("Kubernetes provider %q returned an invalid context catalog", access.Provider)
+			}
+			for _, contextName := range contexts {
+				if contextName == "" || len(contextName) > MaxStringBytes || strings.ContainsAny(contextName, "\x00\r\n") {
+					return Compiled{}, fmt.Errorf("Kubernetes provider %q returned an invalid context catalog", access.Provider)
+				}
+			}
+			contexts = append([]string(nil), contexts...)
+			sort.Strings(contexts)
+			usedCatalogs[access.Provider] = true
+			resolvedAuthorization := resolveKubernetesAuthorization(access.Authorization, contexts)
+			if err := resolveKubernetesGrant(profile.BrokerGrants, access.Provider, contexts, resolvedAuthorization); err != nil {
+				return Compiled{}, err
+			}
+			if err := resolveKubernetesGrant(brokerProfile.Grants, access.Provider, contexts, resolvedAuthorization); err != nil {
+				return Compiled{}, err
+			}
+		}
+	}
+	for provider := range catalogs {
+		if !usedCatalogs[provider] {
+			return Compiled{}, fmt.Errorf("unexpected Kubernetes context catalog for provider %q", provider)
+		}
+	}
+	return resolved, nil
+}
+
+func resolveKubernetesGrant(grants []BrokerGrantIntent, provider string, contexts []string, authorization *BrokerGrantAuthorization) error {
+	for index := range grants {
+		grant := &grants[index]
+		if grant.Provider != provider || grant.Purpose != "catalog" {
+			continue
+		}
+		if !grant.AllContexts || len(grant.Resources) != 0 || grant.Authorization != nil {
+			return fmt.Errorf("compiled Kubernetes grant for provider %q is inconsistent", provider)
+		}
+		grant.Resources = append([]string(nil), contexts...)
+		grant.Authorization = cloneGrantAuthorization(authorization)
+		return nil
+	}
+	return fmt.Errorf("compiled Kubernetes grant for provider %q is missing", provider)
+}
+
 func normalizeDomains(values []string) []string {
 	result := make([]string, 0, len(values))
 	for _, value := range values {
@@ -364,7 +447,7 @@ func normalizeDomains(values []string) []string {
 func cloneBrokerGrants(input []BrokerGrantIntent) []BrokerGrantIntent {
 	result := make([]BrokerGrantIntent, len(input))
 	for index, grant := range input {
-		result[index] = BrokerGrantIntent{Provider: grant.Provider, Preset: grant.Preset, Mediation: cloneMediation(grant.Mediation), Purpose: grant.Purpose, Repositories: append([]string(nil), grant.Repositories...), Resources: append([]string(nil), grant.Resources...), Permissions: sortedMap(grant.Permissions), Authorization: cloneGrantAuthorization(grant.Authorization)}
+		result[index] = BrokerGrantIntent{Provider: grant.Provider, Preset: grant.Preset, Mediation: cloneMediation(grant.Mediation), Purpose: grant.Purpose, Repositories: append([]string(nil), grant.Repositories...), Resources: append([]string(nil), grant.Resources...), AllContexts: grant.AllContexts, Permissions: sortedMap(grant.Permissions), Authorization: cloneGrantAuthorization(grant.Authorization)}
 	}
 	return result
 }
@@ -411,7 +494,12 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 	for _, access := range accesses {
 		contexts := append([]string(nil), access.Contexts...)
 		sort.Strings(contexts)
-		result = append(result, BrokerGrantIntent{Provider: access.Provider, Preset: "kubeconfig", Purpose: "catalog", Resources: contexts, Authorization: resolveKubernetesAuthorization(access.Authorization, contexts)})
+		allContexts := access.AllContexts != nil && *access.AllContexts
+		var authorization *BrokerGrantAuthorization
+		if !allContexts {
+			authorization = resolveKubernetesAuthorization(access.Authorization, contexts)
+		}
+		result = append(result, BrokerGrantIntent{Provider: access.Provider, Preset: "kubeconfig", Purpose: "catalog", Resources: contexts, AllContexts: allContexts, Authorization: authorization})
 	}
 	for _, key := range SortedNames(groups) {
 		entry := groups[key]

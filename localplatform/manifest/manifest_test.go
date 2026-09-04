@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,6 +56,29 @@ func TestValidFixtureCompilesDeterministically(t *testing.T) {
 	}
 	if bytes.Contains(got, []byte("PRIVATE")) {
 		t.Fatal("compiled output contains secret material")
+	}
+}
+
+func TestAllContextsExampleIsValidAndMinimal(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "examples", "kubeconfig-all-contexts", "manifest.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode all-context example: %v", err)
+	}
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatalf("compile all-context example: %v", err)
+	}
+	if len(compiled.Broker.Providers) != 2 || len(compiled.Controller.Profiles) != 1 || len(compiled.Controller.Profiles[0].Profile.Kubernetes) != 2 {
+		t.Fatalf("all-context example shape = %#v", compiled)
+	}
+	for _, access := range compiled.Controller.Profiles[0].Profile.Kubernetes {
+		if access.AllContexts == nil || !*access.AllContexts || access.Contexts != nil {
+			t.Fatalf("example Kubernetes selection = %#v", access)
+		}
 	}
 }
 
@@ -495,6 +519,128 @@ func TestKubernetesObservePresetResolvesImmutably(t *testing.T) {
 	if kubernetes == nil || kubernetes.Authorization == nil || kubernetes.Authorization.DefaultAction != "deny" ||
 		len(kubernetes.Authorization.Rules) != 1 || kubernetes.Authorization.Rules[0] != (BrokerGrantAuthorizationRule{Operation: "observe", Resource: "context/studio-staging"}) {
 		t.Fatalf("observe preset did not resolve to concrete immutable policy: %#v", kubernetes)
+	}
+}
+
+func TestKubernetesAllContextsSelectionResolvesToConcreteObserveGrants(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Secrets["cluster-config"] = Secret{File: "./.nvt-local/secrets/kubernetes/config"}
+	decoded.BrokerProviders["clusters"] = BrokerProvider{Plugin: "kubeconfig", Secrets: map[string]string{"private-kubeconfig": "cluster-config"}}
+	all := true
+	profile := decoded.Profiles["development"]
+	profile.Kubernetes = []KubernetesAccess{{Provider: "clusters", AllContexts: &all, Authorization: &KubernetesAuthorization{Preset: "observe"}}}
+	decoded.Profiles["development"] = profile
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ResolveKubernetesSelections(compiled, map[string][]string{"clusters": {"prod", "dev", "staging"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, profiles := range [][]BrokerProfileIntent{resolved.Broker.Profiles, {{Name: resolved.Controller.Profiles[0].Name, Grants: resolved.Controller.Profiles[0].BrokerGrants}}} {
+		var grant *BrokerGrantIntent
+		for index := range profiles[0].Grants {
+			if profiles[0].Grants[index].Purpose == "catalog" {
+				grant = &profiles[0].Grants[index]
+			}
+		}
+		if grant == nil || !grant.AllContexts || strings.Join(grant.Resources, ",") != "dev,prod,staging" || grant.Authorization == nil ||
+			grant.Authorization.DefaultAction != "deny" || len(grant.Authorization.Rules) != 3 ||
+			grant.Authorization.Rules[2] != (BrokerGrantAuthorizationRule{Operation: "observe", Resource: "context/staging"}) {
+			t.Fatalf("all-context grant was not concretely resolved: %#v", grant)
+		}
+	}
+	encoded, err := resolved.CanonicalJSON()
+	if err != nil || !bytes.Contains(encoded, []byte(`"allContexts":true`)) || !bytes.Contains(encoded, []byte(`"resources":["dev","prod","staging"]`)) {
+		t.Fatalf("resolved selection is not auditable: %s err=%v", encoded, err)
+	}
+}
+
+func TestKubernetesContextSelectionRequiresExactlyOneMode(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.Secrets["cluster-config"] = Secret{File: "./.nvt-local/secrets/kubernetes/config"}
+	base.BrokerProviders["clusters"] = BrokerProvider{Plugin: "kubeconfig", Secrets: map[string]string{"private-kubeconfig": "cluster-config"}}
+	truth, falsity := true, false
+	cases := map[string]KubernetesAccess{
+		"neither mode":             {Provider: "clusters"},
+		"empty explicit list":      {Provider: "clusters", Contexts: []string{}},
+		"false all-contexts":       {Provider: "clusters", AllContexts: &falsity},
+		"both modes":               {Provider: "clusters", Contexts: []string{"dev"}, AllContexts: &truth},
+		"false plus explicit mode": {Provider: "clusters", Contexts: []string{"dev"}, AllContexts: &falsity},
+		"wildcard context":         {Provider: "clusters", Contexts: []string{"dev-*"}},
+	}
+	for name, access := range cases {
+		t.Run(name, func(t *testing.T) {
+			decoded := base
+			profile := decoded.Profiles["development"]
+			profile.Kubernetes = []KubernetesAccess{access}
+			decoded.Profiles = cloneMap(decoded.Profiles)
+			decoded.Profiles["development"] = profile
+			if _, err := Compile(decoded); err == nil {
+				t.Fatal("invalid Kubernetes selection accepted")
+			}
+		})
+	}
+	profile := base.Profiles["development"]
+	profile.Kubernetes = []KubernetesAccess{{Provider: "clusters", Contexts: []string{"dev"}}}
+	base.Profiles["development"] = profile
+	if _, err := Compile(base); err != nil {
+		t.Fatalf("backward-compatible explicit context list rejected: %v", err)
+	}
+}
+
+func TestKubeconfigSecretSizeClassIsInferredWithoutEscalatingReuse(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Secrets["cluster-config"] = Secret{File: "./.nvt-local/secrets/kubernetes/config"}
+	decoded.BrokerProviders["clusters"] = BrokerProvider{Plugin: "kubeconfig", Secrets: map[string]string{"private-kubeconfig": "cluster-config"}}
+	compiled, err := Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findPurpose := func(value Compiled) string {
+		for _, input := range value.PrivateInputs {
+			if input.Owner == "broker" && input.Name == "cluster-config" {
+				return input.Purpose
+			}
+		}
+		return ""
+	}
+	if got := findPurpose(compiled); got != "kubeconfig" {
+		t.Fatalf("exclusive kubeconfig secret purpose = %q", got)
+	}
+	reused := decoded
+	reused.BrokerProviders = cloneMap(decoded.BrokerProviders)
+	azure := reused.BrokerProviders["azure"]
+	azure.Secrets = map[string]string{"token-file": "cluster-config"}
+	reused.BrokerProviders["azure"] = azure
+	compiled, err = Compile(reused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findPurpose(compiled); got != "secret" {
+		t.Fatalf("cross-purpose reused secret was not kept at the strict size class: %q", got)
 	}
 }
 

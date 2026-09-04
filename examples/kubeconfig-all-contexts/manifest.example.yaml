@@ -1,0 +1,65 @@
+apiVersion: nvt.dev/local/v1
+
+secrets:
+  ai-dev-kubeconfig:
+    file: ./.nvt-local/secrets/kubernetes/ai-dev.yaml
+  ai-dev-prod-kubeconfig:
+    file: ./.nvt-local/secrets/kubernetes/ai-dev-prod.yaml
+
+accounts:
+  codex:
+    preset: codex-oauth
+
+brokerProviders:
+  ai-dev-k8s:
+    plugin: kubeconfig
+    config:
+      helper-allowlist: [kubelogin]
+      helper-environment:
+        - name: AZURE_CONFIG_DIR
+          value: state:azure
+    secrets:
+      private-kubeconfig: ai-dev-kubeconfig
+  ai-dev-prod-k8s:
+    plugin: kubeconfig
+    config:
+      helper-allowlist: [kubelogin]
+      helper-environment:
+        - name: AZURE_CONFIG_DIR
+          value: state:azure
+    secrets:
+      private-kubeconfig: ai-dev-prod-kubeconfig
+
+retentionPolicies:
+  disposable:
+    ttl:
+      activeSeconds: 14400
+      completedSeconds: 300
+      failedSeconds: 900
+
+profiles:
+  kubernetes-observe:
+    runtime:
+      preset: codex
+      autonomy: trusted-local
+      account: codex
+    accounts: [codex]
+    kubernetes:
+      - provider: ai-dev-k8s
+        allContexts: true
+        authorization: {preset: observe}
+      - provider: ai-dev-prod-k8s
+        allContexts: true
+        authorization: {preset: observe}
+
+repositories:
+  project:
+    url: https://github.com/example/project.git
+    checkoutTarget: github.com/example/project
+    path: project
+
+workflows:
+  inspect-kubernetes:
+    profile: kubernetes-observe
+    repository: project
+    retention: disposable

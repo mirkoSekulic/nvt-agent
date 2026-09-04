@@ -357,6 +357,9 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 			continue
 		}
 		if grant.Purpose == "catalog" {
+			if grant.AllContexts && len(grant.Resources) == 0 {
+				return resolvedrun.Profile{}, errors.New("compiled Kubernetes all-context selection is unresolved")
+			}
 			profile.Broker.Grants = append(profile.Broker.Grants, kubeconfigGrant(grant.Provider, grant.Resources, grant.Authorization))
 			continue
 		}
@@ -586,6 +589,13 @@ func repositoryGrant(provider, preset string, mediation *manifest.BrokerProvider
 func Broker(compiled manifest.Compiled) ([]byte, error) {
 	if compiled.Version != manifest.APIVersion || compiled.Broker.Owner != "broker" {
 		return nil, errors.New("compiled broker intent is invalid")
+	}
+	for _, profile := range compiled.Broker.Profiles {
+		for _, grant := range profile.Grants {
+			if grant.Purpose == "catalog" && grant.AllContexts && len(grant.Resources) == 0 {
+				return nil, errors.New("compiled Kubernetes all-context selection is unresolved")
+			}
+		}
 	}
 	providers := []map[string]any{}
 	providerPlugins := []any{}
