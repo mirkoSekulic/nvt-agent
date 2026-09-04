@@ -2,11 +2,13 @@ package state
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	serviceconfig "github.com/mirkoSekulic/nvt-agent/localplatform/config"
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
 )
 
@@ -98,6 +100,166 @@ func TestResolveSnapshotsSharedSecretOnceAcrossOwners(t *testing.T) {
 	}
 	if current, readErr := os.ReadFile(full); readErr != nil || !bytes.Equal(current, newValue) {
 		t.Fatalf("test rotation did not occur: value=%q err=%v", current, readErr)
+	}
+}
+
+func TestResolveUsesBoundedKubeconfigSecretSizeClass(t *testing.T) {
+	for _, size := range []int{MaxSecretBytes + 1, MaxKubeconfigSecretBytes} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, ".nvt-local", "secrets", "config")
+			mustWrite(t, path, 0o600, paddedKubeconfig(size, "dev"))
+			compiled := kubeconfigBoundCompiled("clusters", ".nvt-local/secrets/config")
+			inputs, err := Resolve(filepath.Join(root, "nvt.local.yaml"), compiled)
+			if err != nil {
+				t.Fatalf("bounded kubeconfig of %d bytes rejected: %v", size, err)
+			}
+			inputs.Close()
+		})
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, ".nvt-local", "secrets", "config")
+	mustWrite(t, path, 0o600, paddedKubeconfig(MaxKubeconfigSecretBytes+1, "dev"))
+	compiled := kubeconfigBoundCompiled("clusters", ".nvt-local/secrets/config")
+	if _, err := Resolve(filepath.Join(root, "nvt.local.yaml"), compiled); err == nil {
+		t.Fatal("oversized kubeconfig secret accepted")
+	}
+}
+
+func TestResolveKeepsCrossPurposeSecretReuseAtGenericLimit(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".nvt-local", "secrets", "shared")
+	mustWrite(t, path, 0o600, paddedKubeconfig(MaxSecretBytes+1, "dev"))
+	compiled := manifest.Compiled{PrivateInputs: []manifest.PrivateInputIntent{
+		{Owner: "broker", Name: "clusters", File: ".nvt-local/secrets/shared", Purpose: "kubeconfig"},
+		{Owner: "producer:external", Name: "shared", File: "./.nvt-local/secrets/shared", Purpose: "secret:shared"},
+	}}
+	if _, err := Resolve(filepath.Join(root, "nvt.local.yaml"), compiled); err == nil {
+		t.Fatal("cross-purpose secret reuse escalated beyond the generic 64 KiB limit")
+	}
+}
+
+func TestResolvePreparesLargeAllContextKubeconfigAsConcreteObserveGrants(t *testing.T) {
+	root := t.TempDir()
+	raw, err := os.ReadFile(filepath.Join("..", "manifest", "testdata", "valid.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := manifest.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Secrets["cluster-config"] = manifest.Secret{File: "./.nvt-local/secrets/kubernetes/config"}
+	decoded.BrokerProviders["clusters"] = manifest.BrokerProvider{Plugin: "kubeconfig", Secrets: map[string]string{"private-kubeconfig": "cluster-config"}}
+	all := true
+	profile := decoded.Profiles["development"]
+	profile.Egress = nil
+	profile.Kubernetes = []manifest.KubernetesAccess{{Provider: "clusters", AllContexts: &all, Authorization: &manifest.KubernetesAuthorization{Preset: "observe"}}}
+	decoded.Profiles["development"] = profile
+	compiled, err := manifest.Compile(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serviceconfig.Broker(compiled); err == nil {
+		t.Fatal("unresolved all-context selection reached broker configuration")
+	}
+	if _, err := serviceconfig.Controller(compiled, serviceconfig.Instructions{"development": "instructions"}); err == nil {
+		t.Fatal("unresolved all-context selection reached controller configuration")
+	}
+	for _, input := range compiled.PrivateInputs {
+		if input.Owner == "broker" && input.Name == "cluster-config" {
+			compiled.PrivateInputs = []manifest.PrivateInputIntent{input}
+			break
+		}
+	}
+	if len(compiled.PrivateInputs) != 1 || compiled.PrivateInputs[0].Purpose != "kubeconfig" {
+		t.Fatalf("compiled kubeconfig input = %#v", compiled.PrivateInputs)
+	}
+	path := filepath.Join(root, ".nvt-local", "secrets", "kubernetes", "config")
+	mustWrite(t, path, 0o600, paddedKubeconfig(MaxSecretBytes+1, "prod", "dev", "staging"))
+	inputs, err := Resolve(filepath.Join(root, "nvt.local.yaml"), compiled)
+	if err != nil {
+		t.Fatalf("resolve large all-context kubeconfig: %v", err)
+	}
+	defer inputs.Close()
+	prepared, err := inputs.PreparedCompiled()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var grant *manifest.BrokerGrantIntent
+	for index := range prepared.Controller.Profiles[0].BrokerGrants {
+		candidate := &prepared.Controller.Profiles[0].BrokerGrants[index]
+		if candidate.Provider == "clusters" {
+			grant = candidate
+		}
+	}
+	if grant == nil || !grant.AllContexts || strings.Join(grant.Resources, ",") != "dev,prod,staging" || grant.Authorization == nil || len(grant.Authorization.Rules) != 3 {
+		t.Fatalf("prepared all-context grant = %#v", grant)
+	}
+	for index, contextName := range grant.Resources {
+		want := manifest.BrokerGrantAuthorizationRule{Operation: "observe", Resource: "context/" + contextName}
+		if grant.Authorization.Rules[index] != want {
+			t.Fatalf("context %q observe authorization = %#v", contextName, grant.Authorization.Rules[index])
+		}
+	}
+	brokerConfig, err := serviceconfig.Broker(prepared)
+	if err != nil {
+		t.Fatalf("render prepared broker configuration: %v", err)
+	}
+	controllerConfig, err := serviceconfig.Controller(prepared, serviceconfig.Instructions{"development": "instructions"})
+	if err != nil {
+		t.Fatalf("render prepared controller configuration: %v", err)
+	}
+	for name, rendered := range map[string][]byte{"broker": brokerConfig, "controller": controllerConfig} {
+		if bytes.Contains(rendered, []byte("allContexts")) || bytes.Contains(rendered, []byte(`"preset":"observe"`)) || bytes.Contains(rendered, []byte(`"resources":["*"]`)) {
+			t.Fatalf("%s configuration contains an unresolved selection or policy: %s", name, rendered)
+		}
+	}
+	for _, contextName := range []string{"dev", "prod", "staging"} {
+		if !bytes.Contains(brokerConfig, []byte(`"`+contextName+`"`)) {
+			t.Fatalf("broker configuration omitted concrete resource %q", contextName)
+		}
+		if !bytes.Contains(controllerConfig, []byte("context/"+contextName)) {
+			t.Fatalf("controller configuration omitted concrete observe rule for %q", contextName)
+		}
+	}
+	canonical, err := prepared.CanonicalJSON()
+	if err != nil || bytes.Contains(canonical, []byte("real-private-token")) {
+		t.Fatalf("prepared metadata leaked private kubeconfig: err=%v", err)
+	}
+}
+
+func paddedKubeconfig(size int, contexts ...string) []byte {
+	var value strings.Builder
+	value.WriteString("apiVersion: v1\nkind: Config\nclusters: []\nusers:\n- name: private\n  user:\n    token: real-private-token\ncontexts:\n")
+	for _, contextName := range contexts {
+		fmt.Fprintf(&value, "- name: %s\n  context: {}\n", contextName)
+	}
+	if value.Len() < size {
+		value.WriteByte('#')
+		value.WriteString(strings.Repeat("x", size-value.Len()))
+	}
+	return []byte(value.String())
+}
+
+func TestDiscoverKubeconfigContextsRejectsWildcardNames(t *testing.T) {
+	if _, err := discoverKubeconfigContexts(paddedKubeconfig(0, "prod-*")); err == nil {
+		t.Fatal("wildcard kubeconfig context was accepted during discovery")
+	}
+}
+
+func kubeconfigBoundCompiled(secretName, file string) manifest.Compiled {
+	return manifest.Compiled{
+		Broker: manifest.BrokerIntent{Providers: []manifest.NamedBrokerProvider{{Name: "clusters", Provider: manifest.BrokerProvider{
+			Plugin: "kubeconfig", Secrets: map[string]string{"private-kubeconfig": secretName},
+		}}}},
+		PrivateInputs: []manifest.PrivateInputIntent{{Owner: "broker", Name: secretName, File: file, Purpose: "kubeconfig"}},
+	}
+}
+
+func TestKubeconfigSecretLimitFitsBoundedStateTransport(t *testing.T) {
+	if MaxKubeconfigSecretBytes > maxStateFileBytes {
+		t.Fatalf("kubeconfig limit %d exceeds state transport limit %d", MaxKubeconfigSecretBytes, maxStateFileBytes)
 	}
 }
 

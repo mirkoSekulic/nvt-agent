@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -97,6 +98,53 @@ class KubeconfigProviderTest(unittest.TestCase):
         self.assertEqual([entry["name"] for entry in parsed["users"]], ["shared-user"])
         self.assertEqual(parsed["users"][0]["user"], {})
 
+    def test_private_kubeconfig_size_boundary_is_512_kib(self):
+        self.assertLess(provider_module.MAX_KUBECONFIG_BYTES, provider_module.MAX_HELPER_OUTPUT)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        kubeconfig = root / "private.yaml"
+        encoded = yaml.safe_dump(document()).encode()
+        encoded += b"#" + (b"x" * (provider_module.MAX_KUBECONFIG_BYTES - len(encoded) - 1))
+        self.assertEqual(len(encoded), provider_module.MAX_KUBECONFIG_BYTES)
+        kubeconfig.write_bytes(encoded)
+        params = {
+            "provider_instance_name": "clusters",
+            "config": {"private-kubeconfig": str(kubeconfig), "state-dir": str(root / "state")},
+            "allow": {"resources": ["context-000"]},
+        }
+        provider_module.KubeconfigProvider(params)
+        kubeconfig.write_bytes(encoded + b"x")
+        with self.assertRaisesRegex(provider_module.ProviderFailure, "provider-config-invalid"):
+            provider_module.KubeconfigProvider(params)
+
+    def test_load_document_validates_the_open_descriptor(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        kubeconfig = Path(temporary.name) / "private.yaml"
+        kubeconfig.write_text(yaml.safe_dump(document()), encoding="utf-8")
+        with mock.patch.object(Path, "stat", side_effect=AssertionError("path metadata must not be used")):
+            loaded = provider_module.KubeconfigProvider._load_document(kubeconfig)
+        self.assertEqual(loaded["current-context"], "context-000")
+
+    def test_load_document_allows_projected_secret_symlink(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        revision = root / "..2026_09_04"
+        revision.mkdir()
+        (revision / "private.yaml").write_text(yaml.safe_dump(document()), encoding="utf-8")
+        (root / "..data").symlink_to(revision.name)
+        kubeconfig = root / "private.yaml"
+        kubeconfig.symlink_to("..data/private.yaml")
+        loaded = provider_module.KubeconfigProvider._load_document(kubeconfig)
+        self.assertEqual(loaded["current-context"], "context-000")
+
+    def test_load_document_rejects_non_regular_descriptor_before_parsing(self):
+        with mock.patch.object(provider_module.yaml, "safe_load", side_effect=AssertionError("non-regular input was parsed")):
+            with self.assertRaisesRegex(provider_module.ProviderFailure, "provider-config-invalid"):
+                provider_module.KubeconfigProvider._load_document(Path("/dev/null"))
+
     def test_injection_is_resource_scoped_and_never_uses_agent_headers(self):
         provider, _ = self.make_provider(document(2), ["context-000", "context-001"])
         host = provider_module.route_host("clusters", "context-000")
@@ -178,6 +226,17 @@ class KubeconfigProviderTest(unittest.TestCase):
 
         provider, _ = self.make_provider(document(), ["context-000"], authorization=deny_all)
         self.assertFalse(provider.injection_authorization({**request, "grant": {"resources": ["context-000"], "authorization": allow_first}})["allowed"])
+
+    def test_wildcard_authorization_resource_never_matches_a_context(self):
+        wildcard = {"defaultAction": "deny", "rules": [{"operation": "observe", "resource": "context/*"}]}
+        provider, _ = self.make_provider(document(), ["context-000"], authorization=wildcard)
+        decision = provider.injection_authorization({
+            "host": provider_module.route_host("clusters", "context-000"),
+            "method": "GET",
+            "path": "/api/v1/pods",
+            "grant": {"resources": ["context-000"], "authorization": wildcard},
+        })
+        self.assertEqual(decision, {"allowed": False, "operation": "observe", "resource": "context/context-000"})
 
     def test_absent_authorization_preserves_unrestricted_compatibility(self):
         provider, _ = self.make_provider(document(), ["context-000"])

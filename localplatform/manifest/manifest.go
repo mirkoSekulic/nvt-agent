@@ -129,11 +129,12 @@ type Profile struct {
 	Kubernetes                []KubernetesAccess `json:"kubernetes,omitempty"`
 }
 
-// KubernetesAccess selects an exact set of context resources from one generic
-// kubeconfig provider.  It carries names only, never kubeconfig data.
+// KubernetesAccess selects context resources from one generic kubeconfig
+// provider. It carries selection intent only, never kubeconfig data.
 type KubernetesAccess struct {
 	Provider      string                   `json:"provider"`
-	Contexts      []string                 `json:"contexts"`
+	Contexts      []string                 `json:"contexts,omitempty"`
+	AllContexts   *bool                    `json:"allContexts,omitempty"`
 	Authorization *KubernetesAuthorization `json:"authorization,omitempty"`
 }
 
@@ -459,7 +460,10 @@ func (m Manifest) Validate() error {
 		seenKubeProviders := map[string]bool{}
 		for _, access := range profile.Kubernetes {
 			provider, ok := m.BrokerProviders[access.Provider]
-			if !ok || provider.Plugin != "kubeconfig" || seenKubeProviders[access.Provider] || len(access.Contexts) == 0 || len(access.Contexts) > MaxItems {
+			contextsPresent := access.Contexts != nil
+			allContextsPresent := access.AllContexts != nil
+			if !ok || provider.Plugin != "kubeconfig" || seenKubeProviders[access.Provider] || contextsPresent == allContextsPresent ||
+				allContextsPresent && !*access.AllContexts || contextsPresent && (len(access.Contexts) == 0 || len(access.Contexts) > MaxItems) {
 				return fmt.Errorf("profile %q has invalid Kubernetes access", name)
 			}
 			seenKubeProviders[access.Provider] = true
@@ -467,7 +471,7 @@ func (m Manifest) Validate() error {
 				return fmt.Errorf("profile %q Kubernetes contexts: %w", name, err)
 			}
 			for _, contextName := range access.Contexts {
-				if contextName == "" || len(contextName) > MaxStringBytes || strings.ContainsAny(contextName, "\x00\r\n") {
+				if contextName == "" || len(contextName) > MaxStringBytes || strings.ContainsAny(contextName, "*\x00\r\n") {
 					return fmt.Errorf("profile %q has invalid Kubernetes context", name)
 				}
 			}
