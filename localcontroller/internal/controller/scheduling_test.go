@@ -163,6 +163,9 @@ func TestConfiguredWorkstationsBootstrapIdempotentlyAndRejectDrift(t *testing.T)
 	if err := drifted.BootstrapWorkstations(context.Background()); !errors.Is(err, ErrConflict) {
 		t.Fatalf("configuration drift = %v, want conflict", err)
 	}
+	if _, _, _, _, rollout, err := store.backendSnapshot(context.Background(), "nvt"); err != nil || rollout {
+		t.Fatalf("unapproved immutable drift staged backend work: rollout=%t err=%v", rollout, err)
+	}
 }
 
 func TestConfiguredWorkstationRestartsFromTerminalState(t *testing.T) {

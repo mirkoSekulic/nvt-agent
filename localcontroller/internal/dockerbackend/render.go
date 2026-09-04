@@ -176,6 +176,39 @@ type exposeRoute struct {
 	Source     string `json:"source"`
 }
 
+type egressCANameSet struct {
+	leafDNSNames     []string
+	upstreamDNSNames []string
+}
+
+func egressCANameSetFor(run resolvedrun.ResolvedAgentRun) egressCANameSet {
+	if run.Egress.Transport == "redirect" {
+		return egressCANameSet{leafDNSNames: []string{"egressd"}, upstreamDNSNames: catalogLeafNames(run)}
+	}
+	return egressCANameSet{upstreamDNSNames: egressLeafNames(run)}
+}
+
+func (names egressCANameSet) digest() string {
+	values := append([]string{"localhost"}, names.leafDNSNames...)
+	values = append(values, names.upstreamDNSNames...)
+	sort.Strings(values)
+	encoded, _ := json.Marshal(values)
+	digest := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", digest[:])
+}
+
+func caInitCommand(run resolvedrun.ResolvedAgentRun) []string {
+	names := egressCANameSetFor(run)
+	command := []string{"--cert-file", "/public/ca.crt", "--key-file", "/private/ca.key"}
+	for _, name := range names.leafDNSNames {
+		command = append(command, "--leaf-dns-name", name)
+	}
+	for _, name := range names.upstreamDNSNames {
+		command = append(command, "--upstream-leaf-name", name)
+	}
+	return command
+}
+
 func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest string, names resourceNames) ([]byte, error) {
 	config = withRouteDefaults(config)
 	if run.Egress.Mode == "mediated" && run.Egress.Enforced && run.Egress.Transport != "transparent" {
@@ -301,30 +334,24 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 		services["agent"] = agent
 	}
 	if run.Egress.Mode == "mediated" {
+		caLabels := make(map[string]string, len(labels)+1)
+		for key, value := range labels {
+			caLabels[key] = value
+		}
+		caLabels[egressCANameSetDigestLabel] = egressCANameSetFor(run).digest()
 		agent := services["agent"]
 		agent.Volumes = append(agent.Volumes, "egress-public:/nvt-egress-ca:ro")
 		services["agent"] = agent
 		services["egressd"] = composeService{
-			Image: config.EgressdImage, User: "0:0", Restart: "unless-stopped", Labels: labels,
+			Image: config.EgressdImage, User: "0:0", Restart: "unless-stopped", Labels: caLabels,
 			Environment: map[string]string{"NVT_EGRESSD_CONFIG": "/private/egressd.json", "NVT_BROKER_TOKEN_FILE": "/private/broker-token"},
 			Volumes:     []string{"egress-private:/private:ro", "egress-public:/public:ro"},
 			Networks:    []string{"agents-proxy", "run-internal", "egress-private"},
 			DependsOn:   map[string]composeDependency{"ca-init": {Condition: "service_completed_successfully"}},
 		}
-		caCommand := []string{"--cert-file", "/public/ca.crt", "--key-file", "/private/ca.key"}
-		if run.Egress.Transport == "redirect" {
-			caCommand = append(caCommand, "--leaf-dns-name", "egressd")
-			for _, host := range catalogLeafNames(run) {
-				caCommand = append(caCommand, "--upstream-leaf-name", host)
-			}
-		} else {
-			for _, host := range egressLeafNames(run) {
-				caCommand = append(caCommand, "--upstream-leaf-name", host)
-			}
-		}
 		services["ca-init"] = composeService{
-			Image: config.EgressdImage, User: "0:0", NetworkMode: "none", Entrypoint: []string{"/usr/local/bin/egress-ca-init"}, Command: caCommand,
-			Volumes: []string{"egress-private:/private", "egress-public:/public"}, Labels: labels,
+			Image: config.EgressdImage, User: "0:0", NetworkMode: "none", Entrypoint: []string{"/usr/local/bin/egress-ca-init"}, Command: caInitCommand(run),
+			Volumes: []string{"egress-private:/private", "egress-public:/public"}, Labels: caLabels,
 		}
 		if run.Egress.Transport == "forward-proxy" || run.Egress.Transport == "transparent" || hasCatalogGrant(run) {
 			services["captured"] = composeService{

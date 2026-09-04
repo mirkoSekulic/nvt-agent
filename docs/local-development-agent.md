@@ -69,6 +69,18 @@ never candidates. Replacement finishes exact-owned container, network,
 persistent-volume, broker-registration, and controller cleanup before the new
 immutable snapshot becomes runnable.
 
+For an approved in-place workstation reconciliation, the controller compares
+the exact egress CA DNS-name set in its previous immutable snapshot with the
+trusted desired snapshot. If it changed, the controller stops the agent and
+egressd, asks `egress-ca-init` to validate the durable keypair against the old
+set, and only then requests rotation in that workstation's private CA volume.
+The replacement CA is published before egressd and the agent are recreated;
+workspace, runtime-home, Docker-data, enrollment, and unrelated workstation
+volumes are not touched. An unchanged set preserves the CA. Missing,
+malformed, mismatched, or unexpectedly constrained CA material fails closed
+without being treated as ordinary name drift. Repair that material explicitly
+or restore the workstation's exact CA volume before retrying.
+
 ## Troubleshooting
 
 - Missing, permissive, oversized, symlinked, or escaping inputs fail before

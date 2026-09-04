@@ -26,6 +26,8 @@ const (
 	seedHelperValue               = "volume-seed-v1"
 	agentConfinementRevisionLabel = "io.nvt.local-controller.agent-confinement-revision"
 	agentConfinementRevision      = "1"
+	egressCANameSetDigestLabel    = "io.nvt.local-controller.egress-ca-name-set-digest"
+	egressCARotationMarker        = "ca.key.rotation"
 )
 
 type Backend struct {
@@ -319,6 +321,12 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 	if err := atomicWrite(names.composeFile, plan, 0o600); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
+	if rollout && run.Egress.Mode == "mediated" && desired.PreviousResolved.Egress.Mode == "mediated" &&
+		egressCANameSetFor(run).digest() != egressCANameSetFor(*desired.PreviousResolved).digest() {
+		if err := backend.reconcileDesiredCANameSet(operationContext, names, labels, *desired.PreviousResolved, run); err != nil {
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
+		}
+	}
 	if requiresConfinementProof(run) {
 		if err := backend.removeOutdatedConfinementAgent(operationContext, names.project, labels); err != nil {
 			if errors.Is(err, errOwnershipConflict) {
@@ -541,6 +549,64 @@ func (backend *Backend) reconcileComposeCARotation(ctx context.Context, names re
 		return false, err
 	}
 	return true, nil
+}
+
+// reconcileDesiredCANameSet runs only for a controller-approved rollout with
+// both the previous and desired immutable snapshots available. The current
+// name set is probed first so retries after a completed rotation are no-ops.
+// A stale CA is rotated only after ca-init proves that the complete keypair is
+// valid for the previous trusted name set; malformed or unrelated material
+// therefore remains a hard failure and never receives a rotation marker.
+func (backend *Backend) reconcileDesiredCANameSet(ctx context.Context, names resourceNames, labels ownedLabels, previous, desired resolvedrun.ResolvedAgentRun) error {
+	currentState, currentErr := backend.checkComposeCA(ctx, names, desired)
+	if currentErr == nil {
+		if currentState == "renewal-required" {
+			return backend.runComposeCAInit(ctx, names, desired)
+		}
+		return nil
+	}
+	if _, err := backend.checkComposeCA(ctx, names, previous); err != nil {
+		return errors.New("durable egress CA does not match the previous or desired name set")
+	}
+	if err := backend.seedManagedFiles(ctx, names.egressPrivate, map[string]seedFile{
+		egressCARotationMarker: {content: []byte("rotation-in-progress\n"), mode: 0o600},
+	}, labels); err != nil {
+		return err
+	}
+	if err := backend.runComposeCAInit(ctx, names, desired); err != nil {
+		return err
+	}
+	if err := os.Remove(composeCARolloutPath(names)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (backend *Backend) checkComposeCA(ctx context.Context, names resourceNames, run resolvedrun.ResolvedAgentRun) (string, error) {
+	arguments := []string{"compose", "-p", names.project, "-f", names.composeFile, "run", "--rm", "-e", "NVT_EGRESS_CA_CHECK_ONLY=1", "ca-init"}
+	arguments = append(arguments, caInitCommand(run)...)
+	output, err := backend.docker.Run(ctx, nil, arguments...)
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(output))
+	if value == "renewal-required" {
+		return value, nil
+	}
+	if !strings.HasPrefix(value, "renew-after=") {
+		return "", errors.New("invalid egress CA check result")
+	}
+	if _, err := time.Parse(time.RFC3339, strings.TrimPrefix(value, "renew-after=")); err != nil {
+		return "", errors.New("invalid egress CA renewal schedule")
+	}
+	return value, nil
+}
+
+func (backend *Backend) runComposeCAInit(ctx context.Context, names resourceNames, run resolvedrun.ResolvedAgentRun) error {
+	arguments := []string{"compose", "-p", names.project, "-f", names.composeFile, "run", "--rm", "ca-init"}
+	arguments = append(arguments, caInitCommand(run)...)
+	_, err := backend.docker.Run(ctx, nil, arguments...)
+	return err
 }
 
 func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRun) error {
