@@ -13,6 +13,8 @@ import (
 )
 
 type EpicAttempt struct {
+	PR            *EpicPRAssociation               `json:"pr,omitempty"`
+	PRReason      string                           `json:"prReason,omitempty"`
 	MayBeAccepted bool                             `json:"mayBeAccepted,omitempty"`
 	Generation    int64                            `json:"generation"`
 	Source        GitHubIssue                      `json:"source"`
@@ -24,17 +26,19 @@ type EpicAttempt struct {
 }
 
 type EpicSchedule struct {
-	Version    int              `json:"version"`
-	Children   []EpicGraphChild `json:"children"`
-	Attempts   []EpicAttempt    `json:"attempts"`
-	GraphError string           `json:"graphError,omitempty"`
-	Revision   int64            `json:"-"`
+	PRAmbiguity string           `json:"prAmbiguity,omitempty"`
+	Version     int              `json:"version"`
+	Children    []EpicGraphChild `json:"children"`
+	Attempts    []EpicAttempt    `json:"attempts"`
+	GraphError  string           `json:"graphError,omitempty"`
+	Revision    int64            `json:"-"`
 }
 
 type EpicSchedulingStore interface {
 	EpicStateStore
 	LoadEpicSchedule(context.Context, Repository, EpicRecord) (EpicSchedule, error)
 	SaveEpicSchedule(context.Context, Repository, EpicRecord, *EpicSchedule) error
+	PauseEpicForPRAmbiguity(context.Context, Repository, *EpicRecord, *EpicSchedule) error
 	GetEpicProjection(context.Context, Repository, int, int) (EpicProjection, error)
 	ClaimEpicProjection(context.Context, Repository, int, int, time.Time) (bool, error)
 	SaveEpicProjection(context.Context, Repository, int, int, EpicProjection) error
@@ -58,15 +62,32 @@ CREATE TABLE IF NOT EXISTS epic_projections (
 }
 
 func (r EpicSchedule) validate(repo Repository, epic EpicRecord) error {
-	if r.Version != 1 || r.Revision < 0 {
+	if (r.Version != 1 && r.Version != 2) || r.Revision < 0 {
 		return errors.New("unsupported epic scheduling state")
 	}
 	if err := validateEpicGraph(repo, epic.ParentIssue, r.Children); err != nil {
 		return err
 	}
+	if r.Version == 1 && r.PRAmbiguity != "" {
+		return errors.New("PR state in version-one scheduling record")
+	}
 	keys := map[string]bool{}
-	active := 0
+	active, accepted := 0, 0
 	for _, a := range r.Attempts {
+		if r.Version == 1 && (a.PR != nil || a.PRReason != "") {
+			return errors.New("PR state in version-one scheduling record")
+		}
+		if a.State != "accepted" && (a.PR != nil || a.PRReason != "") {
+			return errors.New("unaccepted attempt has PR state")
+		}
+		if a.PR != nil {
+			if err := a.PR.validate(repo, a.Source); err != nil {
+				return err
+			}
+			if a.PR.ObservedAt.Before(a.AcceptedAt) || a.PRReason != "" || r.PRAmbiguity != "" {
+				return errors.New("contradictory epic PR association")
+			}
+		}
 		key, err := EpicAdmissionKey(repo, epic.ParentIssue, a.Source.Number, a.Generation, 1)
 		sourceRepo, sourceErr := epicIssueRepository(a.Source)
 		if err != nil || sourceErr != nil || a.Generation > epic.Generation ||
@@ -84,6 +105,7 @@ func (r EpicSchedule) validate(repo Repository, epic EpicRecord) error {
 		case "pending":
 			active++
 		case "accepted":
+			accepted++
 			if a.MayBeAccepted {
 				return errors.New("accepted attempt is still uncertain")
 			}
@@ -105,6 +127,9 @@ func (r EpicSchedule) validate(repo Repository, epic EpicRecord) error {
 			return errors.New("invalid accepted AgentRun identity")
 		}
 	}
+	if r.PRAmbiguity != "" && accepted != 1 {
+		return errors.New("PR ambiguity requires an accepted child")
+	}
 	if active > epic.MaxParallel {
 		return errors.New("epic admission capacity exceeded")
 	}
@@ -116,7 +141,7 @@ func (s *SQLiteStateStore) LoadEpicSchedule(ctx context.Context, repo Repository
 	var revision int64
 	err := s.db.QueryRowContext(ctx, `SELECT revision, record FROM epic_scheduling WHERE repo_key=? AND parent_issue=?`, epic.Repository, epic.ParentIssue).Scan(&revision, &raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return EpicSchedule{Version: 1}, nil
+		return EpicSchedule{Version: 2}, nil
 	}
 	if err != nil {
 		return EpicSchedule{}, err
@@ -129,12 +154,33 @@ func (s *SQLiteStateStore) LoadEpicSchedule(ctx context.Context, repo Repository
 	if err := record.validate(repo, epic); err != nil {
 		return EpicSchedule{}, err
 	}
+	// Upgrade the reviewed stage-two records in memory; frozen admission
+	// requests and work identities remain byte-for-byte unchanged.
+	record.Version = 2
 	return record, nil
 }
 
 // CAS serializes graph selection and durable reservation before any network
 // admission. Commands participate through the exact control-record comparison.
 func (s *SQLiteStateStore) SaveEpicSchedule(ctx context.Context, repo Repository, epic EpicRecord, record *EpicSchedule) error {
+	return s.saveEpicSchedule(ctx, repo, epic, record, nil)
+}
+
+// Ambiguity and the control pause commit together, before any status write.
+func (s *SQLiteStateStore) PauseEpicForPRAmbiguity(ctx context.Context, repo Repository, epic *EpicRecord, record *EpicSchedule) error {
+	if record.PRAmbiguity == "" || epic.State == EpicCanceled {
+		return errors.New("invalid epic PR pause")
+	}
+	next := *epic
+	next.State = EpicPaused
+	if err := s.saveEpicSchedule(ctx, repo, *epic, record, &next); err != nil {
+		return err
+	}
+	*epic = next
+	return nil
+}
+
+func (s *SQLiteStateStore) saveEpicSchedule(ctx context.Context, repo Repository, epic EpicRecord, record *EpicSchedule, next *EpicRecord) error {
 	if err := record.validate(repo, epic); err != nil {
 		return err
 	}
@@ -147,6 +193,35 @@ func (s *SQLiteStateStore) SaveEpicSchedule(ctx context.Context, repo Repository
 		return err
 	}
 	defer tx.Rollback()
+	// Serialize writers before reading the previous association. Control commands
+	// also write this row, so a concurrent pause/cancel invalidates the snapshot.
+	if _, err := tx.ExecContext(ctx, `UPDATE producer_epics SET record=record WHERE repo_key=? AND parent_issue=?`, epic.Repository, epic.ParentIssue); err != nil {
+		return err
+	}
+	var previousRaw string
+	previousErr := tx.QueryRowContext(ctx, `SELECT record FROM epic_scheduling WHERE repo_key=? AND parent_issue=?`, epic.Repository, epic.ParentIssue).Scan(&previousRaw)
+	if previousErr == nil {
+		var previous EpicSchedule
+		if err := decodeEpicJSON([]byte(previousRaw), &previous); err != nil {
+			return err
+		}
+		for _, old := range previous.Attempts {
+			if old.PR == nil {
+				continue
+			}
+			preserved := false
+			for _, a := range record.Attempts {
+				if a.Request.Work.ID == old.Request.Work.ID && a.Source.ID == old.Source.ID && reflect.DeepEqual(a.PR, old.PR) {
+					preserved = true
+				}
+			}
+			if !preserved {
+				return errors.New("established epic PR association is immutable")
+			}
+		}
+	} else if !errors.Is(previousErr, sql.ErrNoRows) {
+		return previousErr
+	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO epic_scheduling(repo_key,parent_issue,revision,record) VALUES (?,?,1,?)
 ON CONFLICT(repo_key,parent_issue) DO UPDATE SET revision=revision+1,record=excluded.record WHERE revision=?`, epic.Repository, epic.ParentIssue, string(raw), record.Revision)
 	if err != nil {
@@ -169,6 +244,18 @@ ON CONFLICT(repo_key,parent_issue) DO UPDATE SET revision=revision+1,record=excl
 	}
 	if !reflect.DeepEqual(current, epic) {
 		return errEpicStateChanged
+	}
+	if next != nil {
+		if err := next.Validate(); err != nil {
+			return err
+		}
+		controlJSON, err := json.Marshal(next)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE producer_epics SET record=? WHERE repo_key=? AND parent_issue=?`, string(controlJSON), epic.Repository, epic.ParentIssue); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
