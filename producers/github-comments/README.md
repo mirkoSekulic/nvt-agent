@@ -371,10 +371,9 @@ ownership. Workflow, initiating principal, and parallelism are frozen at start.
 | `retry` | Moves `paused` to `pending` with a new generation; rejected admissions can be attempted again. |
 
 An accepted child keeps the single admission slot, including after pause/retry,
-issue closure, or removal from the epic. **This stage does not discover PRs,
-associate them, inspect AgentRun lifecycle, or advance after merges.** A child
-remains `Running` after acceptance until the later verified merge stage is
-implemented. Do not use issue closure or agent completion prose to release it.
+issue closure, PR association, or removal from the epic. **This stage does not
+inspect AgentRun lifecycle or advance after merges.** Do not use issue closure,
+a watcher event, or agent completion prose to release the slot.
 Cancel stops new admissions; it does not cancel an already accepted AgentRun.
 
 The initiator's immutable principal and configured epic workflow are used for
@@ -392,7 +391,7 @@ generation unchanged; correct policy, then explicitly pause/retry. Deferred or
 uncertain submissions remain `Queued` and reserve their selection until resolved.
 
 One producer-owned parent comment and one per child are edited in place. Parent
-rows sort by issue number and report `Blocked`, `Queued`, `Running`, or `Failed`,
+rows sort by issue number and report `Blocked`, `Queued`, `Running`, `PR open`, or `Failed`,
 with reasons. Child status includes the accepted AgentRun namespace/name (local
 session name when available), acceptance time, and work ID. Graph read failures
 retain the last durable snapshot and visibly block scheduling. Comment and
@@ -402,6 +401,41 @@ creation recovers uncertain writes from bot-authored comments; copied human
 markers cannot redirect edits. Accepted/rejected reactions are applied to the
 child status comment. Deleted status comments remain a visible delivery failure
 in producer logs; they are not silently replaced with status noise.
+
+Epic child implementation prompts additionally require standalone `Closes #<child>`
+and `Part of #<epic>` lines in the PR body, exactly one delivery PR, and registration
+with the existing `github-watch` command when available. Ordinary PR-create prompts
+retain their existing `Refs` contract. The producer discovers candidates through
+GitHub GraphQL's native
+[`closedByPullRequestsReferences`](https://docs.github.com/en/graphql/reference/issues#issue)
+connection, using the configured GitHub API base, installation token, and HTTP
+transport. Epic installations need read access to pull requests as well as issues,
+and their provider route must permit POST `/graphql` (or `/api/graphql` with an
+Enterprise REST base ending in `/api/v3`). Inaccessible or partial responses retry
+without establishing a mapping. The existing watcher remains useful for agent PR
+maintenance; its advisory events are not association authority.
+
+A valid candidate is an open PR natively linked to the accepted child's immutable
+issue identity, in the same repository, with a standalone `Part of #<epic>` line
+in its PR metadata. A URL pasted into an issue/comment or an agent completion claim
+cannot establish that native relationship. Discovery reads every connection page
+before deciding uniqueness, deduplicating by immutable PR node ID. No valid
+candidate leaves the child `Running`; exactly one persists repository name and
+node ID, PR number and node ID, URL, and observation time before projecting
+`PR open` and the URL on both parent and child. This is an observed association,
+not ongoing verification that the PR remains open: merge/closed-PR lifecycle
+reconciliation is deferred to #299.
+
+Multiple valid candidates atomically persist the ambiguity and pause the epic.
+Parent and child statuses list the candidate URLs and ask the initiator to close
+or unlink unintended PRs, then resume. Discovery continues while paused so a
+resolved mapping can be recorded, but it never resumes the epic automatically.
+An unavailable read retains any prior ambiguity. Established associations cannot
+be replaced or erased by rediscovery, issue edits, or restart. Version-one
+scheduling records upgrade without changing their frozen requests or work IDs;
+new PR state uses scheduling version two. SQLite commits and status display
+retries remain independent, so comment failures cannot lose an association or
+schedule another run.
 
 The producer atomically commits each control change and its command receipt
 before advancing the repository cursor. Receipts include negative outcomes and

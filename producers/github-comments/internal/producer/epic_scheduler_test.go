@@ -20,6 +20,9 @@ func nativeIssue(number int) GitHubIssue {
 }
 
 type schedulingGitHub struct {
+	prs     []EpicPRCandidate
+	prErr   bool
+	prCalls int
 	*fakeGitHubClient
 	children                                 []GitHubIssue
 	blockers                                 map[int][]GitHubIssue
@@ -629,4 +632,12 @@ func TestEpicNoEligibleChildAndControlGates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (g *schedulingGitHub) ListEpicClosingPRs(context.Context, Repository, GitHubIssue) ([]EpicPRCandidate, error) {
+	g.prCalls++
+	if g.prErr {
+		return nil, errors.New("native linkage unavailable")
+	}
+	return g.prs, nil
 }

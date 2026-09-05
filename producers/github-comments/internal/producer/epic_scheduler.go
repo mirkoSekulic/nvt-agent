@@ -54,6 +54,9 @@ func (p *Poller) reconcileEpics(ctx context.Context, repo Repository) error {
 				return err
 			}
 		}
+		if err := p.associateEpicPRs(ctx, store, repo, &epic, &record); err != nil {
+			return err
+		}
 		// Display errors never alter admission state or block other epics/repos.
 		if err := p.projectEpic(ctx, store, github, repo, epic, record); err != nil {
 			return err
@@ -67,7 +70,7 @@ func (p *Poller) scheduleEpicChild(ctx context.Context, store EpicSchedulingStor
 	for i, a := range record.Attempts {
 		if a.State == "accepted" {
 			return nil
-		} // No completion or retry of accepted work in stage 2.
+		} // Accepted work retains its slot; merge advancement is a later stage.
 		if a.State == "pending" {
 			pending = i
 		}
@@ -90,12 +93,11 @@ func (p *Poller) scheduleEpicChild(ctx context.Context, store EpicSchedulingStor
 				return err
 			}
 			userID, _ := strconv.ParseInt(epic.Initiator.Subject, 10, 64)
-			command := Command{Intent: CommandIntentPRCreate}
 			source := GitHubIssueComment{User: GitHubUser{ID: userID, Login: epic.Initiator.DisplayName}}
 			request := profiledScheduleAdmissionRequest{
 				Workflow: epic.Workflow,
 				Work:     profiledScheduleAdmissionWork{ID: key, Title: child.Issue.Title, URL: child.Issue.HTMLURL, Repository: epic.Repository, Principal: epic.Initiator},
-				Input:    profiledScheduleAdmissionInput{Prompt: buildPrompt(repo, child.Issue, comments, source, command)},
+				Input:    profiledScheduleAdmissionInput{Prompt: buildEpicPrompt(repo, child.Issue, comments, source, epic.ParentIssue)},
 			}
 			if len(request.Input.Prompt) > maxResolvedRunPromptBytes {
 				record.GraphError = "child prompt exceeds admission limit"
@@ -174,7 +176,13 @@ func epicChildStatus(epic EpicRecord, record EpicSchedule, child EpicGraphChild)
 		}
 		switch a.State {
 		case "accepted":
-			return "Running", "accepted; awaiting verified PR merge support", a
+			if record.PRAmbiguity != "" {
+				return "Blocked", record.PRAmbiguity, a
+			}
+			if a.PR != nil {
+				return "PR open", "associated PR: " + a.PR.URL + "; awaiting merge advancement support", a
+			}
+			return "Running", firstNonEmpty(a.PRReason, "awaiting a verified linked PR"), a
 		case "rejected":
 			if a.Generation == epic.Generation {
 				return "Failed", a.Reason, a
@@ -239,6 +247,9 @@ func (p *Poller) projectEpic(ctx context.Context, store EpicSchedulingStore, git
 	fmt.Fprintf(&parent, "Epic #%d: **%s** (generation %d). Workflow: `%s`; maxParallel: %d.\n", epic.ParentIssue, epic.State, epic.Generation, epic.Workflow, epic.MaxParallel)
 	if record.GraphError != "" {
 		fmt.Fprintf(&parent, "\n**Failed**: %s. Scheduling is blocked.\n", record.GraphError)
+	}
+	if record.PRAmbiguity != "" {
+		fmt.Fprintf(&parent, "\n**PR ambiguity**: %s.\n", record.PRAmbiguity)
 	}
 	parent.WriteString("\n| Child | Status | Detail |\n| --- | --- | --- |\n")
 	for _, child := range children {
