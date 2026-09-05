@@ -96,7 +96,7 @@ func TestAzureCLIThroughMediatedEgress(t *testing.T) {
 	if err := os.WriteFile(config, []byte(metadata), 0600); err != nil {
 		t.Fatal(err)
 	}
-	baseEnv := []string{"PATH=" + filepath.Join(agentHome, ".local/bin") + ":/usr/bin:/bin", "HOME=" + agentHome,
+	baseEnv := []string{"PATH=" + filepath.Join(agentHome, ".local/bin") + ":" + filepath.Join(agentHome, "fixture-bin"), "HOME=" + agentHome,
 		"NVT_STATE_DIR=" + filepath.Join(agentHome, ".nvt-agent"), "NVT_WORKSPACE=" + agentHome, "NVT_EGRESS_MODE=mediated",
 		"NVT_PLUGIN_CONFIG=" + config, "NVT_PLUGIN_EGRESS_PROVIDER=azure-one",
 		"AZURE_EXTENSION_DIR=" + os.Getenv("AZURE_EXTENSION_DIR"), "REQUESTS_CA_BUNDLE=" + cert}

@@ -44,6 +44,15 @@ def prepare(home, python):
         "grants": [{"provider": name, "materialization": "header-inject"} for name in config["providers"]]}))
     binary = home / ".local/bin"
     binary.mkdir(parents=True, exist_ok=True)
+    # Callers expose only fixture directories on PATH. The launchers need
+    # bash, but the runner's unrelated tools (notably /usr/bin/az) must stay out.
+    helpers = home / "fixture-bin"
+    helpers.mkdir(exist_ok=True)
+    bash = shutil.which("bash", path=os.defpath)
+    if bash is None:
+        raise RuntimeError("fixture requires bash")
+    if not (helpers / "bash").exists():
+        (helpers / "bash").symlink_to(bash)
     egress = binary / "plugin-egress-exec"
     egress.write_text("#!/usr/bin/env bash\nexec " + shlex.quote(sys.executable) + " " +
                       shlex.quote(str(ROOT / "runtime/core/plugin-egress-exec.py")) + ' "$@"\n')

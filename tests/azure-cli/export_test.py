@@ -26,7 +26,7 @@ class ExportTests(unittest.TestCase):
                 "'proxy':os.environ['HTTPS_PROXY'], 'plugin':os.environ['NVT_PLUGIN_NAME'],"
                 "'config':os.environ['NVT_PLUGIN_CONFIG']})); sys.exit(7)") + ' "$@"\n')
             probe.chmod(0o755)
-            env = {"HOME": tmp, "PATH": str(home / ".local/bin") + ":/usr/bin:/bin",
+            env = {"HOME": tmp, "PATH": os.pathsep.join([str(home / ".local/bin"), str(home / "fixture-bin")]),
                    "NVT_STATE_DIR": str(home / ".nvt-agent"), "NVT_WORKSPACE": tmp,
                    "NVT_EGRESS_MODE": "mediated", "NVT_PLUGIN_CONFIG": str(config),
                    "NVT_PLUGIN_EGRESS_PROVIDER": "azure-one",
@@ -47,6 +47,23 @@ class ExportTests(unittest.TestCase):
                 self.assertEqual(context["provider"], "azure-one")
                 self.assertEqual(context["proxy"], env["NVT_EGRESS_FORWARD_PROXY_URL_AZURE_ONE"])
                 self.assertEqual(context["config"], str(home / ".nvt-agent/plugins/azure-cli/config.yaml"))
+
+            # Model an unrelated Azure CLI preinstalled on the CI runner.
+            # Its directory is intentionally absent from the controlled PATH.
+            runner_bin = home / "runner-bin"
+            runner_bin.mkdir()
+            runner_az = runner_bin / "az"
+            runner_az.write_text("#!/bin/sh\nexit 99\n")
+            runner_az.chmod(0o755)
+            polluted = {**env, "PATH": env["PATH"] + os.pathsep + str(runner_bin)}
+            rejected = subprocess.run([sys.executable, str(FIXTURE), str(probe)], env=polluted,
+                                      capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("would shadow existing command: " + str(runner_az), rejected.stderr)
+            isolated = subprocess.run([sys.executable, str(FIXTURE), str(probe)], env=env,
+                                      capture_output=True, text=True)
+            self.assertEqual(isolated.returncode, 0, isolated.stderr)
+            self.assertTrue(runner_az.is_file())  # Never remove/alter runner tools.
 
 
 if __name__ == "__main__":
