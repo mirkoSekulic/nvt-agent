@@ -52,7 +52,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	githubClient := producer.NewGitHubAPIClient(cfg.GitHubAPIBaseURL, cfg.UserAgent, tokenSource, httpClient)
 	var k8sClient ctrlclient.Client
-	if cfg.Submission.Mode == producer.SubmissionModeDirect {
+	if cfg.Submission.Mode == producer.SubmissionModeDirect || cfg.Epics.Enabled {
 		k8sClient, err = producer.NewKubernetesClient(*kubeconfig)
 		if err != nil {
 			return fmt.Errorf("create Kubernetes client: %w", err)

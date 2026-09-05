@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,8 +16,12 @@ import (
 )
 
 type epicFakeGitHub struct {
-	prs   map[int][]EpicPR
-	prErr error
+	verified  map[int]epicVerifiedPR
+	phases    map[string]nvtv1alpha1.AgentRunPhase
+	poller    *Poller
+	recovered *scheduleAdmissionAgentRun
+	prs       map[int][]EpicPR
+	prErr     error
 	fakeGitHubClient
 	graph      []EpicGraphNode
 	graphErr   error
@@ -61,6 +68,9 @@ func epicFixture(t *testing.T, handler http.HandlerFunc) (*Poller, *epicFakeGitH
 	gh.issues = map[int]GitHubIssue{1: {Number: 1}}
 	gh.updatedComments = []GitHubIssueComment{{ID: 1, IssueURL: "https://api.github.com/repos/o/r/issues/1", Body: "/nvtagent epic start", User: GitHubUser{ID: 42, Login: "maintainer"}}}
 	p := NewPoller(cfg, gh, s, store, nil)
+	p.EpicRuns = gh
+	gh.poller = p
+	gh.phases = map[string]nvtv1alpha1.AgentRunPhase{}
 	read := func() Epic {
 		t.Helper()
 		es, err := p.State.(*SQLiteStateStore).ListEpics(ctx, cfg.Repositories[0])
@@ -127,7 +137,8 @@ func TestEpicUncertainAdmissionReplaysExactRequest(t *testing.T) {
 		json.NewDecoder(r.Body).Decode(&req)
 		requests = append(requests, req)
 		if len(requests) == 1 {
-			w.WriteHeader(503)
+			w.WriteHeader(429)
+			fmt.Fprint(w, `{"scheduled":false,"reason":"max-parallelism-reached"}`)
 			return
 		}
 		w.WriteHeader(202)
@@ -207,4 +218,32 @@ func TestEpicGraphValidationAndParallelEligibility(t *testing.T) {
 
 func (f *epicFakeGitHub) LinkedEpicPRs(_ context.Context, _ Repository, n int) ([]EpicPR, error) {
 	return f.prs[n], f.prErr
+}
+
+func (f *epicFakeGitHub) VerifyEpicPR(_ context.Context, _ Repository, n int) (epicVerifiedPR, error) {
+	if pr, ok := f.verified[n]; ok {
+		return pr, nil
+	}
+	b := false
+	pr := epicVerifiedPR{NodeID: fmt.Sprintf("PR_%d", n), Number: n, State: "open", Merged: &b}
+	pr.Base.Repo.FullName = "o/r"
+	return pr, nil
+}
+func (f *epicFakeGitHub) FindEpicRun(context.Context, Repository, string) (*scheduleAdmissionAgentRun, error) {
+	return f.recovered, nil
+}
+func (f *epicFakeGitHub) Get(ctx context.Context, ns, name string) (*nvtv1alpha1.AgentRun, error) {
+	es, err := f.poller.State.(*SQLiteStateStore).ListEpics(ctx, Repository{Owner: "o", Name: "r"})
+	if err != nil {
+		return nil, err
+	}
+	var key string
+	for _, e := range es {
+		for _, c := range e.Children {
+			if c.Run != nil && c.Run.Name == name || c.AdmissionPending && f.recovered != nil && name == f.recovered.Name {
+				key = c.Key
+			}
+		}
+	}
+	return &nvtv1alpha1.AgentRun{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, UID: types.UID("uid-" + name), Annotations: map[string]string{"nvt.dev/work-id": key, "nvt.dev/work-repository": "o/r"}}, Status: nvtv1alpha1.AgentRunStatus{Phase: f.phases[name]}}, nil
 }

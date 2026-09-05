@@ -67,8 +67,10 @@ func installEpicGraph(e *Epic, graph []EpicGraphNode) error {
 	if err := validateEpicGraph(e.Repository, e.Parent, graph); err != nil {
 		return err
 	}
+	graph = append([]EpicGraphNode(nil), graph...)
 	sort.Slice(graph, func(i, j int) bool { return graph[i].Issue.Number < graph[j].Issue.Number })
 	for i := range graph {
+		graph[i].Dependencies = append([]int(nil), graph[i].Dependencies...)
 		sort.Ints(graph[i].Dependencies)
 	}
 	if len(e.Children) == 0 {

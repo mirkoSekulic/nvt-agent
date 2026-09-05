@@ -32,6 +32,17 @@ func (p *Poller) reconcileEpics(ctx context.Context, repo Repository) error {
 		if err := p.reconcileEpic(ctx, store, gh, e); err != nil {
 			errs = append(errs, err)
 		}
+		latest, loadErr := store.ListEpics(ctx, repo)
+		if loadErr != nil {
+			errs = append(errs, loadErr)
+			continue
+		}
+		for j := range latest {
+			if latest[j].Parent == e.Parent {
+				*e = latest[j]
+				break
+			}
+		}
 		// Display is an independent projection; retry on every poll, including terminal epics.
 		if err := p.displayEpic(ctx, gh, e); err != nil {
 			errs = append(errs, err)
@@ -41,20 +52,52 @@ func (p *Poller) reconcileEpics(ctx context.Context, repo Repository) error {
 }
 
 func (p *Poller) reconcileEpic(ctx context.Context, store *SQLiteStateStore, gh epicGitHub, e *Epic) error {
-	if e.State != "active" {
+	if e.State == "cancelled" {
+		return p.observePausedEpic(ctx, store, e)
+	}
+	if e.State == "completed" {
 		return nil
+	}
+	if e.State == "paused" && !e.RetryRequested {
+		return p.observePausedEpic(ctx, store, e)
+	}
+	scope := fmt.Sprintf("%s|%s|%s", p.Submitter.config.Submission.AdmissionBaseURL, p.Submitter.config.Submission.ScheduleNamespace, p.Submitter.config.Submission.ScheduleName)
+	if e.AdmissionScope == "" {
+		e.AdmissionScope = scope
+	} else if e.AdmissionScope != scope {
+		e.State = "paused"
+		e.Reason = "Admission endpoint or schedule changed; restore the original producer configuration before resume"
+		return store.SaveEpic(ctx, e)
 	}
 	graph, err := gh.LoadEpicGraph(ctx, e.Repository, e.Parent)
 	if err != nil {
-		return err
+		return p.epicReadError(ctx, store, e, err)
 	}
 	if err := installEpicGraph(e, graph); err != nil {
 		e.State = "paused"
 		e.Reason = err.Error()
+		e.RetryRequested = false
 		return store.SaveEpic(ctx, e)
 	}
+	if err := p.recoverEpicAdmissions(ctx, e); err != nil {
+		return p.epicReadError(ctx, store, e, err)
+	}
+	for _, child := range e.Children {
+		if child.AdmissionPending && child.Run == nil {
+			e.RetryRequested = false
+			return store.SaveEpic(ctx, e)
+		}
+	}
+	if e.RetryRequested {
+		if err := p.retryEpic(ctx, e); err != nil {
+			return p.epicReadError(ctx, store, e, err)
+		}
+	}
 	if err := p.associateEpicPRs(ctx, e); err != nil {
-		return err
+		return p.epicReadError(ctx, store, e, err)
+	}
+	if err := p.observeEpicWork(ctx, e); err != nil {
+		return p.epicReadError(ctx, store, e, err)
 	}
 	projectEligibility(e)
 	if err := store.SaveEpic(ctx, e); err != nil {
@@ -78,38 +121,53 @@ func (p *Poller) reconcileEpic(ctx context.Context, store *SQLiteStateStore, gh 
 			if active >= e.MaxParallel {
 				break
 			}
-			c.Key = epicAttemptKey(*e, c.Issue.Number, c.Attempt)
 			comments, err := p.GitHub.ListIssueComments(ctx, e.Repository, c.Issue.Number)
 			if err != nil {
 				return err
 			}
+			c.Key = epicAttemptKey(*e, c.Issue.Number, c.Attempt)
 			c.Prompt = epicImplementationPrompt(*e, *c, comments)
+			c.RequestTitle = c.Issue.Title
+			c.RequestURL = c.Issue.HTMLURL
 			c.ScheduledAt = p.now().UTC()
-			// Persist the exact request before the network call: uncertain admission replays it.
+			// Persist the exact request before the network call: deferred admission replays it; uncertain outcomes use the work-key lookup.
 			if err := store.SaveEpic(ctx, e); err != nil {
 				return err
 			}
 			active++
 		}
+
+		c.AdmissionPending = true
+		if err := store.SaveEpic(ctx, e); err != nil {
+			return err
+		}
 		s := p.Submitter
 		s.config.Submission.Workflow = e.Workflow
 		s.config.Submission.CommandWorkflows = map[CommandIntent]string{CommandIntentPRCreate: e.Workflow}
-		result, err := s.submitScheduleAdmission(ctx, e.Repository, c.Issue, nil, GitHubIssueComment{User: e.Principal}, Command{Intent: CommandIntentPRCreate, epicPrompt: c.Prompt}, agentRunIdentity{Key: c.Key})
+		requestIssue := c.Issue
+		requestIssue.Title = c.RequestTitle
+		requestIssue.HTMLURL = c.RequestURL
+		admissionCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		result, err := s.submitScheduleAdmission(admissionCtx, e.Repository, requestIssue, nil, GitHubIssueComment{User: e.Principal}, Command{Intent: CommandIntentPRCreate, epicPrompt: c.Prompt}, agentRunIdentity{Key: c.Key})
+		cancel()
 		switch result.Outcome {
 		case schedulingOutcomeAccepted:
 			if result.AgentRun == nil || result.AgentRun.Name == "" || result.AgentRun.Namespace == "" {
-				c.Reason = "Admission accepted without a run identity; replaying the same attempt"
+				c.Reason = "Admission accepted without a run identity; recovering by exact work key"
 				if saveErr := store.SaveEpic(ctx, e); saveErr != nil {
 					return saveErr
 				}
 				return errors.New(c.Reason)
 			}
+			c.AdmissionPending = false
 			c.Run = result.AgentRun
 			c.State = "Running"
 			c.Reason = "Accepted by schedule admission"
 			c.Reaction = p.reactionForOutcome(result.Outcome)
 			c.ReactionPending = c.Reaction != ""
 		case schedulingOutcomeRejected:
+			c.AdmissionPending = false
+			c.Failure = "admission"
 			c.State = "Failed"
 			c.Reason = "Admission rejected; correct policy or credentials and use epic retry"
 			c.Key = ""
@@ -119,7 +177,10 @@ func (p *Poller) reconcileEpic(ctx context.Context, store *SQLiteStateStore, gh 
 			c.Reaction = p.reactionForOutcome(result.Outcome)
 			c.ReactionPending = c.Reaction != ""
 		default:
-			c.Reason = "Admission deferred or uncertain; retrying the same attempt"
+			if result.Outcome == schedulingOutcomeDeferred || result.Outcome == schedulingOutcomeNone {
+				c.AdmissionPending = false
+			}
+			c.Reason = "Admission deferred or uncertain; reconciling the same attempt"
 		}
 		if saveErr := store.SaveEpic(ctx, e); saveErr != nil {
 			return saveErr

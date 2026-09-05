@@ -24,6 +24,24 @@ type EpicConfig struct {
 
 func (c *EpicConfig) UnmarshalJSON(data []byte) error {
 	type plain EpicConfig
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New("epics must be an object")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, raw := range fields {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return errors.New("epic fields cannot be null")
+		}
+	}
+	if raw, ok := fields["maxParallel"]; ok {
+		var n int
+		if err := json.Unmarshal(raw, &n); err != nil || n < 1 || n > 16 {
+			return errors.New("epics.maxParallel must be between 1 and 16")
+		}
+	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
 	return d.Decode((*plain)(c))
@@ -51,32 +69,43 @@ func (c *EpicConfig) validate(s SubmissionConfig) error {
 }
 
 type Epic struct {
-	Repository  Repository
-	Parent      int
-	Principal   GitHubUser
-	Workflow    string
-	MaxParallel int
-	Generation  int
-	State       string
-	Reason      string
-	Version     int64
-	Marker      string
-	CommandID   int64
-	Children    []EpicChild
+	AdmissionScope string
+	RetryRequested bool
+	Repository     Repository
+	Parent         int
+	Principal      GitHubUser
+	Workflow       string
+	MaxParallel    int
+	Generation     int
+	State          string
+	Reason         string
+	Version        int64
+	Marker         string
+	CommandID      int64
+	Children       []EpicChild
 }
 type EpicChild struct {
-	PR              *EpicPR
-	Prompt          string
-	Reaction        string
-	ReactionPending bool
-	Issue           GitHubIssue
-	Dependencies    []int
-	Attempt         int
-	State           string
-	Reason          string
-	Key             string
-	Run             *scheduleAdmissionAgentRun
-	ScheduledAt     time.Time
+	RequestTitle     string
+	RequestURL       string
+	Failure          string
+	RunUID           string
+	RunTerminal      bool
+	RunFailed        bool
+	AdmissionPending bool
+	History          []EpicAttempt
+	Merged           bool
+	PR               *EpicPR
+	Prompt           string
+	Reaction         string
+	ReactionPending  bool
+	Issue            GitHubIssue
+	Dependencies     []int
+	Attempt          int
+	State            string
+	Reason           string
+	Key              string
+	Run              *scheduleAdmissionAgentRun
+	ScheduledAt      time.Time
 }
 
 func epicAttemptKey(e Epic, child, attempt int) string {
@@ -94,12 +123,23 @@ func (e Epic) validate() error {
 	default:
 		return errors.New("invalid epic lifecycle")
 	}
+	if e.State == "completed" && len(e.Children) == 0 {
+		return errors.New("completed epic has no children")
+	}
+	if len(e.Children) > maxEpicChildren {
+		return errors.New("too many persisted epic children")
+	}
 	seen := map[int]bool{}
 	for _, c := range e.Children {
 		if c.Issue.Number <= 0 || c.Issue.Number == e.Parent || seen[c.Issue.Number] || c.Attempt < 1 {
 			return errors.New("invalid epic child identity")
 		}
 		seen[c.Issue.Number] = true
+		switch c.Failure {
+		case "", "mapping", "run", "pr-closed", "admission", "issue-closed":
+		default:
+			return errors.New("unknown epic failure kind")
+		}
 		switch c.State {
 		case "Blocked", "Queued", "Running", "PR open", "Completed", "Failed":
 		default:
@@ -108,8 +148,50 @@ func (e Epic) validate() error {
 		if c.Key != "" && c.Key != epicAttemptKey(e, c.Issue.Number, c.Attempt) {
 			return errors.New("invalid epic attempt key")
 		}
+		if c.Key != "" && (c.Prompt == "" || c.ScheduledAt.IsZero()) {
+			return errors.New("epic attempt missing durable request")
+		}
+		if (c.State == "Running" || c.State == "PR open" || c.State == "Completed") && c.Run == nil {
+			return errors.New("epic child state requires an accepted run")
+		}
+		if c.State == "PR open" && c.PR == nil || c.State == "Completed" && (c.PR == nil || !c.Merged) {
+			return errors.New("epic child state requires verified PR evidence")
+		}
+		if c.State == "Failed" && (c.Reason == "" || c.Failure == "") {
+			return errors.New("epic failure requires an actionable reason")
+		}
+		if c.RunTerminal && c.Run == nil || c.RunFailed && !c.RunTerminal {
+			return errors.New("invalid terminal run state")
+		}
+		if c.PR != nil && (c.PR.ID == "" || c.PR.Number <= 0 || c.PR.HeadRefName != c.Key || !strings.EqualFold(c.PR.Repository.NameWithOwner, epicRepoKey(e.Repository))) {
+			return errors.New("invalid persisted PR identity")
+		}
 		if c.Run != nil && (c.Key == "" || c.Run.Name == "" || c.Run.Namespace == "") {
 			return errors.New("invalid accepted epic run")
+		}
+	}
+	if len(e.Children) > 0 {
+		graph := make([]EpicGraphNode, 0, len(e.Children))
+		runs := map[string]bool{}
+		completed := 0
+		for _, c := range e.Children {
+			graph = append(graph, EpicGraphNode{Issue: c.Issue, Dependencies: c.Dependencies})
+			if c.State == "Completed" {
+				completed++
+			}
+			if c.Run != nil {
+				key := c.Run.Namespace + "/" + c.Run.Name
+				if runs[key] {
+					return errors.New("AgentRun associated with multiple epic children")
+				}
+				runs[key] = true
+			}
+		}
+		if err := validateEpicGraph(e.Repository, e.Parent, graph); err != nil {
+			return err
+		}
+		if e.State == "completed" && completed != len(e.Children) {
+			return errors.New("epic completed without every child merge")
 		}
 	}
 	return nil
@@ -138,7 +220,7 @@ func (s *SQLiteStateStore) ListEpics(ctx context.Context, repo Repository) ([]Ep
 			return nil, err
 		}
 		var e Epic
-		if err := json.Unmarshal(raw, &e); err != nil {
+		if err := decodeEpic(raw, &e); err != nil {
 			return nil, err
 		}
 		if err := e.validate(); err != nil {
@@ -210,7 +292,7 @@ func (s *SQLiteStateStore) ApplyEpicCommand(ctx context.Context, repo Repository
 		if err != nil {
 			return err
 		}
-		if err := json.Unmarshal(raw, &e); err != nil {
+		if err := decodeEpic(raw, &e); err != nil {
 			return err
 		}
 		if err := e.validate(); err != nil {
@@ -245,15 +327,9 @@ func (s *SQLiteStateStore) ApplyEpicCommand(ctx context.Context, repo Repository
 			}
 		case "retry":
 			if e.State == "paused" {
-				for i := range e.Children {
-					c := &e.Children[i]
-					if c.State == "Failed" && c.Run == nil && c.Key == "" {
-						c.Attempt++
-						c.State = "Queued"
-						c.Reason = ""
-					}
-				}
+				e.RetryRequested = true
 			}
+
 		default:
 			return errors.New("unsupported epic command")
 		}
@@ -308,4 +384,18 @@ func (p *Poller) handleEpicCommand(ctx context.Context, repo Repository, comment
 		return nil
 	}
 	return store.ApplyEpicCommand(ctx, repo, parent, comment.User, comment.ID, command.EpicAction, p.Config.Epics)
+}
+
+type EpicAttempt struct {
+	Attempt int
+	Key     string
+	Run     *scheduleAdmissionAgentRun
+	PR      *EpicPR
+	Reason  string
+}
+
+func decodeEpic(raw []byte, e *Epic) error {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	return d.Decode(e)
 }

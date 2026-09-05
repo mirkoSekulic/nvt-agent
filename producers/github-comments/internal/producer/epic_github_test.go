@@ -88,3 +88,23 @@ func TestEpicCommentUpsertRecoversLostPostAndIgnoresSpoof(t *testing.T) {
 		t.Fatal(posts, patches)
 	}
 }
+
+func TestEpicMergeReadChecksRESTIdentityAndRateLimits(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/pulls/9" {
+			t.Error(r.URL)
+		}
+		fmt.Fprint(w, `{"node_id":"PR_9","number":9,"state":"closed","merged":true,"merged_at":"2026-09-05T12:00:00Z","base":{"repo":{"full_name":"o/r"}}}`)
+	}))
+	defer server.Close()
+	c := NewGitHubAPIClient(server.URL, "test", staticTokenSource("token"), server.Client())
+	pr, err := c.VerifyEpicPR(context.Background(), Repository{Owner: "o", Name: "r"}, 9)
+	if err != nil || pr.Merged == nil || !*pr.Merged || pr.NodeID != "PR_9" {
+		t.Fatal(pr, err)
+	}
+	for _, limited := range []bool{true, false} {
+		if epicPermanentError(&epicAPIError{Status: 403, RateLimited: limited}) == limited {
+			t.Fatal("rate limit classification")
+		}
+	}
+}

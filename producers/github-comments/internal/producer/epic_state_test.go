@@ -3,6 +3,7 @@ package producer
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"path/filepath"
 	"testing"
 )
@@ -113,5 +114,32 @@ func TestEpicCommandTransactionsAndRestart(t *testing.T) {
 	apply(7, "resume", user)
 	if readAll, _ := s.ListEpics(ctx, repo); readAll[0].State != "cancelled" {
 		t.Fatal("cancel resumed")
+	}
+}
+
+func TestEpicStrictConfigurationAndPersistedState(t *testing.T) {
+	for _, raw := range []string{`null`, `{"enabled":null}`, `{"enabled":true,"workflow":"x","maxParallel":0}`, `{"enabled":true,"workflow":"x","maxParallel":1.5}`, `{"enabled":true,"workflow":"x","maxParallel":null}`} {
+		var cfg EpicConfig
+		if json.Unmarshal([]byte(raw), &cfg) == nil {
+			t.Fatal("accepted malformed config", raw)
+		}
+	}
+	p, _, read, _ := epicFixture(t, func(w http.ResponseWriter, r *http.Request) { acceptedEpic(w) })
+	if err := p.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	initial := read()
+	for _, mutate := range []func(*Epic){func(e *Epic) { e.Children[0].State = "Completed" }, func(e *Epic) { e.Children[0].Key = "other" }, func(e *Epic) { e.Children[0].Failure = "unknown" }, func(e *Epic) { e.Children[0].Dependencies = []int{3} }} {
+		data, _ := json.Marshal(initial)
+		var e Epic
+		json.Unmarshal(data, &e)
+		mutate(&e)
+		if e.validate() == nil {
+			t.Fatal("invalid durable state accepted", e)
+		}
+	}
+	var e Epic
+	if decodeEpic([]byte(`{"Unknown":true}`), &e) == nil {
+		t.Fatal("unknown durable field")
 	}
 }

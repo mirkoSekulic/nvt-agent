@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 func (c *GitHubAPIClient) CanControlEpic(ctx context.Context, repo Repository, user GitHubUser) (bool, error) {
@@ -28,8 +29,11 @@ func (c *GitHubAPIClient) epicIssuePages(ctx context.Context, path string) ([]Gi
 	var all []GitHubIssue
 	for page := 1; page <= 2; page++ {
 		var batch []GitHubIssue
-		if err := c.getJSON(ctx, fmt.Sprintf("%s?per_page=100&page=%d", path, page), &batch); err != nil {
+		if err := c.epicJSON(ctx, http.MethodGet, fmt.Sprintf("%s?per_page=100&page=%d", path, page), nil, &batch); err != nil {
 			return nil, err
+		}
+		if batch == nil {
+			return nil, errors.New("incomplete native epic list response")
 		}
 		all = append(all, batch...)
 		if len(all) > maxEpicChildren {
@@ -48,6 +52,15 @@ func (c *GitHubAPIClient) LoadEpicGraph(ctx context.Context, repo Repository, pa
 		return nil, err
 	}
 	var graph []EpicGraphNode
+	ids := map[int]int64{}
+	for _, child := range children {
+		graph = append(graph, EpicGraphNode{Issue: child})
+		ids[child.Number] = child.ID
+	}
+	if err := validateEpicGraph(repo, parent, graph); err != nil {
+		return nil, err
+	}
+	graph = nil
 	for _, child := range children {
 		deps, err := c.epicIssuePages(ctx, fmt.Sprintf("%s%d/dependencies/blocked_by", base, child.Number))
 		if err != nil {
@@ -55,7 +68,7 @@ func (c *GitHubAPIClient) LoadEpicGraph(ctx context.Context, repo Repository, pa
 		}
 		n := EpicGraphNode{Issue: child}
 		for _, dep := range deps {
-			if dep.RepositoryURL != child.RepositoryURL {
+			if dep.ID <= 0 || ids[dep.Number] != dep.ID || !strings.EqualFold(dep.RepositoryURL, child.RepositoryURL) {
 				return nil, errors.New("cross-repository epic dependency is unsupported")
 			}
 			n.Dependencies = append(n.Dependencies, dep.Number)
@@ -94,6 +107,8 @@ func (c *GitHubAPIClient) UpsertEpicComment(ctx context.Context, repo Repository
 }
 
 func (c *GitHubAPIClient) epicJSON(ctx context.Context, method, path string, input, output any) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	token, err := c.tokenSource.Token(ctx)
 	if err != nil {
 		return errors.New("epic GitHub token unavailable")
@@ -102,7 +117,11 @@ func (c *GitHubAPIClient) epicJSON(ctx context.Context, method, path string, inp
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
+	endpoint := c.baseURL + path
+	if path == "/graphql" && strings.HasSuffix(c.baseURL, "/api/v3") {
+		endpoint = strings.TrimSuffix(c.baseURL, "/v3") + "/graphql"
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -113,11 +132,18 @@ func (c *GitHubAPIClient) epicJSON(ctx context.Context, method, path string, inp
 	req.Header.Set("User-Agent", c.userAgent)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return errors.New("epic GitHub request failed")
+		return fmt.Errorf("epic GitHub request failed: %w", err)
 	}
 	defer closeBody(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("epic GitHub HTTP %d", resp.StatusCode)
+		return &epicAPIError{Status: resp.StatusCode, RateLimited: resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-RateLimit-Remaining") == "0"}
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 4*1024*1024)).Decode(output)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > 4*1024*1024 {
+		return errors.New("epic GitHub response too large")
+	}
+	return json.Unmarshal(data, output)
 }

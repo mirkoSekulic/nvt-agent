@@ -471,3 +471,100 @@ producer:
 The operator injects the per-run lifecycle event webhook for a profiled
 schedule template. `work-control` itself only exports `nvt-work` and publishes
 the fixed work events; it remains provider-neutral and holds no credentials.
+
+## Native GitHub epics
+
+Epic delivery is opt-in and runs entirely in the producer. It requires the
+Kubernetes backend with profiled schedule admission, a single producer instance,
+a persistent SQLite database, and an administrator-defined implementation
+workflow. Local admission and legacy/direct submission do not support epics.
+
+```yaml
+submission:
+  mode: scheduleAdmission
+  admissionMode: profiled
+  scheduleNamespace: nvt
+  scheduleName: default
+  admissionBaseURL: http://nvt-operator:8082
+  admissionTokenFile: /var/run/secrets/nvt-operator/token
+epics:
+  enabled: true
+  workflow: implement-pr
+  maxParallel: 1
+```
+
+The Helm equivalents live under `producer.epics`. The chart requires persistent
+storage and one replica, uses a Recreate rollout, and grants only `get`/`list` on
+AgentRuns in `producer.submission.scheduleNamespace` (or the normal run namespace).
+The GitHub App needs Issues write, Pull requests read, and Metadata read, including
+access to collaborator permissions, native sub-issues/dependencies, and GraphQL
+closing-PR references. Keep the original admission endpoint and schedule stable
+for an existing epic. Its workflow and initiator are persisted at start; issue text
+cannot select a workflow, profile, credentials, or parallelism.
+
+Use these commands on the parent issue, with no arguments or following instructions:
+
+| Command | Effect |
+| --- | --- |
+| `/nvtagent epic start` | Record a new epic and load its native graph. Repeated starts do not reset it. |
+| `/nvtagent epic status` | Refresh the existing status projection without scheduling a separate run. |
+| `/nvtagent epic pause` | Stop new admissions; continue observing existing work. |
+| `/nvtagent epic resume` | Recheck a paused epic without resetting any attempt. Failed children require retry. |
+| `/nvtagent epic retry` | Recheck failed work; start a new attempt only when safe. |
+| `/nvtagent epic cancel` | Permanently stop new admissions for this epic; existing runs are not terminated. |
+
+The commenter must pass `allowedAuthors`, have write/maintain/admin repository
+permission, and match the initiating GitHub user ID for subsequent commands.
+Every child admission uses that initiating ID. Other maintainers cannot take over
+its credential ownership. Completed and cancelled epics cannot be restarted.
+
+The producer accepts 1–100 native children in the same repository. Dependencies
+must refer to other children in that graph; cross-repository/external edges,
+cycles, duplicate/self edges, malformed data, and incomplete API responses stop
+scheduling. Children are selected by ascending issue number. `maxParallel` defaults
+to 1 and can be set to 1–16; only independent, unblocked children can occupy those
+slots. Each dependency remains blocked until its associated PR is verified merged.
+Issue closure and successful AgentRun completion are not merge evidence.
+
+Each attempt uses a deterministic work key and branch. The prompt requires
+`Closes #<child>` and `Part of #<parent>` in one PR. Discovery uses GitHub's native
+closing references, including closed PRs, and checks the target repository and
+attempt branch in the same repository. Manual closing-link associations and
+pasted URLs do not establish the mapping. The producer saves the unique PR's
+immutable node ID, then independently reads that PR and verifies its merge before
+advancing. It never merges PRs or enables auto-merge.
+
+One App-owned status comment on the parent and one on each child show `Blocked`,
+`Queued`, `Running`, `PR open`, `Completed`, or `Failed`, with the reason, attempt,
+scheduled timestamp, accepted AgentRun namespace/name, and PR link when available.
+Comments and reactions are retried independently of admission and the command
+cursor. Only committed SQLite records determine progress. No session URL is
+invented when the AgentRun API does not expose one.
+
+Recovery:
+
+- Restore deleted children or changed native dependency edges to the recorded
+  graph, then resume. Reopen a child closed before admission, then retry.
+- For ambiguous PRs, retain exactly one native closing link for the attempt and
+  retry. An established mapping must retain its original immutable PR identity.
+- A failed run or closed-unmerged PR pauses the epic. Before retry can create a
+  new attempt, the old run must be observed terminal and its linked attempt PRs
+  must be closed without merge. A new attempt gets a new key/branch; prior run/PR
+  identities remain in SQLite history. An open PR is never replaced by retry.
+- A definitive admission rejection pauses with no accepted run; correct policy
+  or credentials and retry. Capacity deferrals replay the saved request.
+- An uncertain admission result is recovered by listing retained AgentRuns with
+  the exact work key, repository, and schedule. Keep run retention long enough
+  for producer outages. If the producer cannot recover an identity, it pauses;
+  resume rechecks without submitting again. This also covers the narrow crash
+  window between recording an outbound attempt and sending it. The current
+  admission API does not keep an eternal receipt after run retention expires,
+  so the producer cannot safely infer that a missing run was never accepted.
+  An operator must investigate such a missing receipt; retry cannot override it.
+- Transient GitHub/network failures retry on polling; permanent access failures,
+  missing resources, and malformed identity/merge responses pause. Correct the
+  reported condition and resume/retry. A missing retained run cannot authorize
+  a fresh attempt unless its terminal state was already recorded.
+- Back up the SQLite database and run only one producer against it. Do not clear
+  its state to recover display failures: that discards command receipts and
+  accepted work identities.

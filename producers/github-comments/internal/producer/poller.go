@@ -23,6 +23,7 @@ type pendingSchedulingReaction struct {
 }
 
 type Poller struct {
+	EpicRuns  epicRunObserver
 	pollMu    sync.Mutex
 	Config    Config
 	GitHub    GitHubClient
@@ -47,6 +48,7 @@ func NewPoller(
 		state = newMemoryStateStore()
 	}
 	return &Poller{
+		EpicRuns:  submitter,
 		Config:    cfg,
 		GitHub:    github,
 		Submitter: submitter,
@@ -81,6 +83,9 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 	var errs []error
 	for _, repo := range p.Config.Repositories {
 		if err := p.pollRepo(ctx, repo); err != nil {
+			if !p.Config.Epics.Enabled {
+				return err
+			}
 			errs = append(errs, err)
 		}
 		if p.Config.Epics.Enabled {

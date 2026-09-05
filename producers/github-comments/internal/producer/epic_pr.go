@@ -48,8 +48,8 @@ func (p *Poller) associateEpicPRs(ctx context.Context, e *Epic) error {
 		var valid []EpicPR
 		seen := map[string]bool{}
 		for _, pr := range candidates {
-			if pr.ID == "" || pr.Number <= 0 || pr.URL == "" || (pr.State != "OPEN" && pr.State != "CLOSED" && pr.State != "MERGED") {
-				return errors.New("malformed GitHub PR linkage")
+			if err := validateEpicPR(pr); err != nil {
+				return err
 			}
 			if !strings.EqualFold(pr.Repository.NameWithOwner, epicRepoKey(e.Repository)) || pr.HeadRepository == nil || !strings.EqualFold(pr.HeadRepository.NameWithOwner, epicRepoKey(e.Repository)) || pr.HeadRefName != child.Key {
 				continue
@@ -65,6 +65,7 @@ func (p *Poller) associateEpicPRs(ctx context.Context, e *Epic) error {
 			for _, pr := range valid {
 				numbers = append(numbers, fmt.Sprintf("#%d", pr.Number))
 			}
+			child.Failure = "mapping"
 			child.State = "Failed"
 			child.Reason = "Ambiguous linked PRs: " + strings.Join(numbers, ", ") + "; retain one native closing link, then retry"
 			e.State = "paused"
@@ -73,6 +74,7 @@ func (p *Poller) associateEpicPRs(ctx context.Context, e *Epic) error {
 		}
 		if child.PR != nil {
 			if len(valid) != 1 || valid[0].ID != child.PR.ID || valid[0].Number != child.PR.Number {
+				child.Failure = "mapping"
 				child.State = "Failed"
 				child.Reason = "Associated PR linkage changed; restore the original native closing link, then retry"
 				e.State = "paused"
@@ -83,8 +85,10 @@ func (p *Poller) associateEpicPRs(ctx context.Context, e *Epic) error {
 		if len(valid) == 1 {
 			pr := valid[0]
 			child.PR = &pr
-			child.State = "PR open"
-			child.Reason = "Uniquely associated through GitHub native closing linkage"
+			if child.State != "Failed" {
+				child.State = "PR open"
+				child.Reason = "Uniquely associated through GitHub native closing linkage"
+			}
 		}
 	}
 	return nil
@@ -112,10 +116,18 @@ func (c *GitHubAPIClient) LinkedEpicPRs(ctx context.Context, repo Repository, nu
 	if err != nil {
 		return nil, err
 	}
+	for _, failure := range response.Errors {
+		if failure.Type == "RATE_LIMITED" {
+			return nil, &epicAPIError{Status: 429}
+		}
+	}
 	if len(response.Errors) > 0 || response.Data.Repository == nil || response.Data.Repository.Issue == nil || response.Data.Repository.Issue.PRs == nil || response.Data.Repository.Issue.PRs.PageInfo == nil {
 		return nil, errors.New("GitHub native PR linkage unavailable or incomplete")
 	}
 	prs := response.Data.Repository.Issue.PRs
+	if prs.Nodes == nil {
+		return nil, errors.New("incomplete native PR connection")
+	}
 	if prs.PageInfo.HasNextPage {
 		return nil, errors.New("too many native PR links to associate safely")
 	}
@@ -124,4 +136,11 @@ func (c *GitHubAPIClient) LinkedEpicPRs(ctx context.Context, repo Repository, nu
 
 type jsonGraphQLError struct {
 	Type string `json:"type"`
+}
+
+func validateEpicPR(pr EpicPR) error {
+	if pr.ID == "" || pr.Number <= 0 || pr.URL == "" || pr.Repository.NameWithOwner == "" || pr.HeadRefName == "" || (pr.State != "OPEN" && pr.State != "CLOSED" && pr.State != "MERGED") {
+		return errors.New("malformed GitHub PR linkage")
+	}
+	return nil
 }
