@@ -3,6 +3,7 @@ package producer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -125,8 +126,9 @@ func TestEpicStatusAmbiguousDeliveryAndRestart(t *testing.T) {
 	store := openEpicTestStore(t, path)
 	github := &fakeGitHubClient{issue: GitHubIssue{Number: 42}, updatedComments: []GitHubIssueComment{
 		epicPollComment("start", 1), epicPollComment("status", 2),
-	}, createIssueCommentErr: errors.New("ambiguous POST")}
+	}, createIssueCommentErr: errors.New("ambiguous POST"), filterUpdatedBySince: true}
 	poller := NewPoller(epicPollerConfig(), github, AgentRunSubmitter{}, store, nil)
+	poller.startedAt = epicTestTime.Add(-time.Minute)
 	poller.now = func() time.Time { return epicTestTime }
 	if err := poller.PollOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -144,12 +146,14 @@ func TestEpicStatusAmbiguousDeliveryAndRestart(t *testing.T) {
 	}
 	store = openEpicTestStore(t, path)
 	poller = NewPoller(epicPollerConfig(), github, AgentRunSubmitter{}, store, nil)
-	poller.now = func() time.Time { return epicTestTime.Add(2 * time.Minute) }
+	poller.startedAt = epicTestTime.Add(2 * time.Minute)
+	poller.now = func() time.Time { return poller.startedAt }
 	for range 2 {
 		if err := poller.PollOnce(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
+	assertNoPendingEpicStatuses(t, store)
 	if github.createIssueCommentCalls != 1 {
 		t.Fatalf("duplicate status replies: %d", github.createIssueCommentCalls)
 	}
@@ -178,5 +182,101 @@ func TestEpicPollerRequiresDurableValidState(t *testing.T) {
 	}
 	if len(github.listUpdatedSince) != 0 {
 		t.Fatal("invalid state did not fail closed")
+	}
+}
+
+func assertNoPendingEpicStatuses(t *testing.T, store *SQLiteStateStore) {
+	t.Helper()
+	pending, err := store.ListPendingEpicStatuses(context.Background(), epicTestRepo)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending statuses: %+v %v", pending, err)
+	}
+}
+
+func TestEpicStatusRecoveryOutsideCommentFeed(t *testing.T) {
+	for _, responseCreated := range []bool{false, true} {
+		for _, cursorSaved := range []bool{false, true} {
+			t.Run(fmt.Sprintf("responseCreated=%t/cursorSaved=%t", responseCreated, cursorSaved), func(t *testing.T) {
+				ctx := context.Background()
+				path := filepath.Join(t.TempDir(), "state.db")
+				store := openEpicTestStore(t, path)
+				epicCommand(t, store, CommandIntentEpicStart, 1)
+				snapshot := epicCommand(t, store, CommandIntentEpicStatus, 2).Epic
+				github := &fakeGitHubClient{filterUpdatedBySince: true, issue: GitHubIssue{Number: 42},
+					updatedComments:       []GitHubIssueComment{epicPollComment("status", 2)},
+					createIssueCommentErr: errors.New("POST failed before delivery"),
+				}
+				poller := NewPoller(epicPollerConfig(), github, AgentRunSubmitter{}, store, nil)
+				poller.now = func() time.Time { return epicTestTime }
+				if responseCreated {
+					if pending, err := poller.deliverEpicStatus(ctx, epicTestRepo, 42, 2, *snapshot); err != nil || !pending {
+						t.Fatalf("first delivery: %v %v", pending, err)
+					}
+				}
+				// Change the live epic after the status command. Recovery must deliver
+				// the command's snapshot without reapplying it to current epic state.
+				epicCommand(t, store, CommandIntentEpicPause, 3)
+				if cursorSaved {
+					if err := store.SetRepoCursor(ctx, "acme/widget", epicTestTime.Add(time.Minute)); err != nil {
+						t.Fatal(err)
+					}
+					// A deleted or edited source command cannot strand its accepted reply.
+					github.updatedComments = nil
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				store = openEpicTestStore(t, path)
+				github.createIssueCommentErr = nil
+				before := github.createIssueCommentCalls
+				poller = NewPoller(epicPollerConfig(), github, AgentRunSubmitter{}, store, nil)
+				poller.startedAt = epicTestTime.Add(2 * time.Minute)
+				poller.now = func() time.Time { return poller.startedAt }
+				for range 2 {
+					if err := poller.PollOnce(ctx); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if github.createIssueCommentCalls != before+1 {
+					t.Fatalf("recovery POST count: %d, want %d", github.createIssueCommentCalls, before+1)
+				}
+				if !strings.Contains(github.createdIssueCommentBody, "**pending**") {
+					t.Fatal("recovered current state instead of original snapshot")
+				}
+				assertNoPendingEpicStatuses(t, store)
+				records, err := store.ListEpics(ctx, epicTestRepo)
+				if err != nil || len(records) != 1 || records[0].State != EpicPaused || records[0].Generation != 1 {
+					t.Fatalf("recovery mutated state: %+v %v", records, err)
+				}
+				cursor, found, err := store.GetRepoCursor(ctx, "acme/widget")
+				if err != nil || !found || !cursor.Equal(poller.startedAt) {
+					t.Fatalf("recovery cursor: %v %v %v", cursor, found, err)
+				}
+			})
+		}
+	}
+}
+
+func TestEpicStatusRecoveryRespectsAuthorization(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disabled=%t", disabled), func(t *testing.T) {
+			store := openEpicTestStore(t, filepath.Join(t.TempDir(), "state.db"))
+			epicCommand(t, store, CommandIntentEpicStart, 1)
+			epicCommand(t, store, CommandIntentEpicStatus, 2)
+			cfg := epicPollerConfig()
+			if disabled {
+				cfg.Epics = EpicConfig{}
+			} else {
+				cfg.Epics.AllowedUserIDs = []int64{5678}
+			}
+			github := &fakeGitHubClient{filterUpdatedBySince: true}
+			poller := NewPoller(cfg, github, AgentRunSubmitter{}, store, nil)
+			if err := poller.PollOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if github.createIssueCommentCalls != 0 || github.listIssueCommentsCalls != 0 {
+				t.Fatal("unauthorized recovery accessed thread")
+			}
+		})
 	}
 }

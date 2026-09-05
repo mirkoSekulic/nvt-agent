@@ -15,6 +15,49 @@ import (
 type EpicStateStore interface {
 	ApplyEpicCommand(context.Context, Repository, int, GitHubUser, CommandIntent, int64, EpicConfig, time.Time) (EpicCommandResult, error)
 	ListEpics(context.Context, Repository) ([]EpicRecord, error)
+	ListPendingEpicStatuses(context.Context, Repository) ([]EpicStatusReply, error)
+}
+
+type EpicStatusReply struct {
+	CommentID int64
+	Snapshot  EpicRecord
+}
+
+// The committed status command is the delivery obligation, even if the process
+// stopped before creating response state. Keep its original snapshot and exclude
+// delivered responses without depending on the repository cursor or source feed.
+func (s *SQLiteStateStore) ListPendingEpicStatuses(ctx context.Context, repo Repository) ([]EpicStatusReply, error) {
+	key := canonicalEpicRepository(repo)
+	rows, err := s.db.QueryContext(ctx, `SELECT c.comment_id, c.parent_issue, c.subject, c.result
+FROM epic_command_receipts c
+LEFT JOIN help_comment_responses h ON h.repo_key = ? AND h.comment_id = c.comment_id
+WHERE c.repo_key = ? AND c.intent = 'epic-status'
+AND (h.status IS NULL OR h.status <> 'delivered')
+ORDER BY c.comment_id`, "epic:"+key, key)
+	if err != nil {
+		return nil, fmt.Errorf("list pending epic statuses: %w", err)
+	}
+	defer rows.Close()
+	var replies []EpicStatusReply
+	for rows.Next() {
+		var commentID int64
+		var parent int
+		var subject, raw string
+		if err := rows.Scan(&commentID, &parent, &subject, &raw); err != nil {
+			return nil, err
+		}
+		var result EpicCommandResult
+		if err := decodeEpicJSON([]byte(raw), &result); err != nil {
+			return nil, err
+		}
+		if err := validateEpicResult(result, key, parent, subject); err != nil {
+			return nil, err
+		}
+		if result.Epic != nil {
+			replies = append(replies, EpicStatusReply{CommentID: commentID, Snapshot: *result.Epic})
+		}
+	}
+	return replies, rows.Err()
 }
 
 func (s *SQLiteStateStore) migrateEpics(ctx context.Context) error {

@@ -371,7 +371,11 @@ Other transitions are rejected. A canceled epic cannot restart. State-changing
 commands record their result in producer logs; `status` provides the current
 snapshot on request. Edited parent/child status projections are deferred to the
 scheduling stage. A failed status reply retries independently of the already
-committed command and does not authorize work or change its outcome.
+committed command and does not authorize work or change its outcome. Every poll
+recovers outstanding replies from committed status receipts, including commands
+without response state yet. Recovery uses the original snapshot and remains
+independent of the repository cursor, startup time, and source command feed;
+revoked initiating user IDs cannot receive a recovered reply.
 
 The producer atomically commits each state change and its command receipt before
 advancing the existing repository cursor. Receipts include negative outcomes

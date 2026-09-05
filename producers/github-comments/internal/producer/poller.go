@@ -98,6 +98,14 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 
 func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 	key := repo.Owner + "/" + repo.Name
+	deferredSubmission := false
+	if p.Config.Epics.Enabled {
+		var err error
+		deferredSubmission, err = p.reconcileEpicStatusReplies(ctx, repo)
+		if err != nil {
+			return err
+		}
+	}
 	pendingReactions := make([]pendingSchedulingReaction, 0)
 	defer func() {
 		p.postSchedulingReactions(ctx, repo, pendingReactions)
@@ -125,7 +133,6 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		return fmt.Errorf("list updated issue comments for %s: %w", key, err)
 	}
 	nextCursor := pollStartedAt
-	deferredSubmission := false
 	for _, comment := range comments {
 		if comment.UpdatedAt.After(nextCursor) {
 			nextCursor = comment.UpdatedAt

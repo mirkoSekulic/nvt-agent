@@ -4,7 +4,37 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 )
+
+func (p *Poller) reconcileEpicStatusReplies(ctx context.Context, repo Repository) (bool, error) {
+	store, ok := p.State.(EpicStateStore)
+	if !ok {
+		return false, errors.New("epics require durable epic state storage")
+	}
+	replies, err := store.ListPendingEpicStatuses(ctx, repo)
+	if err != nil {
+		return false, fmt.Errorf("recover pending epic statuses: %w", err)
+	}
+	deferred := false
+	for _, reply := range replies {
+		// The receipt already passed the incoming command's login filter. Recheck
+		// current authorization using the immutable principal, not a stale login.
+		userID, err := strconv.ParseInt(reply.Snapshot.Initiator.Subject, 10, 64)
+		if err != nil {
+			return false, err
+		}
+		if !p.Config.Epics.allows(userID) {
+			continue
+		}
+		pending, err := p.deliverEpicStatus(ctx, repo, reply.Snapshot.ParentIssue, reply.CommentID, reply.Snapshot)
+		if err != nil {
+			return false, err
+		}
+		deferred = deferred || pending
+	}
+	return deferred, nil
+}
 
 func (p *Poller) handleEpicCommand(ctx context.Context, repo Repository, comment GitHubIssueComment, command Command) (bool, error) {
 	if !p.Config.Epics.allows(comment.User.ID) {

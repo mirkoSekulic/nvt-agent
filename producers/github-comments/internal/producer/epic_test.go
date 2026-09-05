@@ -375,3 +375,20 @@ func TestEpicConcurrentDelivery(t *testing.T) {
 		t.Fatalf("receipts: %d %v", count, err)
 	}
 }
+
+func TestPendingEpicStatusesValidateReceipts(t *testing.T) {
+	store := openEpicTestStore(t, filepath.Join(t.TempDir(), "state.db"))
+	epicCommand(t, store, CommandIntentEpicStatus, 1) // Rejected: no epic exists yet.
+	epicCommand(t, store, CommandIntentEpicStart, 2)
+	epicCommand(t, store, CommandIntentEpicStatus, 3)
+	replies, err := store.ListPendingEpicStatuses(context.Background(), epicTestRepo)
+	if err != nil || len(replies) != 1 || replies[0].CommentID != 3 {
+		t.Fatalf("pending replies: %+v %v", replies, err)
+	}
+	if _, err := store.db.Exec(`UPDATE epic_command_receipts SET result='{"unknown":true}' WHERE comment_id=3`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListPendingEpicStatuses(context.Background(), epicTestRepo); err == nil {
+		t.Fatal("accepted malformed status receipt during recovery")
+	}
+}
