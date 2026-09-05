@@ -17,6 +17,14 @@ func TestAzureCLIInertAdapter(t *testing.T) {
 	}
 }
 
+func TestAzureCLIPluginExport(t *testing.T) {
+	root := repoRoot(t)
+	command := exec.Command("python3", filepath.Join(root, "tests/azure-cli/export_test.py"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Azure plugin export/startup tests: %v\n%s", err, output)
+	}
+}
+
 func TestAzureCLIActualCompatibility(t *testing.T) {
 	python := os.Getenv("NVT_AZURE_CLI_PYTHON")
 	if python == "" {

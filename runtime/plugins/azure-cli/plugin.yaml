@@ -1,5 +1,5 @@
 exports:
   tools:
     - name: az
-      command: /opt/nvt-azure/bin/python /usr/local/lib/nvt-agent/plugins/azure-cli/adapter.py
+      command: /usr/local/lib/nvt-agent/plugins/azure-cli/az
       description: Azure CLI through a selected broker identity, with inert local authentication

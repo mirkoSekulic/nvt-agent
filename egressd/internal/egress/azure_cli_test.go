@@ -96,15 +96,24 @@ func TestAzureCLIThroughMediatedEgress(t *testing.T) {
 	if err := os.WriteFile(config, []byte(metadata), 0600); err != nil {
 		t.Fatal(err)
 	}
-	baseEnv := []string{"PATH=/usr/bin:/bin", "HOME=" + agentHome, "NVT_PLUGIN_CONFIG=" + config, "NVT_PLUGIN_EGRESS_PROVIDER=azure-one",
+	baseEnv := []string{"PATH=" + filepath.Join(agentHome, ".local/bin") + ":/usr/bin:/bin", "HOME=" + agentHome,
+		"NVT_STATE_DIR=" + filepath.Join(agentHome, ".nvt-agent"), "NVT_WORKSPACE=" + agentHome, "NVT_EGRESS_MODE=mediated",
+		"NVT_PLUGIN_CONFIG=" + config, "NVT_PLUGIN_EGRESS_PROVIDER=azure-one",
 		"AZURE_EXTENSION_DIR=" + os.Getenv("AZURE_EXTENSION_DIR"), "REQUESTS_CA_BUNDLE=" + cert}
 	for _, capability := range []string{"azure-one", "azure-two"} {
 		parsed, _ := url.Parse(proxy.URL)
 		parsed.User = url.UserPassword(capability, "x")
 		baseEnv = append(baseEnv, "NVT_EGRESS_FORWARD_PROXY_URL_"+strings.ToUpper(strings.ReplaceAll(capability, "-", "_"))+"="+parsed.String())
 	}
+	// Run the real startup exporter before invoking its az wrapper. Relocate
+	// image installation paths only; keep launcher and egress dispatch intact.
+	export := exec.Command(python, filepath.Join(root, "tests/azure-cli/export_fixture.py"), python)
+	export.Env = baseEnv
+	if output, err := export.CombinedOutput(); err != nil {
+		t.Fatalf("Azure plugin startup export: %v\n%s", err, output)
+	}
 	run := func(provider string, args ...string) {
-		command := exec.Command(python, append([]string{filepath.Join(root, "runtime/plugins/azure-cli/adapter.py")}, args...)...)
+		command := exec.Command(filepath.Join(agentHome, ".local/bin/az"), args...)
 		command.Env = append(append([]string{}, baseEnv...), "NVT_AZURE_PROVIDER="+provider)
 		output, err := command.CombinedOutput()
 		if err != nil {

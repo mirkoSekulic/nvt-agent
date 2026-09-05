@@ -19,6 +19,10 @@ existing local platform or Helm image configuration. Azure dependencies are
 not installed in default images. The CLI Python environment lives at
 `/opt/nvt-azure`; extensions live at `/opt/nvt-azure/extensions`.
 
+The plugin exports one installed executable launcher, which invokes the pinned
+Python interpreter and forwards arguments to the adapter. Runtime startup uses
+the normal plugin exporter and provider-scoped egress dispatch.
+
 The adapter uses the pinned CLI's managed-identity credential factory, replacing
 it with an inert implementation. This covers both SDK `get_login_credentials`
 and `get_raw_token`; it does not fake a real MSAL cache. It seeds a separate
@@ -191,8 +195,9 @@ Upstream references: [VM GET and expansion](https://learn.microsoft.com/en-us/re
 
 The compatibility proof first exercised actual CLI command/SDK authentication
 and serialization with an isolated HTTP fixture. A separate egress conformance
-test exercises actual CLI processes over real CONNECT/TLS with two provider
-selectors and fixture upstreams. Neither agent state contains a usable Azure
+test exercises the startup-exported `az` wrapper, launcher and actual CLI
+processes over real CONNECT/TLS with two provider selectors and fixture upstreams.
+Neither agent state contains a usable Azure
 credential. Broker conformance separately exercises the real executable-provider
 protocol, role boundaries, refresh failure and authorization-before-injection.
 
