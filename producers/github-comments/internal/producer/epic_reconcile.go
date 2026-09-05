@@ -53,9 +53,15 @@ func (p *Poller) reconcileEpic(ctx context.Context, store *SQLiteStateStore, gh 
 		e.Reason = err.Error()
 		return store.SaveEpic(ctx, e)
 	}
+	if err := p.associateEpicPRs(ctx, e); err != nil {
+		return err
+	}
 	projectEligibility(e)
 	if err := store.SaveEpic(ctx, e); err != nil {
 		return err
+	}
+	if e.State != "active" {
+		return nil
 	}
 	active := 0
 	for _, c := range e.Children {
@@ -77,7 +83,7 @@ func (p *Poller) reconcileEpic(ctx context.Context, store *SQLiteStateStore, gh 
 			if err != nil {
 				return err
 			}
-			c.Prompt = buildPrompt(e.Repository, c.Issue, comments, GitHubIssueComment{User: e.Principal}, Command{Intent: CommandIntentPRCreate})
+			c.Prompt = epicImplementationPrompt(*e, *c, comments)
 			c.ScheduledAt = p.now().UTC()
 			// Persist the exact request before the network call: uncertain admission replays it.
 			if err := store.SaveEpic(ctx, e); err != nil {
@@ -132,6 +138,9 @@ func childStatus(c EpicChild) string {
 	result := fmt.Sprintf("#%d: **%s** — %s (attempt %d)", c.Issue.Number, c.State, c.Reason, c.Attempt)
 	if c.Run != nil {
 		result += fmt.Sprintf("\nAgentRun: `%s/%s`; scheduled %s.", c.Run.Namespace, c.Run.Name, c.ScheduledAt.Format(time.RFC3339))
+	}
+	if c.PR != nil {
+		result += fmt.Sprintf("\nPR: [%s](%s)", fmt.Sprintf("#%d", c.PR.Number), c.PR.URL)
 	}
 	return result
 }

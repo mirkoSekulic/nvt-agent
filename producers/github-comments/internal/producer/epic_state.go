@@ -65,6 +65,7 @@ type Epic struct {
 	Children    []EpicChild
 }
 type EpicChild struct {
+	PR              *EpicPR
 	Prompt          string
 	Reaction        string
 	ReactionPending bool

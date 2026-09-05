@@ -13,6 +13,8 @@ import (
 )
 
 type epicFakeGitHub struct {
+	prs   map[int][]EpicPR
+	prErr error
 	fakeGitHubClient
 	graph      []EpicGraphNode
 	graphErr   error
@@ -201,4 +203,8 @@ func TestEpicGraphValidationAndParallelEligibility(t *testing.T) {
 	if e.Children[1].State != "Blocked" {
 		t.Fatal("closure unblocked child")
 	}
+}
+
+func (f *epicFakeGitHub) LinkedEpicPRs(_ context.Context, _ Repository, n int) ([]EpicPR, error) {
+	return f.prs[n], f.prErr
 }
