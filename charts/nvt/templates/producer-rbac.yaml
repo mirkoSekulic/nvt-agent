@@ -1,9 +1,13 @@
-{{- if and .Values.producer.enabled .Values.producer.rbac.create (eq .Values.producer.submission.mode "direct") }}
+{{- if and .Values.producer.enabled .Values.producer.rbac.create (or (eq .Values.producer.submission.mode "direct") .Values.producer.epics.enabled) }}
+{{- $runNamespace := include "nvt.producerAgentRunNamespace" . }}
+{{- if .Values.producer.epics.enabled }}
+{{- $runNamespace = default $runNamespace .Values.producer.submission.scheduleNamespace }}
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "nvt.producerFullname" . }}
-  namespace: {{ include "nvt.producerAgentRunNamespace" . | quote }}
+  namespace: {{ $runNamespace | quote }}
   labels:
     {{- include "nvt.producerLabels" . | nindent 4 }}
 rules:
@@ -14,13 +18,15 @@ rules:
     verbs:
       - get
       - list
+      {{- if eq .Values.producer.submission.mode "direct" }}
       - create
+      {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "nvt.producerFullname" . }}
-  namespace: {{ include "nvt.producerAgentRunNamespace" . | quote }}
+  namespace: {{ $runNamespace | quote }}
   labels:
     {{- include "nvt.producerLabels" . | nindent 4 }}
 subjects:

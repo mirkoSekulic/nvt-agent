@@ -373,6 +373,9 @@ producer:
     - "*"
   pollInterval: 30s
   operatorCallbackBaseURL: http://nvt-operator:8082
+  # Native GitHub epic orchestration requires profiled Kubernetes admission.
+  epics:
+    enabled: false
   # Best-effort reactions on authoritative schedule-admission outcomes. The
   # GitHub App needs Issues: write; failures never affect scheduling or cursors.
   schedulingReactions:

@@ -28,7 +28,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.76`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.77`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -50,11 +50,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.76 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.77 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.76 --namespace nvt --create-namespace
+  --version 0.8.77 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -962,3 +962,13 @@ make operator-helm-test
 
 The render suite checks TLS, Secrets, policy mounts, gateway authorization,
 and egress configuration.
+
+### GitHub epic delivery
+
+Set `producer.epics.enabled: true`, `producer.epics.workflow: implement-pr`, and
+optionally `producer.epics.maxParallel: 1` with profiled schedule admission to
+schedule native GitHub sub-issues after verified dependency PR merges. Epics
+require one replica and persistent SQLite storage. The producer gets read-only
+AgentRun access in the schedule namespace and uses a Recreate deployment strategy.
+See [the producer command and recovery guide](../../producers/github-comments/README.md#native-github-epics)
+for GitHub App permissions, graph limits, and safe retry behavior.

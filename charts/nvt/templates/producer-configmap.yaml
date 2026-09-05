@@ -1,4 +1,20 @@
 {{- if .Values.producer.enabled }}
+{{- $epics := .Values.producer.epics }}
+{{- if not (kindIs "map" $epics) }}{{ fail "producer.epics must be an object" }}{{ end }}
+{{- range $key, $value := $epics }}
+{{- if not (has $key (list "enabled" "workflow" "maxParallel")) }}{{ fail "producer.epics contains an unknown field" }}{{ end }}
+{{- end }}
+{{- if not (kindIs "bool" $epics.enabled) }}{{ fail "producer.epics.enabled must be a boolean" }}{{ end }}
+{{- if $epics.enabled }}
+{{- if not (and (eq .Values.producer.submission.mode "scheduleAdmission") (eq .Values.producer.submission.admissionMode "profiled")) }}{{ fail "producer.epics requires profiled scheduleAdmission" }}{{ end }}
+{{- if or (empty $epics.workflow) (not (kindIs "string" $epics.workflow)) }}{{ fail "producer.epics.workflow is required" }}{{ end }}
+{{- if or (gt (len $epics.workflow) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $epics.workflow)) }}{{ fail "producer.epics.workflow must be a normalized DNS label" }}{{ end }}
+{{- if hasKey $epics "maxParallel" }}
+{{- if not (regexMatch "^([1-9]|1[0-6])$" (toString $epics.maxParallel)) }}{{ fail "producer.epics.maxParallel must be an integer between 1 and 16" }}{{ end }}
+{{- end }}
+{{- if or (ne (int .Values.producer.replicaCount) 1) (not .Values.producer.persistence.enabled) }}{{ fail "producer.epics requires one replica and persistent SQLite storage" }}{{ end }}
+{{- else if or (hasKey $epics "workflow") (hasKey $epics "maxParallel") }}{{ fail "producer.epics policy requires enabled: true" }}
+{{- end }}
 {{- $schedulingReactions := .Values.producer.schedulingReactions }}
 {{- if not (kindIs "map" $schedulingReactions) }}
 {{- fail "producer.schedulingReactions must be an object" }}
@@ -54,6 +70,8 @@ data:
       enabled: {{ get $schedulingReactions "enabled" }}
       accepted: {{ get $schedulingReactions "accepted" | quote }}
       rejected: {{ get $schedulingReactions "rejected" | quote }}
+    epics:
+      {{- toYaml $epics | nindent 6 }}
     submission:
       mode: {{ .Values.producer.submission.mode | quote }}
       admissionMode: {{ .Values.producer.submission.admissionMode | quote }}

@@ -8,6 +8,10 @@ metadata:
     {{- include "nvt.producerLabels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.producer.replicaCount }}
+  {{- if .Values.producer.epics.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "nvt.producerSelectorLabels" . | nindent 6 }}
@@ -24,7 +28,7 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "nvt.producerServiceAccountName" . }}
-      {{- if ne .Values.producer.submission.mode "direct" }}
+      {{- if and (ne .Values.producer.submission.mode "direct") (not .Values.producer.epics.enabled) }}
       automountServiceAccountToken: false
       {{- end }}
       {{- if and (eq .Values.producer.submission.mode "scheduleAdmission") (eq .Values.producer.submission.admissionMode "profiled") }}
