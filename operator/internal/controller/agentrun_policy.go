@@ -357,7 +357,7 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 			}
 		}
 		if grant.Authorization != nil {
-			if grant.Authorization.Preset != "" {
+			if grant.Authorization.Preset != "" || grant.Authorization.ResourcePrefix != "" {
 				return fmt.Errorf("broker grant %s authorization.preset must be resolved before AgentRun admission", grant.Provider)
 			}
 			if grant.Authorization.DefaultAction != "allow" && grant.Authorization.DefaultAction != "deny" {

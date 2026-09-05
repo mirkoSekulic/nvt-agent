@@ -352,10 +352,13 @@ func validateScheduleBrokerAuthorization(broker *nvtv1alpha1.AgentRunBroker) err
 			continue
 		}
 		if policy.Preset != "" {
-			if policy.Preset != "observe" || policy.DefaultAction != "" || policy.Rules != nil || len(grant.Resources) == 0 {
+			if policy.Preset != "observe" || policy.DefaultAction != "" || policy.Rules != nil || len(grant.Resources) == 0 || len(policy.ResourcePrefix) > 128 || policy.ResourcePrefix != "" && !regexp.MustCompile(`^[a-zA-Z0-9:/._-]+$`).MatchString(policy.ResourcePrefix) {
 				return errInvalidExecutionProfileConfiguration
 			}
 			continue
+		}
+		if policy.ResourcePrefix != "" {
+			return errInvalidExecutionProfileConfiguration
 		}
 		if policy.DefaultAction != "allow" && policy.DefaultAction != "deny" {
 			return errInvalidExecutionProfileConfiguration
@@ -382,9 +385,13 @@ func resolveBrokerAuthorizationPresets(broker *nvtv1alpha1.AgentRunBroker) {
 			continue
 		}
 		rules := make([]nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule, 0, len(grant.Resources))
+		prefix := grant.Authorization.ResourcePrefix
+		if prefix == "" {
+			prefix = "context/"
+		}
 		for _, resource := range grant.Resources {
 			rules = append(rules, nvtv1alpha1.AgentRunBrokerGrantAuthorizationRule{
-				Operation: "observe", Resource: "context/" + resource,
+				Operation: "observe", Resource: prefix + resource,
 			})
 		}
 		grant.Authorization = &nvtv1alpha1.AgentRunBrokerGrantAuthorization{DefaultAction: "deny", Rules: rules}

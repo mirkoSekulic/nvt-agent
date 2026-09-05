@@ -100,6 +100,13 @@ expands `observe` to a concrete default-deny rule for each exact
 `context/<name>` before creating the AgentRun, so the selected run is an
 immutable snapshot and the broker sees no preset protocol.
 
+Other providers can select a different opaque resource vocabulary with
+`authorization: {preset: observe, resourcePrefix: azure/}`. The prefix is
+profile-authoring metadata only; it is removed with the preset before raw
+AgentRun admission. Omission retains `context/` for kubeconfig compatibility.
+See the [Azure example](../../examples/azure/helm-values.yaml) and its
+[scope/credential contract](../../docs/azure-cli-mediation.md).
+
 The same profiles may define an optional administrator-owned
 `egressDomainPolicy`:
 

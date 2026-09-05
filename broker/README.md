@@ -6,6 +6,11 @@ broker-executed API requests, and audit logs.
 
 The agent image contains only `brokerctl`.
 
+The optional [Azure executable provider](../docs/azure-cli-mediation.md) keeps
+Azure CLI user enrollment and refresh broker-side while authorizing ARM and
+Log Analytics requests before injection. Its agent adapter holds only inert
+credentials and public account metadata.
+
 ## Local Run
 
 ```sh

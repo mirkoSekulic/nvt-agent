@@ -295,6 +295,11 @@ type AgentRunBrokerGrantAuthorization struct {
 	// Raw AgentRuns must contain concrete policy only.
 	// +kubebuilder:validation:Enum=observe
 	Preset string `json:"preset,omitempty"`
+	// ResourcePrefix is an opaque provider vocabulary prefix for profile preset
+	// expansion. Omission retains the existing context/ prefix. Like Preset it
+	// is resolved before AgentRun admission and never reaches broker core.
+	// +kubebuilder:validation:MaxLength=128
+	ResourcePrefix string `json:"resourcePrefix,omitempty"`
 	// +kubebuilder:validation:Enum=allow;deny
 	DefaultAction string `json:"defaultAction,omitempty"`
 	// +kubebuilder:validation:MaxItems=256
@@ -314,7 +319,7 @@ func (in *AgentRunBrokerGrantAuthorization) DeepCopy() *AgentRunBrokerGrantAutho
 	if in == nil {
 		return nil
 	}
-	out := &AgentRunBrokerGrantAuthorization{Preset: in.Preset, DefaultAction: in.DefaultAction}
+	out := &AgentRunBrokerGrantAuthorization{Preset: in.Preset, ResourcePrefix: in.ResourcePrefix, DefaultAction: in.DefaultAction}
 	if in.Rules != nil {
 		out.Rules = append([]AgentRunBrokerGrantAuthorizationRule{}, in.Rules...)
 	}

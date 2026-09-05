@@ -1,0 +1,40 @@
+name: azure-cli compatibility
+
+on:
+  push:
+    branches: [main]
+    paths: ["broker/providers/azure/**", "runtime/plugins/azure-cli/**", "tests/azure-cli/**", "egressd/**", "examples/azure/**", ".github/workflows/azure.yml"]
+  pull_request:
+    paths: ["broker/providers/azure/**", "runtime/plugins/azure-cli/**", "tests/azure-cli/**", "egressd/**", "examples/azure/**", ".github/workflows/azure.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  actual-cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: egressd/go.sum
+      - name: Install optional pinned Azure CLI environment
+        run: |
+          python3 -m venv /tmp/nvt-azure-cli
+          /tmp/nvt-azure-cli/bin/pip install azure-cli==2.89.1 PyYAML==6.0.3
+          AZURE_CONFIG_DIR=/tmp/nvt-azure-install AZURE_EXTENSION_DIR=/tmp/nvt-azure-extensions /tmp/nvt-azure-cli/bin/az extension add --name log-analytics --version 1.0.0b1 --yes
+      - name: Real CLI fixture compatibility
+        env:
+          AZURE_EXTENSION_DIR: /tmp/nvt-azure-extensions
+        run: /tmp/nvt-azure-cli/bin/python tests/azure-cli/compatibility.py
+      - name: Real CLI over egress TLS and explicit identity selection
+        working-directory: egressd
+        env:
+          NVT_AZURE_CLI_PYTHON: /tmp/nvt-azure-cli/bin/python
+          AZURE_EXTENSION_DIR: /tmp/nvt-azure-extensions
+        run: go test -race -count=1 -v -run TestAzureCLIThroughMediatedEgress ./internal/egress

@@ -1,0 +1,5 @@
+exports:
+  tools:
+    - name: az
+      command: /usr/local/lib/nvt-agent/plugins/azure-cli/az
+      description: Azure CLI through a selected broker identity, with inert local authentication

@@ -108,6 +108,7 @@ RUN chmod +x \
   /usr/local/bin/docker \
   /usr/local/bin/agentd \
   /usr/local/bin/agentdctl \
+  /usr/local/lib/nvt-agent/plugins/azure-cli/az \
   /usr/local/lib/nvt-agent/plugins/checkout-repos/run.py \
   /usr/local/lib/nvt-agent/plugins/git-credentials/run.py \
   /usr/local/lib/nvt-agent/plugins/git-credentials/git-credential-nvt.py \

@@ -58,6 +58,7 @@ jobs:
           helm package charts/nvt --app-version "${RELEASE_TAG}" --destination dist
           bash .github/scripts/release-scripts-test.sh
           bash tests/operator/helm/test.sh
+          bash tests/operator/helm/azure-test.sh
 
   release_metadata:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
