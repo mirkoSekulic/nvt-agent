@@ -133,8 +133,8 @@ func TestEpicStatusAmbiguousDeliveryAndRestart(t *testing.T) {
 	if err := poller.PollOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, found, err := store.GetRepoCursor(ctx, "acme/widget"); err != nil || found {
-		t.Fatal("advanced cursor while status reply uncertain")
+	if cursor, found, err := store.GetRepoCursor(ctx, "acme/widget"); err != nil || !found || !cursor.Equal(epicTestTime) {
+		t.Fatal("pending status reply blocked cursor advancement")
 	}
 	if !strings.Contains(github.createdIssueCommentBody, "awaiting-graph") || !strings.Contains(github.createdIssueCommentBody, "**pending**") {
 		t.Fatal(github.createdIssueCommentBody)
@@ -277,6 +277,113 @@ func TestEpicStatusRecoveryRespectsAuthorization(t *testing.T) {
 			if github.createIssueCommentCalls != 0 || github.listIssueCommentsCalls != 0 {
 				t.Fatal("unauthorized recovery accessed thread")
 			}
+		})
+	}
+}
+
+type epicStatusFailureGitHub struct {
+	*fakeGitHubClient
+	failList bool
+	failPost bool
+	feeds    map[string]*fakeGitHubClient
+	posts    map[string]int
+}
+
+func (g *epicStatusFailureGitHub) ListUpdatedIssueComments(ctx context.Context, repo Repository, since *time.Time) ([]GitHubIssueComment, error) {
+	return g.feeds[canonicalEpicRepository(repo)].ListUpdatedIssueComments(ctx, repo, since)
+}
+
+func (g *epicStatusFailureGitHub) ListIssueComments(ctx context.Context, repo Repository, parent int) ([]GitHubIssueComment, error) {
+	if canonicalEpicRepository(repo) == "acme/widget" && parent == 42 && g.failList {
+		return nil, errors.New("old status thread: HTTP 404")
+	}
+	return g.fakeGitHubClient.ListIssueComments(ctx, repo, parent)
+}
+
+func (g *epicStatusFailureGitHub) CreateIssueComment(_ context.Context, repo Repository, parent int, _ string) error {
+	if canonicalEpicRepository(repo) == "acme/widget" && parent == 42 && g.failPost {
+		return errors.New("old status reply: HTTP 503")
+	}
+	g.posts[fmt.Sprintf("%s#%d", canonicalEpicRepository(repo), parent)]++
+	return nil
+}
+
+func TestUnavailableEpicStatusDoesNotBlockPolling(t *testing.T) {
+	for _, failure := range []string{"list", "post"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "state.db")
+			store := openEpicTestStore(t, path)
+			epicCommand(t, store, CommandIntentEpicStart, 1)
+			snapshot := epicCommand(t, store, CommandIntentEpicStatus, 2).Epic
+			firstGitHub := &fakeGitHubClient{createIssueCommentErr: errors.New("initial POST failed")}
+			poller := NewPoller(epicPollerConfig(), firstGitHub, AgentRunSubmitter{}, store, nil)
+			poller.now = func() time.Time { return epicTestTime }
+			if pending, err := poller.deliverEpicStatus(ctx, epicTestRepo, 42, 2, *snapshot); err != nil || !pending {
+				t.Fatalf("first delivery: %v %v", pending, err)
+			}
+			// A second committed status reply must recover even when the first fails.
+			for i, intent := range []CommandIntent{CommandIntentEpicStart, CommandIntentEpicStatus} {
+				if _, err := store.ApplyEpicCommand(ctx, epicTestRepo, 44, epicTestUser, intent, int64(i+3), epicTestPolicy(), epicTestTime); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openEpicTestStore(t, path)
+			cfg := epicPollerConfig()
+			cfg.Repositories = append(cfg.Repositories, Repository{Owner: "acme", Name: "second"})
+			github := &epicStatusFailureGitHub{fakeGitHubClient: &fakeGitHubClient{}, failList: failure == "list", failPost: failure == "post", feeds: map[string]*fakeGitHubClient{}, posts: map[string]int{}}
+			now := epicTestTime.Add(2 * time.Minute)
+			for i, repo := range cfg.Repositories {
+				key := canonicalEpicRepository(repo)
+				github.feeds[key] = &fakeGitHubClient{filterUpdatedBySince: true, updatedComments: []GitHubIssueComment{{
+					ID: int64(100 + i), Body: "/nvtagent --help", User: epicTestUser, UpdatedAt: now.Add(time.Second),
+					IssueURL: fmt.Sprintf("https://api.github.com/repos/%s/issues/43", key),
+				}}}
+			}
+			poller = NewPoller(cfg, github, AgentRunSubmitter{}, store, nil)
+			poller.startedAt = now
+			poller.now = func() time.Time { return now }
+			for range 2 {
+				if err := poller.PollOnce(ctx); err != nil {
+					t.Fatal(err)
+				}
+				now = now.Add(2 * time.Minute)
+			}
+			for _, repo := range cfg.Repositories {
+				key := canonicalEpicRepository(repo)
+				if len(github.feeds[key].listUpdatedSince) != 2 {
+					t.Fatalf("blocked %s feed", key)
+				}
+				if github.posts[key+"#43"] != 1 {
+					t.Fatalf("help replies for %s: %d", key, github.posts[key+"#43"])
+				}
+				cursor, found, err := store.GetRepoCursor(ctx, key)
+				if err != nil || !found || !cursor.Equal(now.Add(-2*time.Minute)) {
+					t.Fatalf("blocked %s cursor: %v %v %v", key, cursor, found, err)
+				}
+			}
+			if github.posts["acme/widget#44"] != 1 {
+				t.Fatal("blocked or duplicated the second status reply")
+			}
+			pending, err := store.ListPendingEpicStatuses(ctx, epicTestRepo)
+			if err != nil || len(pending) != 1 || pending[0].CommentID != 2 {
+				t.Fatalf("lost unavailable reply: %+v %v", pending, err)
+			}
+			// Recovery still retries after normal polling advanced past every command.
+			github.failList = false
+			github.failPost = false
+			for range 2 {
+				if err := poller.PollOnce(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if github.posts["acme/widget#42"] != 1 {
+				t.Fatal("did not recover once thread became available")
+			}
+			assertNoPendingEpicStatuses(t, store)
 		})
 	}
 }

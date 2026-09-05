@@ -100,9 +100,7 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 	key := repo.Owner + "/" + repo.Name
 	deferredSubmission := false
 	if p.Config.Epics.Enabled {
-		var err error
-		deferredSubmission, err = p.reconcileEpicStatusReplies(ctx, repo)
-		if err != nil {
+		if err := p.reconcileEpicStatusReplies(ctx, repo); err != nil {
 			return err
 		}
 	}
@@ -154,11 +152,9 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			continue
 		}
 		if isEpicIntent(command.Intent) {
-			deferred, err := p.handleEpicCommand(ctx, repo, comment, command)
-			if err != nil {
+			if err := p.handleEpicCommand(ctx, repo, comment, command); err != nil {
 				return err
 			}
-			deferredSubmission = deferredSubmission || deferred
 			continue
 		}
 		if command.Intent == CommandIntentHelp {

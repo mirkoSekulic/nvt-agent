@@ -375,7 +375,10 @@ committed command and does not authorize work or change its outcome. Every poll
 recovers outstanding replies from committed status receipts, including commands
 without response state yet. Recovery uses the original snapshot and remains
 independent of the repository cursor, startup time, and source command feed;
-revoked initiating user IDs cannot receive a recovered reply.
+revoked initiating user IDs cannot receive a recovered reply. An unavailable
+status thread or failed GitHub reply remains pending without stopping other
+replies, incoming commands, repository cursors, or subsequent repositories.
+Invalid durable state still fails closed.
 
 The producer atomically commits each state change and its command receipt before
 advancing the existing repository cursor. Receipts include negative outcomes
