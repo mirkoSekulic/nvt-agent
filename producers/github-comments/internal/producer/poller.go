@@ -74,6 +74,20 @@ func (p *Poller) Run(ctx context.Context) error {
 }
 
 func (p *Poller) PollOnce(ctx context.Context) error {
+	if p.Config.Epics.Enabled {
+		if err := p.Config.Epics.validate(p.Config.Submission); err != nil {
+			return err
+		}
+		store, ok := p.State.(EpicStateStore)
+		if !ok {
+			return errors.New("epics require durable epic state storage")
+		}
+		for _, repo := range p.Config.Repositories {
+			if _, err := store.ListEpics(ctx, repo); err != nil {
+				return fmt.Errorf("recover epic state: %w", err)
+			}
+		}
+	}
 	for _, repo := range p.Config.Repositories {
 		if err := p.pollRepo(ctx, repo); err != nil {
 			return err
@@ -130,6 +144,14 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 				"author",
 				comment.User.Login,
 			)
+			continue
+		}
+		if isEpicIntent(command.Intent) {
+			deferred, err := p.handleEpicCommand(ctx, repo, comment, command)
+			if err != nil {
+				return err
+			}
+			deferredSubmission = deferredSubmission || deferred
 			continue
 		}
 		if command.Intent == CommandIntentHelp {
