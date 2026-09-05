@@ -35,6 +35,8 @@ type GitHubIssueComment struct {
 }
 
 type GitHubIssue struct {
+	ID      int64      `json:"id"`
+	State   string     `json:"state"`
 	Number  int        `json:"number"`
 	Title   string     `json:"title"`
 	Body    string     `json:"body"`
@@ -46,6 +48,7 @@ type GitHubIssue struct {
 }
 
 type GitHubUser struct {
+	Type  string `json:"type,omitempty"`
 	Login string `json:"login"`
 	ID    int64  `json:"id"`
 }

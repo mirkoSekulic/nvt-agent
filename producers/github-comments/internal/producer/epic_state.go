@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS epic_command_receipts (
 	if err != nil {
 		return fmt.Errorf("migrate epic state: %w", err)
 	}
-	return nil
+	return s.migrateEpicScheduling(ctx)
 }
 
 func decodeEpicRecord(raw, repo string, parent int) (EpicRecord, error) {
