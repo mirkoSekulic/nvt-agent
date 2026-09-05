@@ -74,6 +74,20 @@ func (p *Poller) Run(ctx context.Context) error {
 }
 
 func (p *Poller) PollOnce(ctx context.Context) error {
+	if p.Config.Epics.Enabled {
+		if err := p.Config.Epics.validate(p.Config.Submission); err != nil {
+			return err
+		}
+		store, ok := p.State.(EpicStateStore)
+		if !ok {
+			return errors.New("epics require durable epic state storage")
+		}
+		for _, repo := range p.Config.Repositories {
+			if _, err := store.ListEpics(ctx, repo); err != nil {
+				return fmt.Errorf("recover epic state: %w", err)
+			}
+		}
+	}
 	for _, repo := range p.Config.Repositories {
 		if err := p.pollRepo(ctx, repo); err != nil {
 			return err
@@ -84,6 +98,12 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 
 func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 	key := repo.Owner + "/" + repo.Name
+	deferredSubmission := false
+	if p.Config.Epics.Enabled {
+		if err := p.reconcileEpicStatusReplies(ctx, repo); err != nil {
+			return err
+		}
+	}
 	pendingReactions := make([]pendingSchedulingReaction, 0)
 	defer func() {
 		p.postSchedulingReactions(ctx, repo, pendingReactions)
@@ -111,7 +131,6 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		return fmt.Errorf("list updated issue comments for %s: %w", key, err)
 	}
 	nextCursor := pollStartedAt
-	deferredSubmission := false
 	for _, comment := range comments {
 		if comment.UpdatedAt.After(nextCursor) {
 			nextCursor = comment.UpdatedAt
@@ -130,6 +149,12 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 				"author",
 				comment.User.Login,
 			)
+			continue
+		}
+		if isEpicIntent(command.Intent) {
+			if err := p.handleEpicCommand(ctx, repo, comment, command); err != nil {
+				return err
+			}
 			continue
 		}
 		if command.Intent == CommandIntentHelp {

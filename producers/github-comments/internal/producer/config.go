@@ -50,6 +50,7 @@ const (
 )
 
 type Config struct {
+	Epics                   EpicConfig                `json:"epics,omitempty"`
 	CommandPrefixes         []string                  `json:"commandPrefixes,omitempty"`
 	AllowedAuthors          []string                  `json:"allowedAuthors,omitempty"`
 	PollInterval            Duration                  `json:"pollInterval,omitempty"`
@@ -215,6 +216,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 		c.Submission.ScheduleName = defaultScheduleName
 	}
 	if err := c.SchedulingReactions.applyDefaultsAndValidate(); err != nil {
+		return err
+	}
+	if err := c.Epics.validate(c.Submission); err != nil {
 		return err
 	}
 	if c.Idempotency.Scope == "" {

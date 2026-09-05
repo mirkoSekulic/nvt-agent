@@ -10,6 +10,12 @@ const (
 	CommandIntentReview     CommandIntent = "review"
 	CommandIntentRun        CommandIntent = "run"
 	CommandIntentHelp       CommandIntent = "help"
+	CommandIntentEpicStart  CommandIntent = "epic-start"
+	CommandIntentEpicStatus CommandIntent = "epic-status"
+	CommandIntentEpicPause  CommandIntent = "epic-pause"
+	CommandIntentEpicResume CommandIntent = "epic-resume"
+	CommandIntentEpicCancel CommandIntent = "epic-cancel"
+	CommandIntentEpicRetry  CommandIntent = "epic-retry"
 )
 
 type Command struct {
@@ -35,7 +41,7 @@ func ParseCommand(body string, prefixes []string) (Command, bool) {
 			if command.Intent == CommandIntentRun && command.AdditionalInstructions == "" {
 				return Command{}, false
 			}
-			if command.Intent == CommandIntentHelp && command.AdditionalInstructions != "" {
+			if (command.Intent == CommandIntentHelp || isEpicIntent(command.Intent)) && command.AdditionalInstructions != "" {
 				return Command{}, false
 			}
 			return command, true
@@ -56,6 +62,12 @@ func parseCommandLine(line, prefix string) (Command, bool) {
 		allowInline bool
 	}
 	commands := []candidate{
+		{text: "epic start", intent: CommandIntentEpicStart},
+		{text: "epic status", intent: CommandIntentEpicStatus},
+		{text: "epic pause", intent: CommandIntentEpicPause},
+		{text: "epic resume", intent: CommandIntentEpicResume},
+		{text: "epic cancel", intent: CommandIntentEpicCancel},
+		{text: "epic retry", intent: CommandIntentEpicRetry},
 		{text: "pr create", intent: CommandIntentPRCreate, allowInline: true},
 		{text: "pr continue", intent: CommandIntentPRContinue, allowInline: true},
 		{text: "review", intent: CommandIntentReview, allowInline: true},

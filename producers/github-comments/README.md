@@ -311,6 +311,94 @@ so registrations must not add `--provider`. That flag remains available for
 direct/local watcher configurations that intentionally select an in-agent
 credential provider.
 
+## Epic commands (state contract only)
+
+Epic support is opt-in and currently implements only commands, policy, and
+SQLite state. It does **not** load graphs, admit child AgentRuns, discover PRs,
+or advance after merges. An enabled epic remains gated at `awaiting-graph`.
+The scheduling and PR stages must explicitly extend this contract before any
+child work can run.
+
+Configure profiled schedule admission as above, then add administrator-owned
+settings:
+
+```yaml
+epics:
+  enabled: true
+  workflow: implement-pr
+  maxParallel: 1
+  allowedUserIDs: [12345678] # immutable numeric GitHub user IDs
+```
+
+Omitting `epics` or setting only `enabled: false` leaves epic commands inert.
+Enabled epics require a workflow name, an explicit nonempty user-ID allowlist,
+profiled schedule admission, and SQLite storage. `maxParallel` defaults to 1;
+other values are unsupported in this initial contract. Unknown epic fields,
+invalid IDs, duplicates, and settings supplied with `enabled: false` are errors.
+No profile or credential selector is accepted in the epic configuration. The
+configured workflow names an administrator-owned admission workflow; it does
+not grant profile access or bypass the admission authority.
+
+Commands use the configured prefix and are valid only on ordinary issues:
+
+```text
+/nvtagent epic start
+/nvtagent epic status
+/nvtagent epic pause
+/nvtagent epic resume
+/nvtagent epic cancel
+/nvtagent epic retry
+```
+
+Commands accept no arguments, inline instructions, multiline instructions, or
+workflow/profile overrides. Issue bodies and thread comments cannot select
+policy or supply a graph. The existing `allowedAuthors` filter still applies,
+and the numeric user ID must be in `epics.allowedUserIDs`. Only the original
+initiator can subsequently control or inspect that epic. Removing that ID
+revokes access, including replayed commands; a login rename cannot transfer
+ownership. Workflow, initiating principal, and parallelism are frozen at start.
+
+| Command | State contract |
+| --- | --- |
+| `start` | Creates `pending`, generation 1; repeated starts preserve the existing nonterminal epic. |
+| `status` | Returns the durable snapshot for this command in one restart-safe reply. |
+| `pause` | Moves `pending` to `paused`; already paused is a no-op. |
+| `resume` | Moves `paused` to `pending` without changing generation. |
+| `cancel` | Moves to terminal `canceled`; repeated cancellation is a no-op. |
+| `retry` | Moves `paused` to `pending` with a new generation, reserving distinct future child identities. |
+
+Other transitions are rejected. A canceled epic cannot restart. State-changing
+commands record their result in producer logs; `status` provides the current
+snapshot on request. Edited parent/child status projections are deferred to the
+scheduling stage. A failed status reply retries independently of the already
+committed command and does not authorize work or change its outcome. Every poll
+recovers outstanding replies from committed status receipts, including commands
+without response state yet. Recovery uses the original snapshot and remains
+independent of the repository cursor, startup time, and source command feed;
+revoked initiating user IDs cannot receive a recovered reply. An unavailable
+status thread or failed GitHub reply remains pending without stopping other
+replies, incoming commands, repository cursors, or subsequent repositories.
+Invalid durable state still fails closed.
+
+The producer atomically commits each state change and its command receipt before
+advancing the existing repository cursor. Receipts include negative outcomes
+and are retained: replaying or editing a processed comment cannot create a new
+transition. A new command requires a new comment. Restart loads validated,
+versioned epic records directly from SQLite, without reading source comments.
+Persist the database on a durable volume; do not delete receipts to retry work.
+Unknown lifecycle/reconciliation values, extra fields (including unsupported
+or malformed graph data), and contradictory persisted identities fail closed.
+This stage accepts no graph data; loading and validating native GitHub graphs
+belongs to the next stage.
+
+Future child-attempt keys have the deterministic form
+`github:<owner>/<repo>:epic:<parent>:generation:<generation>:child:<child>:attempt:<attempt>`.
+Repository names are normalized to lowercase; all numeric components must be
+positive, and the child must differ from the parent. The admission key appends
+`:intent:create_pr`. These keys do not depend on a command comment, poll cursor,
+mutable issue text, workflow change, or process lifetime. Defining the keys does
+not enable admission in this stage.
+
 ## Local Run
 
 By default the producer submits to the operator admission API:
