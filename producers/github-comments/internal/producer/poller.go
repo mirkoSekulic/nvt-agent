@@ -78,12 +78,18 @@ func (p *Poller) Run(ctx context.Context) error {
 func (p *Poller) PollOnce(ctx context.Context) error {
 	p.pollMu.Lock()
 	defer p.pollMu.Unlock()
+	var errs []error
 	for _, repo := range p.Config.Repositories {
 		if err := p.pollRepo(ctx, repo); err != nil {
-			return err
+			errs = append(errs, err)
+		}
+		if p.Config.Epics.Enabled {
+			if err := p.reconcileEpics(ctx, repo); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {

@@ -25,6 +25,9 @@ import (
 )
 
 type GitHubIssueComment struct {
+	App *struct {
+		ID int64 `json:"id"`
+	} `json:"performed_via_github_app"`
 	ID        int64      `json:"id"`
 	Body      string     `json:"body"`
 	HTMLURL   string     `json:"html_url"`
@@ -35,12 +38,15 @@ type GitHubIssueComment struct {
 }
 
 type GitHubIssue struct {
-	Number  int        `json:"number"`
-	Title   string     `json:"title"`
-	Body    string     `json:"body"`
-	URL     string     `json:"url"`
-	HTMLURL string     `json:"html_url"`
-	User    GitHubUser `json:"user"`
+	ID            int64      `json:"id"`
+	State         string     `json:"state"`
+	RepositoryURL string     `json:"repository_url"`
+	Number        int        `json:"number"`
+	Title         string     `json:"title"`
+	Body          string     `json:"body"`
+	URL           string     `json:"url"`
+	HTMLURL       string     `json:"html_url"`
+	User          GitHubUser `json:"user"`
 	// PullRequest is set by GitHub when an issue resource represents a pull request.
 	PullRequest *GitHubPullRequest `json:"pull_request,omitempty"`
 }

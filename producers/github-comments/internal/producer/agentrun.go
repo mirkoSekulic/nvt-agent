@@ -139,6 +139,7 @@ const (
 )
 
 type submissionResult struct {
+	AgentRun       *scheduleAdmissionAgentRun
 	IdempotencyKey string
 	Created        bool
 	Outcome        schedulingOutcome
@@ -284,6 +285,7 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 			IdempotencyKey: identity.Key,
 			Created:        true,
 			Outcome:        schedulingOutcomeAccepted,
+			AgentRun:       decoded.AgentRun,
 		}, nil
 	case http.StatusAccepted:
 		decoded, decodeErr := decodeScheduleAdmissionContract(responseBody)
@@ -295,11 +297,12 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 				IdempotencyKey: identity.Key,
 				Created:        true,
 				Outcome:        schedulingOutcomeAccepted,
+				AgentRun:       decoded.AgentRun,
 			}, nil
 		}
 		switch decoded.Reason {
 		case "duplicate-work":
-			return submissionResult{IdempotencyKey: identity.Key, Outcome: schedulingOutcomeAccepted}, nil
+			return submissionResult{IdempotencyKey: identity.Key, Outcome: schedulingOutcomeAccepted, AgentRun: decoded.AgentRun}, nil
 		case "schedule-suspended":
 			return submissionResult{
 				IdempotencyKey: identity.Key,
@@ -438,7 +441,10 @@ func (s AgentRunSubmitter) scheduleAdmissionPayload(
 			return nil, "", workflowErr
 		}
 		prompt := buildPrompt(repo, issue, comments, commandComment, command)
-		if isCooperativeIntent(command.Intent) && len([]byte(prompt)) > maxResolvedRunPromptBytes {
+		if command.epicPrompt != "" {
+			prompt = command.epicPrompt
+		}
+		if (isCooperativeIntent(command.Intent) || command.epicPrompt != "") && len([]byte(prompt)) > maxResolvedRunPromptBytes {
 			return nil, "", errCommandPromptTooLarge
 		}
 		return profiledScheduleAdmissionRequest{
@@ -565,6 +571,9 @@ func (s AgentRunSubmitter) buildAgentRun(
 		return nil, err
 	}
 	prompt := buildPrompt(repo, issue, comments, commandComment, command)
+	if command.epicPrompt != "" {
+		prompt = command.epicPrompt
+	}
 	run := &nvtv1alpha1.AgentRun{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: nvtv1alpha1.GroupVersion.String(),

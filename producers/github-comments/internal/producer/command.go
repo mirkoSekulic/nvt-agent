@@ -14,6 +14,7 @@ const (
 )
 
 type Command struct {
+	epicPrompt             string
 	EpicAction             string
 	Prefix                 string
 	Intent                 CommandIntent

@@ -65,14 +65,17 @@ type Epic struct {
 	Children    []EpicChild
 }
 type EpicChild struct {
-	Issue        GitHubIssue
-	Dependencies []int
-	Attempt      int
-	State        string
-	Reason       string
-	Key          string
-	Run          *scheduleAdmissionAgentRun
-	ScheduledAt  time.Time
+	Prompt          string
+	Reaction        string
+	ReactionPending bool
+	Issue           GitHubIssue
+	Dependencies    []int
+	Attempt         int
+	State           string
+	Reason          string
+	Key             string
+	Run             *scheduleAdmissionAgentRun
+	ScheduledAt     time.Time
 }
 
 func epicAttemptKey(e Epic, child, attempt int) string {
