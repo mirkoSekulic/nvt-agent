@@ -78,19 +78,30 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 		if err := p.Config.Epics.validate(p.Config.Submission); err != nil {
 			return err
 		}
-		store, ok := p.State.(EpicStateStore)
+		store, ok := p.State.(EpicSchedulingStore)
 		if !ok {
 			return errors.New("epics require durable epic state storage")
 		}
 		for _, repo := range p.Config.Repositories {
-			if _, err := store.ListEpics(ctx, repo); err != nil {
+			epics, err := store.ListEpics(ctx, repo)
+			if err != nil {
 				return fmt.Errorf("recover epic state: %w", err)
+			}
+			for _, epic := range epics {
+				if _, err := store.LoadEpicSchedule(ctx, repo, epic); err != nil {
+					return err
+				}
 			}
 		}
 	}
 	for _, repo := range p.Config.Repositories {
 		if err := p.pollRepo(ctx, repo); err != nil {
 			return err
+		}
+		if p.Config.Epics.Enabled {
+			if err := p.reconcileEpics(ctx, repo); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -99,11 +110,6 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 	key := repo.Owner + "/" + repo.Name
 	deferredSubmission := false
-	if p.Config.Epics.Enabled {
-		if err := p.reconcileEpicStatusReplies(ctx, repo); err != nil {
-			return err
-		}
-	}
 	pendingReactions := make([]pendingSchedulingReaction, 0)
 	defer func() {
 		p.postSchedulingReactions(ctx, repo, pendingReactions)

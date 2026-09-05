@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -106,7 +105,7 @@ func TestEpicPollerRestartAfterCursorFailure(t *testing.T) {
 	if err != nil || len(records) != 1 || records[0].Generation != 2 || records[0].State != EpicPending || records[0].Workflow != "implement-pr" {
 		t.Fatalf("restart: %+v %v", records, err)
 	}
-	if github.listIssueCommentsCalls != 0 || github.createIssueCommentCalls != 0 || len(github.reactions) != 0 {
+	if github.createIssueCommentCalls != 0 || len(github.reactions) != 0 {
 		t.Fatal("control command entered child submission/display path")
 	}
 	// A restart with no source comments still recovers the same reconciliation input.
@@ -117,48 +116,6 @@ func TestEpicPollerRestartAfterCursorFailure(t *testing.T) {
 	recovered, err := store.ListEpics(ctx, epicTestRepo)
 	if err != nil || len(recovered) != 1 || recovered[0].Generation != 2 {
 		t.Fatalf("comment-free recovery: %+v %v", recovered, err)
-	}
-}
-
-func TestEpicStatusAmbiguousDeliveryAndRestart(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "state.db")
-	store := openEpicTestStore(t, path)
-	github := &fakeGitHubClient{issue: GitHubIssue{Number: 42}, updatedComments: []GitHubIssueComment{
-		epicPollComment("start", 1), epicPollComment("status", 2),
-	}, createIssueCommentErr: errors.New("ambiguous POST"), filterUpdatedBySince: true}
-	poller := NewPoller(epicPollerConfig(), github, AgentRunSubmitter{}, store, nil)
-	poller.startedAt = epicTestTime.Add(-time.Minute)
-	poller.now = func() time.Time { return epicTestTime }
-	if err := poller.PollOnce(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if cursor, found, err := store.GetRepoCursor(ctx, "acme/widget"); err != nil || !found || !cursor.Equal(epicTestTime) {
-		t.Fatal("pending status reply blocked cursor advancement")
-	}
-	if !strings.Contains(github.createdIssueCommentBody, "awaiting-graph") || !strings.Contains(github.createdIssueCommentBody, "**pending**") {
-		t.Fatal(github.createdIssueCommentBody)
-	}
-	github.issueComments = []GitHubIssueComment{{ID: 100, Body: github.createdIssueCommentBody}}
-	github.createIssueCommentErr = nil
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store = openEpicTestStore(t, path)
-	poller = NewPoller(epicPollerConfig(), github, AgentRunSubmitter{}, store, nil)
-	poller.startedAt = epicTestTime.Add(2 * time.Minute)
-	poller.now = func() time.Time { return poller.startedAt }
-	for range 2 {
-		if err := poller.PollOnce(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	assertNoPendingEpicStatuses(t, store)
-	if github.createIssueCommentCalls != 1 {
-		t.Fatalf("duplicate status replies: %d", github.createIssueCommentCalls)
-	}
-	if _, found, err := store.GetRepoCursor(ctx, "acme/widget"); err != nil || !found {
-		t.Fatal("cursor failed to advance after response reconciliation")
 	}
 }
 
@@ -193,70 +150,6 @@ func assertNoPendingEpicStatuses(t *testing.T, store *SQLiteStateStore) {
 	}
 }
 
-func TestEpicStatusRecoveryOutsideCommentFeed(t *testing.T) {
-	for _, responseCreated := range []bool{false, true} {
-		for _, cursorSaved := range []bool{false, true} {
-			t.Run(fmt.Sprintf("responseCreated=%t/cursorSaved=%t", responseCreated, cursorSaved), func(t *testing.T) {
-				ctx := context.Background()
-				path := filepath.Join(t.TempDir(), "state.db")
-				store := openEpicTestStore(t, path)
-				epicCommand(t, store, CommandIntentEpicStart, 1)
-				snapshot := epicCommand(t, store, CommandIntentEpicStatus, 2).Epic
-				github := &fakeGitHubClient{filterUpdatedBySince: true, issue: GitHubIssue{Number: 42},
-					updatedComments:       []GitHubIssueComment{epicPollComment("status", 2)},
-					createIssueCommentErr: errors.New("POST failed before delivery"),
-				}
-				poller := NewPoller(epicPollerConfig(), github, AgentRunSubmitter{}, store, nil)
-				poller.now = func() time.Time { return epicTestTime }
-				if responseCreated {
-					if pending, err := poller.deliverEpicStatus(ctx, epicTestRepo, 42, 2, *snapshot); err != nil || !pending {
-						t.Fatalf("first delivery: %v %v", pending, err)
-					}
-				}
-				// Change the live epic after the status command. Recovery must deliver
-				// the command's snapshot without reapplying it to current epic state.
-				epicCommand(t, store, CommandIntentEpicPause, 3)
-				if cursorSaved {
-					if err := store.SetRepoCursor(ctx, "acme/widget", epicTestTime.Add(time.Minute)); err != nil {
-						t.Fatal(err)
-					}
-					// A deleted or edited source command cannot strand its accepted reply.
-					github.updatedComments = nil
-				}
-				if err := store.Close(); err != nil {
-					t.Fatal(err)
-				}
-				store = openEpicTestStore(t, path)
-				github.createIssueCommentErr = nil
-				before := github.createIssueCommentCalls
-				poller = NewPoller(epicPollerConfig(), github, AgentRunSubmitter{}, store, nil)
-				poller.startedAt = epicTestTime.Add(2 * time.Minute)
-				poller.now = func() time.Time { return poller.startedAt }
-				for range 2 {
-					if err := poller.PollOnce(ctx); err != nil {
-						t.Fatal(err)
-					}
-				}
-				if github.createIssueCommentCalls != before+1 {
-					t.Fatalf("recovery POST count: %d, want %d", github.createIssueCommentCalls, before+1)
-				}
-				if !strings.Contains(github.createdIssueCommentBody, "**pending**") {
-					t.Fatal("recovered current state instead of original snapshot")
-				}
-				assertNoPendingEpicStatuses(t, store)
-				records, err := store.ListEpics(ctx, epicTestRepo)
-				if err != nil || len(records) != 1 || records[0].State != EpicPaused || records[0].Generation != 1 {
-					t.Fatalf("recovery mutated state: %+v %v", records, err)
-				}
-				cursor, found, err := store.GetRepoCursor(ctx, "acme/widget")
-				if err != nil || !found || !cursor.Equal(poller.startedAt) {
-					t.Fatalf("recovery cursor: %v %v %v", cursor, found, err)
-				}
-			})
-		}
-	}
-}
-
 func TestEpicStatusRecoveryRespectsAuthorization(t *testing.T) {
 	for _, disabled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("disabled=%t", disabled), func(t *testing.T) {
@@ -281,109 +174,12 @@ func TestEpicStatusRecoveryRespectsAuthorization(t *testing.T) {
 	}
 }
 
-type epicStatusFailureGitHub struct {
-	*fakeGitHubClient
-	failList bool
-	failPost bool
-	feeds    map[string]*fakeGitHubClient
-	posts    map[string]int
+func (g *fakeGitHubClient) ListSubIssues(context.Context, Repository, int) ([]GitHubIssue, error) {
+	return nil, errors.New("unavailable graph")
 }
-
-func (g *epicStatusFailureGitHub) ListUpdatedIssueComments(ctx context.Context, repo Repository, since *time.Time) ([]GitHubIssueComment, error) {
-	return g.feeds[canonicalEpicRepository(repo)].ListUpdatedIssueComments(ctx, repo, since)
+func (g *fakeGitHubClient) ListIssueBlockers(context.Context, Repository, int) ([]GitHubIssue, error) {
+	return nil, errors.New("unavailable graph")
 }
-
-func (g *epicStatusFailureGitHub) ListIssueComments(ctx context.Context, repo Repository, parent int) ([]GitHubIssueComment, error) {
-	if canonicalEpicRepository(repo) == "acme/widget" && parent == 42 && g.failList {
-		return nil, errors.New("old status thread: HTTP 404")
-	}
-	return g.fakeGitHubClient.ListIssueComments(ctx, repo, parent)
-}
-
-func (g *epicStatusFailureGitHub) CreateIssueComment(_ context.Context, repo Repository, parent int, _ string) error {
-	if canonicalEpicRepository(repo) == "acme/widget" && parent == 42 && g.failPost {
-		return errors.New("old status reply: HTTP 503")
-	}
-	g.posts[fmt.Sprintf("%s#%d", canonicalEpicRepository(repo), parent)]++
-	return nil
-}
-
-func TestUnavailableEpicStatusDoesNotBlockPolling(t *testing.T) {
-	for _, failure := range []string{"list", "post"} {
-		t.Run(failure, func(t *testing.T) {
-			ctx := context.Background()
-			path := filepath.Join(t.TempDir(), "state.db")
-			store := openEpicTestStore(t, path)
-			epicCommand(t, store, CommandIntentEpicStart, 1)
-			snapshot := epicCommand(t, store, CommandIntentEpicStatus, 2).Epic
-			firstGitHub := &fakeGitHubClient{createIssueCommentErr: errors.New("initial POST failed")}
-			poller := NewPoller(epicPollerConfig(), firstGitHub, AgentRunSubmitter{}, store, nil)
-			poller.now = func() time.Time { return epicTestTime }
-			if pending, err := poller.deliverEpicStatus(ctx, epicTestRepo, 42, 2, *snapshot); err != nil || !pending {
-				t.Fatalf("first delivery: %v %v", pending, err)
-			}
-			// A second committed status reply must recover even when the first fails.
-			for i, intent := range []CommandIntent{CommandIntentEpicStart, CommandIntentEpicStatus} {
-				if _, err := store.ApplyEpicCommand(ctx, epicTestRepo, 44, epicTestUser, intent, int64(i+3), epicTestPolicy(), epicTestTime); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := store.Close(); err != nil {
-				t.Fatal(err)
-			}
-			store = openEpicTestStore(t, path)
-			cfg := epicPollerConfig()
-			cfg.Repositories = append(cfg.Repositories, Repository{Owner: "acme", Name: "second"})
-			github := &epicStatusFailureGitHub{fakeGitHubClient: &fakeGitHubClient{}, failList: failure == "list", failPost: failure == "post", feeds: map[string]*fakeGitHubClient{}, posts: map[string]int{}}
-			now := epicTestTime.Add(2 * time.Minute)
-			for i, repo := range cfg.Repositories {
-				key := canonicalEpicRepository(repo)
-				github.feeds[key] = &fakeGitHubClient{filterUpdatedBySince: true, updatedComments: []GitHubIssueComment{{
-					ID: int64(100 + i), Body: "/nvtagent --help", User: epicTestUser, UpdatedAt: now.Add(time.Second),
-					IssueURL: fmt.Sprintf("https://api.github.com/repos/%s/issues/43", key),
-				}}}
-			}
-			poller = NewPoller(cfg, github, AgentRunSubmitter{}, store, nil)
-			poller.startedAt = now
-			poller.now = func() time.Time { return now }
-			for range 2 {
-				if err := poller.PollOnce(ctx); err != nil {
-					t.Fatal(err)
-				}
-				now = now.Add(2 * time.Minute)
-			}
-			for _, repo := range cfg.Repositories {
-				key := canonicalEpicRepository(repo)
-				if len(github.feeds[key].listUpdatedSince) != 2 {
-					t.Fatalf("blocked %s feed", key)
-				}
-				if github.posts[key+"#43"] != 1 {
-					t.Fatalf("help replies for %s: %d", key, github.posts[key+"#43"])
-				}
-				cursor, found, err := store.GetRepoCursor(ctx, key)
-				if err != nil || !found || !cursor.Equal(now.Add(-2*time.Minute)) {
-					t.Fatalf("blocked %s cursor: %v %v %v", key, cursor, found, err)
-				}
-			}
-			if github.posts["acme/widget#44"] != 1 {
-				t.Fatal("blocked or duplicated the second status reply")
-			}
-			pending, err := store.ListPendingEpicStatuses(ctx, epicTestRepo)
-			if err != nil || len(pending) != 1 || pending[0].CommentID != 2 {
-				t.Fatalf("lost unavailable reply: %+v %v", pending, err)
-			}
-			// Recovery still retries after normal polling advanced past every command.
-			github.failList = false
-			github.failPost = false
-			for range 2 {
-				if err := poller.PollOnce(ctx); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if github.posts["acme/widget#42"] != 1 {
-				t.Fatal("did not recover once thread became available")
-			}
-			assertNoPendingEpicStatuses(t, store)
-		})
-	}
+func (g *fakeGitHubClient) WriteEpicComment(context.Context, Repository, int, int64, string) (GitHubIssueComment, error) {
+	return GitHubIssueComment{}, errors.New("unavailable display")
 }

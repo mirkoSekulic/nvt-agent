@@ -113,10 +113,9 @@ const (
 	EpicCanceled EpicLifecycle = "canceled"
 )
 
-// EpicRecord is the versioned reconciliation input. Stage one has no graph or
-// child admissions: every record is explicitly gated on loading a native graph.
-// A later implementation must migrate and validate this contract before work
-// can advance. Unknown fields, graph data and lifecycle values fail closed.
+// EpicRecord retains the reviewed version-one command contract. Native graph,
+// admission attempts and display delivery live in separately versioned scheduling
+// records; awaiting-graph here is the initial command reconciliation input.
 type EpicRecord struct {
 	Version        int                        `json:"version"`
 	Repository     string                     `json:"repository"`

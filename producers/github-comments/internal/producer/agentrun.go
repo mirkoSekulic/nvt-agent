@@ -142,6 +142,7 @@ type submissionResult struct {
 	IdempotencyKey string
 	Created        bool
 	Outcome        schedulingOutcome
+	AgentRun       *scheduleAdmissionAgentRun
 }
 
 func (s AgentRunSubmitter) submitDirect(
@@ -246,6 +247,10 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 		}
 		return submissionResult{}, err
 	}
+	return s.postScheduleAdmission(ctx, payload, token, identity)
+}
+
+func (s AgentRunSubmitter) postScheduleAdmission(ctx context.Context, payload any, token string, identity agentRunIdentity) (submissionResult, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return submissionResult{}, fmt.Errorf("marshal schedule admission: %w", err)
@@ -284,6 +289,7 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 			IdempotencyKey: identity.Key,
 			Created:        true,
 			Outcome:        schedulingOutcomeAccepted,
+			AgentRun:       decoded.AgentRun,
 		}, nil
 	case http.StatusAccepted:
 		decoded, decodeErr := decodeScheduleAdmissionContract(responseBody)
@@ -295,11 +301,12 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 				IdempotencyKey: identity.Key,
 				Created:        true,
 				Outcome:        schedulingOutcomeAccepted,
+				AgentRun:       decoded.AgentRun,
 			}, nil
 		}
 		switch decoded.Reason {
 		case "duplicate-work":
-			return submissionResult{IdempotencyKey: identity.Key, Outcome: schedulingOutcomeAccepted}, nil
+			return submissionResult{IdempotencyKey: identity.Key, Outcome: schedulingOutcomeAccepted, AgentRun: decoded.AgentRun}, nil
 		case "schedule-suspended":
 			return submissionResult{
 				IdempotencyKey: identity.Key,

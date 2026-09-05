@@ -311,13 +311,16 @@ so registrations must not add `--provider`. That flag remains available for
 direct/local watcher configurations that intentionally select an in-agent
 credential provider.
 
-## Epic commands (state contract only)
+## Epic commands and scheduling
 
-Epic support is opt-in and currently implements only commands, policy, and
-SQLite state. It does **not** load graphs, admit child AgentRuns, discover PRs,
-or advance after merges. An enabled epic remains gated at `awaiting-graph`.
-The scheduling and PR stages must explicitly extend this contract before any
-child work can run.
+Epic support is opt-in. The producer loads native GitHub sub-issues and their
+`blocked_by` dependencies, validates the complete graph, and admits the lowest
+numbered open, unblocked child through profiled schedule admission. The graph
+must contain ordinary issues in the parent repository. Open dependencies outside
+the epic (including other repositories) also block a child; closed dependencies
+are satisfied for initial selection. Duplicate or inconsistent identities,
+cycles, self/parent dependencies, inaccessible pages, and unsupported graph data
+fail closed. Body text and checklists never define the graph.
 
 Configure profiled schedule admission as above, then add administrator-owned
 settings:
@@ -361,43 +364,61 @@ ownership. Workflow, initiating principal, and parallelism are frozen at start.
 | Command | State contract |
 | --- | --- |
 | `start` | Creates `pending`, generation 1; repeated starts preserve the existing nonterminal epic. |
-| `status` | Returns the durable snapshot for this command in one restart-safe reply. |
+| `status` | Refreshes the single parent status comment from current durable state. |
 | `pause` | Moves `pending` to `paused`; already paused is a no-op. |
 | `resume` | Moves `paused` to `pending` without changing generation. |
 | `cancel` | Moves to terminal `canceled`; repeated cancellation is a no-op. |
-| `retry` | Moves `paused` to `pending` with a new generation, reserving distinct future child identities. |
+| `retry` | Moves `paused` to `pending` with a new generation; rejected admissions can be attempted again. |
 
-Other transitions are rejected. A canceled epic cannot restart. State-changing
-commands record their result in producer logs; `status` provides the current
-snapshot on request. Edited parent/child status projections are deferred to the
-scheduling stage. A failed status reply retries independently of the already
-committed command and does not authorize work or change its outcome. Every poll
-recovers outstanding replies from committed status receipts, including commands
-without response state yet. Recovery uses the original snapshot and remains
-independent of the repository cursor, startup time, and source command feed;
-revoked initiating user IDs cannot receive a recovered reply. An unavailable
-status thread or failed GitHub reply remains pending without stopping other
-replies, incoming commands, repository cursors, or subsequent repositories.
-Invalid durable state still fails closed.
+An accepted child keeps the single admission slot, including after pause/retry,
+issue closure, or removal from the epic. **This stage does not discover PRs,
+associate them, inspect AgentRun lifecycle, or advance after merges.** A child
+remains `Running` after acceptance until the later verified merge stage is
+implemented. Do not use issue closure or agent completion prose to release it.
+Cancel stops new admissions; it does not cancel an already accepted AgentRun.
 
-The producer atomically commits each state change and its command receipt before
-advancing the existing repository cursor. Receipts include negative outcomes
-and are retained: replaying or editing a processed comment cannot create a new
-transition. A new command requires a new comment. Restart loads validated,
-versioned epic records directly from SQLite, without reading source comments.
-Persist the database on a durable volume; do not delete receipts to retry work.
-Unknown lifecycle/reconciliation values, extra fields (including unsupported
-or malformed graph data), and contradictory persisted identities fail closed.
-This stage accepts no graph data; loading and validating native GitHub graphs
-belongs to the next stage.
+The initiator's immutable principal and configured epic workflow are used for
+every child, regardless of the child author or ordinary command workflow
+mapping. Before admission, SQLite reserves a deterministic work identity and
+freezes the exact source child and profiled request. Retries of an uncertain
+admission reuse that request, even across restart, edits, and control retries.
+A later rejection of an uncertain request retains its original identity and
+shows `Failed`: it cannot prove the earlier request was not accepted. Retries
+still require a currently open, unblocked child. The admission authority
+owns deduplication when a response or local commit is lost. The producer retains
+accepted identity locally and never resubmits accepted work. A definitive
+rejection is `Failed`, consumes no accepted slot, and leaves control state and
+generation unchanged; correct policy, then explicitly pause/retry. Deferred or
+uncertain submissions remain `Queued` and reserve their selection until resolved.
 
-Future child-attempt keys have the deterministic form
-`github:<owner>/<repo>:epic:<parent>:generation:<generation>:child:<child>:attempt:<attempt>`.
+One producer-owned parent comment and one per child are edited in place. Parent
+rows sort by issue number and report `Blocked`, `Queued`, `Running`, or `Failed`,
+with reasons. Child status includes the accepted AgentRun namespace/name (local
+session name when available), acceptance time, and work ID. Graph read failures
+retain the last durable snapshot and visibly block scheduling. Comment and
+reaction delivery retries independently, without blocking normal command
+cursors or creating another AgentRun. A random marker persisted before comment
+creation recovers uncertain writes from bot-authored comments; copied human
+markers cannot redirect edits. Accepted/rejected reactions are applied to the
+child status comment. Deleted status comments remain a visible delivery failure
+in producer logs; they are not silently replaced with status noise.
+
+The producer atomically commits each control change and its command receipt
+before advancing the repository cursor. Receipts include negative outcomes and
+are retained: replaying or editing a processed comment cannot create a new
+transition. Restart validates both the reviewed version-one control records and
+separate versioned scheduling records. Existing stage-one status receipts are
+fulfilled through the current parent projection; historical replies are retained.
+Persist the SQLite database on a durable volume. Unknown versions, extra fields,
+invalid graphs, and contradictory persisted source/admission identities fail
+closed. Display state is a projection, never scheduling authority.
+
+Child-attempt keys have the deterministic form
+`github:<owner>/<repo>:epic:<parent>:generation:<generation>:child:<child>:attempt:1`.
 Repository names are normalized to lowercase; all numeric components must be
 positive, and the child must differ from the parent. The admission key appends
-`:intent:create_pr`. These keys do not depend on a command comment, poll cursor,
-mutable issue text, workflow change, or process lifetime. Defining the keys does
-not enable admission in this stage.
+`:intent:create_pr`. Keys do not depend on a command comment, poll cursor,
+mutable issue text, workflow change, or process lifetime.
 
 ## Local Run
 
