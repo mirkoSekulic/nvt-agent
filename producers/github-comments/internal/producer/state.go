@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS help_comment_responses (
 	if err != nil {
 		return fmt.Errorf("migrate sqlite state: %w", err)
 	}
-	return nil
+	return s.migrateEpics(ctx)
 }
 
 func (s *SQLiteStateStore) GetRepoCursor(ctx context.Context, repoKey string) (time.Time, bool, error) {

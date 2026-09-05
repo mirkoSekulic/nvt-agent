@@ -10,9 +10,11 @@ const (
 	CommandIntentReview     CommandIntent = "review"
 	CommandIntentRun        CommandIntent = "run"
 	CommandIntentHelp       CommandIntent = "help"
+	CommandIntentEpic       CommandIntent = "epic"
 )
 
 type Command struct {
+	EpicAction             string
 	Prefix                 string
 	Intent                 CommandIntent
 	AdditionalInstructions string
@@ -35,7 +37,7 @@ func ParseCommand(body string, prefixes []string) (Command, bool) {
 			if command.Intent == CommandIntentRun && command.AdditionalInstructions == "" {
 				return Command{}, false
 			}
-			if command.Intent == CommandIntentHelp && command.AdditionalInstructions != "" {
+			if (command.Intent == CommandIntentHelp || command.Intent == CommandIntentEpic) && command.AdditionalInstructions != "" {
 				return Command{}, false
 			}
 			return command, true
@@ -50,6 +52,11 @@ func parseCommandLine(line, prefix string) (Command, bool) {
 		return Command{}, false
 	}
 	remainder := strings.TrimPrefix(line, prefix+" ")
+	for _, action := range []string{"start", "status", "pause", "resume", "cancel", "retry"} {
+		if remainder == "epic "+action {
+			return Command{Prefix: prefix, Intent: CommandIntentEpic, EpicAction: action}, true
+		}
+	}
 	type candidate struct {
 		text        string
 		intent      CommandIntent

@@ -50,6 +50,7 @@ const (
 )
 
 type Config struct {
+	Epics                   EpicConfig                `json:"epics,omitempty"`
 	CommandPrefixes         []string                  `json:"commandPrefixes,omitempty"`
 	AllowedAuthors          []string                  `json:"allowedAuthors,omitempty"`
 	PollInterval            Duration                  `json:"pollInterval,omitempty"`
@@ -298,6 +299,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if len(c.Submission.CommandWorkflows) != 0 &&
 		(c.Submission.Mode != SubmissionModeScheduleAdmission || c.Submission.AdmissionMode != AdmissionModeProfiled) {
 		return errors.New("submission.commandWorkflows requires profiled scheduleAdmission mode")
+	}
+	if err := c.Epics.validate(c.Submission); err != nil {
+		return err
 	}
 	if c.GitHubApp.AppID == 0 {
 		return errors.New("githubApp.appID is required")

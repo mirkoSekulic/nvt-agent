@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,7 @@ type pendingSchedulingReaction struct {
 }
 
 type Poller struct {
+	pollMu    sync.Mutex
 	Config    Config
 	GitHub    GitHubClient
 	Submitter AgentRunSubmitter
@@ -74,6 +76,8 @@ func (p *Poller) Run(ctx context.Context) error {
 }
 
 func (p *Poller) PollOnce(ctx context.Context) error {
+	p.pollMu.Lock()
+	defer p.pollMu.Unlock()
 	for _, repo := range p.Config.Repositories {
 		if err := p.pollRepo(ctx, repo); err != nil {
 			return err
@@ -130,6 +134,14 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 				"author",
 				comment.User.Login,
 			)
+			continue
+		}
+		if command.Intent == CommandIntentEpic {
+			if p.Config.Epics.Enabled {
+				if err := p.handleEpicCommand(ctx, repo, comment, command); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if command.Intent == CommandIntentHelp {
