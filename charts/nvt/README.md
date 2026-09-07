@@ -28,12 +28,13 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.76`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.77`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
 workflow producer policies. This release also adds the generic profile
-authorization preset `resourcePrefix` field used by Azure observation grants.
+authorization preset `resourcePrefix` field used by Azure observation grants,
+and the Pi runtime with its public configuration and `credentialProvider` binding.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
 install and upgrade:
@@ -50,11 +51,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.76 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.77 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.76 --namespace nvt --create-namespace
+  --version 0.8.77 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -962,3 +963,7 @@ make operator-helm-test
 
 The render suite checks TLS, Secrets, policy mounts, gateway authorization,
 and egress configuration.
+
+### Pi with broker-backed API keys
+
+See the [Pi runtime guide](../../docs/pi-runtime.md) and [Helm values example](../../examples/pi/values.example.yaml) for typed profile selection, a public model catalog, and a broker-only Secret seed. Pi requires `trusted-local` and mediated tunnel egress; it does not support interactive tool approvals.

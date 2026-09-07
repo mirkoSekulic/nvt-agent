@@ -19,6 +19,8 @@ import (
 
 	"github.com/distribution/reference"
 	"gopkg.in/yaml.v3"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 const (
@@ -191,11 +193,13 @@ func (p *Plugin) UnmarshalJSON(data []byte) error {
 }
 
 type Runtime struct {
-	Preset   string `json:"preset"`
-	Autonomy string `json:"autonomy"`
-	Account  string `json:"account,omitempty"`
-	Model    string `json:"model,omitempty"`
-	Effort   string `json:"effort,omitempty"`
+	CredentialProvider string                `json:"credentialProvider,omitempty"`
+	Pi                 *resolvedrun.PiConfig `json:"pi,omitempty"`
+	Preset             string                `json:"preset"`
+	Autonomy           string                `json:"autonomy"`
+	Account            string                `json:"account,omitempty"`
+	Model              string                `json:"model,omitempty"`
+	Effort             string                `json:"effort,omitempty"`
 }
 type Tools struct {
 	Packages []string `json:"packages,omitempty"`
@@ -442,8 +446,11 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, profile := range m.Profiles {
-		if !validRunIDName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required") {
+		if !validRunIDName(name) || !oneOf(profile.Runtime.Preset, "codex", "claude", "shell", "pi") || !oneOf(profile.Runtime.Autonomy, "trusted-local", "approval-required") {
 			return fmt.Errorf("invalid profile %q", name)
+		}
+		if err := validatePiRuntime(profile.Runtime, m.BrokerProviders); err != nil {
+			return err
 		}
 		if !validRuntimeSelection(profile.Runtime) {
 			return fmt.Errorf("profile %q has an invalid runtime model or effort", name)
@@ -768,7 +775,7 @@ func validIssuer(value string) bool {
 	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.String() == value && value == strings.TrimSpace(value) && !strings.ContainsAny(value, "\x00\r\n")
 }
 func validRuntimeAccount(profile Profile, accounts map[string]Account) bool {
-	if profile.Runtime.Preset == "shell" {
+	if profile.Runtime.Preset == "shell" || profile.Runtime.Preset == "pi" {
 		return profile.Runtime.Account == ""
 	}
 	want := profile.Runtime.Preset + "-oauth"
@@ -789,6 +796,8 @@ func validRuntimeSelection(runtime Runtime) bool {
 		return false
 	}
 	switch runtime.Preset {
+	case "pi":
+		return true
 	case "codex":
 		return runtime.Effort == "" || oneOf(runtime.Effort, "minimal", "low", "medium", "high", "xhigh")
 	case "claude":
@@ -1156,7 +1165,39 @@ func validateBrokerProvider(name string, provider BrokerProvider, secrets map[st
 		return nil
 	}
 	mediation := provider.Mediation
-	if len(mediation.Hosts) == 0 || mediation.Materialization != "header-inject" || !mediation.Git || mediation.Username == "" || strings.ContainsAny(mediation.Username, ":\x00\r\n") || !oneOf(mediation.TargetMode, "github", "literal") {
+	if !mediation.Git {
+		if provider.Plugin != "token" || len(provider.Secrets) != 1 || provider.Secrets["token-file"] == "" || mediation.Username != "" || mediation.TargetMode != "" || mediation.Materialization != "header-inject" || len(mediation.Hosts) == 0 {
+			return errors.New("invalid API model provider mediation")
+		}
+		for key, value := range provider.Config {
+			switch key {
+			case "injection-hosts":
+				encoded, _ := json.Marshal(value)
+				var hosts []string
+				if json.Unmarshal(encoded, &hosts) != nil || len(hosts) != len(mediation.Hosts) || uniqueStrings(hosts) != nil {
+					return errors.New("model provider injection-hosts must match mediation hosts")
+				}
+				for _, host := range hosts {
+					if !contains(mediation.Hosts, host) {
+						return errors.New("model provider injection-hosts must match mediation hosts")
+					}
+				}
+			case "injection-header":
+				if value != "authorization" {
+					return errors.New("model provider requires bearer authorization")
+				}
+			case "injection-scheme":
+				if value != "Bearer" {
+					return errors.New("model provider requires Bearer scheme")
+				}
+			default:
+				return errors.New("unsupported public API model provider field")
+			}
+		}
+		if _, ok := provider.Config["injection-hosts"]; !ok {
+			return errors.New("model provider requires injection-hosts")
+		}
+	} else if len(mediation.Hosts) == 0 || mediation.Materialization != "header-inject" || mediation.Username == "" || strings.ContainsAny(mediation.Username, ":\x00\r\n") || !oneOf(mediation.TargetMode, "github", "literal") {
 		return fmt.Errorf("broker provider %q has invalid static Git mediation", name)
 	}
 	if err := uniqueStrings(mediation.Hosts); err != nil {

@@ -1,0 +1,54 @@
+apiVersion: nvt.dev/local/v1
+secrets:
+  model-key:
+    file: ./.nvt-local/secrets/model-api-key
+brokerProviders:
+  model-api:
+    plugin: token # existing static-token implementation
+    config:
+      injection-hosts: [models.example.test]
+    secrets:
+      token-file: model-key
+    mediation:
+      hosts: [models.example.test]
+      materialization: header-inject
+profiles:
+  pi-custom:
+    runtime:
+      preset: pi
+      autonomy: trusted-local
+      credentialProvider: model-api
+      model: custom/example-model
+      effort: "off"
+      pi:
+        provider: custom
+        baseUrl: https://models.example.test/v1
+        api: openai-completions
+        models:
+          - id: example-model
+            contextWindow: 128000
+            maxTokens: 8192
+        compat:
+          supportsDeveloperRole: false
+          supportsReasoningEffort: false
+        settings:
+          hideThinkingBlock: false
+    plugins: [work-control]
+retentionPolicies:
+  persistent:
+    persistence: {workspace: true, runtimeState: true, dockerData: true}
+workstations:
+  - name: pi-studio
+    profile: pi-custom
+    repositories: [example]
+repositories:
+  example:
+    github: example/project
+workflows:
+  pi-task:
+    profile: pi-custom
+    repository: example
+    retention: persistent
+    lifecycle:
+      completeOn: [plugin.work.completed]
+      failOn: [plugin.work.failed]

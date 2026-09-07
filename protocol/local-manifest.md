@@ -53,8 +53,10 @@ Every Codex or Claude profile explicitly selects one compatible runtime account
 from its account list. Shell profiles select none. The controller projection
 keeps that selection separate as the runtime/egress provider and emits its
 required injection grant. Git credential mappings are derived only from
-repository `account` or `credentialProvider` bindings. Static providers are
-selected through the profile's `credentialProviders` list. When multiple
+repository `account` or `credentialProvider` bindings. Repository static providers are
+selected through the profile's `credentialProviders` list. Pi model access uses
+its separate `runtime.credentialProvider` binding to an API-mode static-token
+provider, with public configuration in `runtime.pi` and no runtime account. When multiple
 repository providers are selected, the profile must declare
 `defaultCredentialProvider`; it is never inferred from the
 runtime account. The projection duplicates preset identities and exact grants,
@@ -71,7 +73,11 @@ runtime-supported `effort`. Both are projected through the shared resolved-run
 contract into fresh and resume commands. Omitting either preserves that CLI's
 default. Codex accepts `minimal`, `low`, `medium`, `high`, or `xhigh`; Claude
 accepts `low`, `medium`, `high`, `xhigh`, or `max`. Shell profiles reject both
-fields.
+fields. Pi supports only `trusted-local`, requires a catalog-backed `model`,
+and accepts thinking effort `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`
+(default `off`). Raw Pi launch/resume overrides and credential-bearing public
+configuration are rejected. See [Pi runtime](../docs/pi-runtime.md) for the
+managed schema, broker-only secret binding, and persistent update semantics.
 
 Profiles may optionally own a generic domain policy for their mediated,
 transparent egress:

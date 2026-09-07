@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import importlib.util
 import json
 import os
 import re
@@ -1005,6 +1006,16 @@ def main():
 
     setup_tmux_config()
     apply_preseed_files(preseed)
+    # Managed Pi intent takes precedence over generic/stale preseed files.
+    if command == "pi" or "pi" in runtime:
+        spec = importlib.util.spec_from_file_location("pi_runtime", Path(__file__).with_name("pi_runtime.py"))
+        pi_runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pi_runtime)
+        provider = runtime_proxy_provider(runtime)
+        proxy_url = proxy_url_for_provider(egress.get("forward-proxy-url") or DEFAULT_FORWARD_PROXY_URL, provider or "")
+        runtime = pi_runtime.prepare(runtime, egress, os.environ.get("NVT_STATE_DIR", str(Path.home() / ".nvt-agent")), os.environ.get("NVT_WORKSPACE", "/workspace"), proxy_url)
+        resume = runtime_resume(runtime)
+        environment = runtime_environment(runtime)
     if mediated_mode(egress):
         apply_mediated_egress(egress)
     apply_runtime_proxy(runtime, egress, effective_command)

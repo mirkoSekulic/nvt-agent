@@ -7,6 +7,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 // linuxCapabilityNames is the Linux UAPI capability registry through
@@ -33,10 +35,19 @@ func ValidateAgentRunRuntimeCapabilities(agentRun *nvtv1alpha1.AgentRun) error {
 	if err := validateRuntimeSelection(agentRun.Spec.Runtime); err != nil {
 		return err
 	}
+	if err := validatePiBinding(agentRun); err != nil {
+		return err
+	}
 	return validateRuntimeCapabilities(agentRun.Spec.Runtime)
 }
 
 func validateRuntimeSelection(runtime nvtv1alpha1.AgentRunRuntime) error {
+	if err := resolvedrun.ValidatePiSelection(piSelection(runtime)); err != nil {
+		return err
+	}
+	if runtime.Type == "pi" {
+		return nil
+	}
 	if runtime.Model != "" && (runtime.Model != strings.TrimSpace(runtime.Model) || strings.ContainsRune(runtime.Model, 0)) {
 		return fmt.Errorf("spec.runtime.model must be a non-empty trimmed string")
 	}
@@ -79,4 +90,38 @@ func agentRuntimeCapabilities(agentRun *nvtv1alpha1.AgentRun) []corev1.Capabilit
 		return nil
 	}
 	return append([]corev1.Capability(nil), agentRun.Spec.Runtime.Container.Capabilities.Add...)
+}
+
+func piSelection(r nvtv1alpha1.AgentRunRuntime) resolvedrun.Runtime {
+	return resolvedrun.Runtime{Type: r.Type, Autonomy: r.Autonomy, Model: r.Model, Effort: r.Effort, CredentialProvider: r.CredentialProvider, Pi: sharedPiConfig(r.Pi)}
+}
+func validatePiBinding(run *nvtv1alpha1.AgentRun) error {
+	if run.Spec.Runtime.Type != "pi" {
+		return nil
+	}
+	b := resolvedrun.Broker{}
+	if run.Spec.Broker != nil {
+		for _, g := range run.Spec.Broker.Grants {
+			if g.Provider == run.Spec.Runtime.CredentialProvider && (g.Git || g.AllowInsecureUpstream || len(g.Preparations) != 0) {
+				return fmt.Errorf("Pi requires TLS bearer API mediation")
+			}
+			b.Grants = append(b.Grants, resolvedrun.BrokerGrant{Provider: g.Provider, Capabilities: []string{"injection.headers"}, Materialization: string(g.Materialization), EgressHosts: g.EgressHosts, Repositories: g.Repositories})
+		}
+	}
+	e := resolvedrun.Egress{Mode: string(AgentRunEgressMode(run)), Transport: string(run.Spec.EgressTransport), ProxyProvider: run.Spec.Runtime.CredentialProvider}
+	return resolvedrun.ValidatePiBinding(piSelection(run.Spec.Runtime), e, b)
+}
+
+func sharedPiConfig(p *nvtv1alpha1.AgentRunPiConfig) *resolvedrun.PiConfig {
+	if p == nil {
+		return nil
+	}
+	out := &resolvedrun.PiConfig{Provider: p.Provider, BaseURL: p.BaseURL, API: p.API, Compat: p.Compat, Settings: p.Settings}
+	for _, m := range p.Models {
+		out.Models = append(out.Models, resolvedrun.PiModel{ID: m.ID, Name: m.Name, Reasoning: m.Reasoning, ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens})
+	}
+	for _, e := range p.Extensions {
+		out.Extensions = append(out.Extensions, resolvedrun.PiExtension{Name: e.Name, Content: e.Content})
+	}
+	return out
 }

@@ -169,8 +169,10 @@ type AgentRunPrincipal struct {
 
 // AgentRunRuntime defines the selected runtime and autonomy mode.
 type AgentRunRuntime struct {
-	Type     string `json:"type"`
-	Autonomy string `json:"autonomy"`
+	CredentialProvider string            `json:"credentialProvider,omitempty"`
+	Pi                 *AgentRunPiConfig `json:"pi,omitempty"`
+	Type               string            `json:"type"`
+	Autonomy           string            `json:"autonomy"`
 	// Model is an opaque runtime-owned model identifier. Omitted preserves the
 	// runtime CLI's default model.
 	// +kubebuilder:validation:MinLength=1
@@ -178,7 +180,7 @@ type AgentRunRuntime struct {
 	Model string `json:"model,omitempty"`
 	// Effort selects a runtime-supported reasoning effort. Omitted preserves the
 	// runtime CLI's default effort.
-	// +kubebuilder:validation:Enum=minimal;low;medium;high;xhigh;max
+	// +kubebuilder:validation:Enum=off;minimal;low;medium;high;xhigh;max
 	Effort string `json:"effort,omitempty"`
 	// User selects the container user: root (default, unchanged) or non-root
 	// (uid/gid 1000, HOME=/home/agent, passwordless sudo).
@@ -189,6 +191,29 @@ type AgentRunRuntime struct {
 	// Docker contains bounded container-runtime controls for Docker-backed tools
 	// inside the agent. It does not expose the host Docker socket.
 	Docker *AgentRunRuntimeDocker `json:"docker,omitempty"`
+}
+
+// AgentRunPiConfig is the public Pi catalog and explicitly selected resources.
+// Keep this Kubernetes wire schema aligned with protocol/resolvedrun.PiConfig.
+type AgentRunPiConfig struct {
+	Provider   string                `json:"provider"`
+	BaseURL    string                `json:"baseUrl"`
+	API        string                `json:"api"`
+	Models     []AgentRunPiModel     `json:"models"`
+	Compat     map[string]bool       `json:"compat,omitempty"`
+	Settings   map[string]bool       `json:"settings,omitempty"`
+	Extensions []AgentRunPiExtension `json:"extensions,omitempty"`
+}
+type AgentRunPiModel struct {
+	ID            string `json:"id"`
+	Name          string `json:"name,omitempty"`
+	Reasoning     bool   `json:"reasoning,omitempty"`
+	ContextWindow int    `json:"contextWindow,omitempty"`
+	MaxTokens     int    `json:"maxTokens,omitempty"`
+}
+type AgentRunPiExtension struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
 }
 
 // AgentRunRuntimeContainer contains controls specific to the OCI agent container.
@@ -522,6 +547,24 @@ func (in *AgentRunRuntime) DeepCopy() *AgentRunRuntime {
 	}
 	out := new(AgentRunRuntime)
 	*out = *in
+	if in.Pi != nil {
+		out.Pi = &AgentRunPiConfig{}
+		*out.Pi = *in.Pi
+		out.Pi.Models = append([]AgentRunPiModel(nil), in.Pi.Models...)
+		out.Pi.Extensions = append([]AgentRunPiExtension(nil), in.Pi.Extensions...)
+		if in.Pi.Compat != nil {
+			out.Pi.Compat = map[string]bool{}
+			for k, v := range in.Pi.Compat {
+				out.Pi.Compat[k] = v
+			}
+		}
+		if in.Pi.Settings != nil {
+			out.Pi.Settings = map[string]bool{}
+			for k, v := range in.Pi.Settings {
+				out.Pi.Settings[k] = v
+			}
+		}
+	}
 	if in.Container != nil {
 		out.Container = &AgentRunRuntimeContainer{}
 		if in.Container.Capabilities != nil {

@@ -138,6 +138,9 @@ func ValidateResolvedAgentRun(value ResolvedAgentRun) error {
 	if len(value.Repositories) > MaxRepositories || len(value.CredentialProviders) > MaxCredentialProviderMappings {
 		return errors.New("resolved repository configuration exceeds its limit")
 	}
+	if err := ValidatePiBinding(value.Runtime, value.Egress, value.Broker); err != nil {
+		return err
+	}
 	if err := validateBrokerAndEgress(value.Broker, value.Egress); err != nil {
 		return err
 	}
@@ -204,6 +207,15 @@ func validateEffective(image string, runtime Runtime, agentConfig json.RawMessag
 	if err := validateAgentConfig(agentConfig); err != nil {
 		return err
 	}
+	if runtime.Type == "pi" {
+		root, err := decodeAgentConfigObject(agentConfig)
+		if err != nil {
+			return err
+		}
+		if _, err := ManagedPiRuntime(root["runtime"].(map[string]any), runtime); err != nil {
+			return err
+		}
+	}
 	if err := validateLifecycle(lifecycle); err != nil {
 		return err
 	}
@@ -211,6 +223,9 @@ func validateEffective(image string, runtime Runtime, agentConfig json.RawMessag
 }
 
 func validateRuntime(value Runtime) error {
+	if err := ValidatePiSelection(value); err != nil {
+		return err
+	}
 	if !validProvider(value.Type) {
 		return errors.New("runtime type is invalid")
 	}
@@ -255,6 +270,8 @@ func validateRuntimeSelection(value Runtime) error {
 		return nil
 	}
 	switch value.Type {
+	case "pi":
+		return ValidatePiSelection(value)
 	case "codex":
 		if value.Effort != "" && !containsString([]string{"minimal", "low", "medium", "high", "xhigh"}, value.Effort) {
 			return errors.New("runtime effort is unsupported for codex")

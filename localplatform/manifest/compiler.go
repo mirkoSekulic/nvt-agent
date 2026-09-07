@@ -265,6 +265,9 @@ func Compile(m Manifest) (Compiled, error) {
 		grants := compileBrokerGrants(m, name)
 		result.Broker.Profiles = append(result.Broker.Profiles, BrokerProfileIntent{Name: name, Accounts: append([]string(nil), profile.Accounts...), Grants: grants})
 		controllerProfile := ControllerProfileIntent{Name: name, Profile: profile, DefaultCredentialProvider: defaultCredentialProvider(m, name), EgressProxyProvider: profile.Runtime.Account, BrokerGrants: cloneBrokerGrants(grants)}
+		if profile.Runtime.CredentialProvider != "" {
+			controllerProfile.EgressProxyProvider = profile.Runtime.CredentialProvider
+		}
 		if profile.Runtime.Account != "" {
 			controllerProfile.RuntimeProvider = &ControllerCredentialProviderIntent{Name: profile.Runtime.Account, Preset: m.Accounts[profile.Runtime.Account].Preset}
 		}
@@ -519,6 +522,10 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 		sort.Strings(resources)
 		authorization := resolveProviderAuthorization(access.Authorization, resources, "azure/")
 		result = append(result, BrokerGrantIntent{Provider: access.Provider, Preset: "azure", Purpose: "azure-injection", Resources: resources, Authorization: authorization})
+	}
+	if provider := m.Profiles[profileName].Runtime.CredentialProvider; provider != "" {
+		mediation := m.BrokerProviders[provider].Mediation
+		result = append(result, BrokerGrantIntent{Provider: provider, Purpose: "runtime-api-injection", Mediation: &mediation})
 	}
 	if runtimeAccount := m.Profiles[profileName].Runtime.Account; runtimeAccount != "" {
 		result = append(result, BrokerGrantIntent{Provider: runtimeAccount, Preset: m.Accounts[runtimeAccount].Preset, Purpose: "runtime-injection"})

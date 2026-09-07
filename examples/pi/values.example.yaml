@@ -1,0 +1,72 @@
+broker:
+  persistence:
+    enabled: true
+    seedSecretName: pi-model-key
+    seedTargetDir: model-api
+  config:
+    providers:
+    - name: model-api
+      plugin: token
+      config:
+        token-file: /state/model-api/key
+        injection-hosts:
+        - models.example.test
+agentSchedule:
+  enabled: true
+  name: pi-tasks
+  template:
+    workspace:
+      mode: Ephemeral
+    agent:
+      config:
+        plugins:
+        - name: work-control
+          source: builtin
+  profiles:
+  - name: pi-custom
+    runtime:
+      autonomy: trusted-local
+      credentialProvider: model-api
+      model: custom/example-model
+      effort: 'off'
+      pi:
+        provider: custom
+        baseUrl: https://models.example.test/v1
+        api: openai-completions
+        models:
+        - id: example-model
+          contextWindow: 128000
+          maxTokens: 8192
+        compat:
+          supportsDeveloperRole: false
+          supportsReasoningEffort: false
+        settings:
+          hideThinkingBlock: false
+      type: pi
+    agentRuntimeConfig:
+      command: pi
+    egress: mediated
+    egressTransport: forward-proxy
+    egressEnforcement: true
+    broker:
+      grants:
+      - provider: model-api
+        materialization: header-inject
+        egressHosts:
+        - models.example.test:443
+        repositories: []
+  profileSelection:
+    defaultProfile: pi-custom
+    onNoMatch: useDefault
+  workflowProfiles:
+  - name: pi-task
+    lifecycle:
+      completeOn:
+      - plugin.work.completed
+      failOn:
+      - plugin.work.failed
+  producerPolicies:
+  - identity: system:serviceaccount:nvt:example-producer
+    workflows:
+    - pi-task
+    defaultWorkflow: pi-task
