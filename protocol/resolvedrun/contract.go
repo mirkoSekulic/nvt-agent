@@ -34,13 +34,15 @@ type Principal struct {
 // direct process command, resume command, preseed, tools, code-server, plugins,
 // and exposure configuration live in the bounded AgentConfig object.
 type Runtime struct {
-	Type      string            `json:"type"`
-	Autonomy  string            `json:"autonomy"`
-	Model     string            `json:"model,omitempty"`
-	Effort    string            `json:"effort,omitempty"`
-	User      string            `json:"user"`
-	Container *RuntimeContainer `json:"container,omitempty"`
-	Docker    *RuntimeDocker    `json:"docker,omitempty"`
+	CredentialProvider string            `json:"credentialProvider,omitempty"`
+	Pi                 *PiConfig         `json:"pi,omitempty"`
+	Type               string            `json:"type"`
+	Autonomy           string            `json:"autonomy"`
+	Model              string            `json:"model,omitempty"`
+	Effort             string            `json:"effort,omitempty"`
+	User               string            `json:"user"`
+	Container          *RuntimeContainer `json:"container,omitempty"`
+	Docker             *RuntimeDocker    `json:"docker,omitempty"`
 }
 
 type RuntimeContainer struct {

@@ -151,7 +151,7 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 		t.Fatal("profile runtime model schema is missing")
 	}
 	effortEnum := crdPath(t, properties, "profiles", "items", "properties", "runtime", "properties", "effort", "enum").([]any)
-	if len(effortEnum) != 6 {
+	if len(effortEnum) != 7 {
 		t.Fatalf("profile runtime effort schema = %#v", effortEnum)
 	}
 	profileCapabilities := crdPath(t, properties, "profiles", "items", "properties", "runtime", "properties",

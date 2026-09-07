@@ -11,7 +11,7 @@ func ApplyRuntimeSelectionArguments(args []string, selection Runtime) ([]string,
 	if selection.Model == "" && selection.Effort == "" {
 		return append([]string(nil), args...), nil
 	}
-	if selection.Type != "codex" && selection.Type != "claude" {
+	if selection.Type != "codex" && selection.Type != "claude" && selection.Type != "pi" {
 		return nil, errors.New("runtime selection is unsupported")
 	}
 	for index, arg := range args {
@@ -28,6 +28,13 @@ func ApplyRuntimeSelectionArguments(args []string, selection Runtime) ([]string,
 
 	result := append([]string(nil), args...)
 	switch selection.Type {
+	case "pi":
+		if selection.Model != "" {
+			result = append(result, "--model", selection.Model)
+		}
+		if selection.Effort != "" {
+			result = append(result, "--thinking", selection.Effort)
+		}
 	case "codex":
 		if selection.Model != "" {
 			result = append(result, "--model", selection.Model)
@@ -48,6 +55,9 @@ func ApplyRuntimeSelectionArguments(args []string, selection Runtime) ([]string,
 
 func argumentSelectsModel(args []string, index int, runtimeType string) bool {
 	arg := args[index]
+	if runtimeType == "pi" && (arg == "--provider" || strings.HasPrefix(arg, "--provider=") || arg == "--models" || strings.HasPrefix(arg, "--models=")) {
+		return true
+	}
 	if arg == "--model" || strings.HasPrefix(arg, "--model=") ||
 		(strings.HasPrefix(arg, "-m") && !strings.HasPrefix(arg, "--")) {
 		return true
@@ -57,6 +67,9 @@ func argumentSelectsModel(args []string, index int, runtimeType string) bool {
 
 func argumentSelectsEffort(args []string, index int, runtimeType string) bool {
 	arg := args[index]
+	if runtimeType == "pi" {
+		return arg == "--thinking" || strings.HasPrefix(arg, "--thinking=")
+	}
 	if runtimeType == "claude" {
 		return arg == "--effort" || strings.HasPrefix(arg, "--effort=")
 	}

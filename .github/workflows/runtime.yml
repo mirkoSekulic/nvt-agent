@@ -12,6 +12,9 @@ on:
       - "Makefile"
       - "tests/agentd/**"
       - "tests/runtime/**"
+      - "tests/pi/**"
+      - "egressd/**"
+      - "broker/**"
       - "protocol/**"
       - ".github/workflows/runtime.yml"
   pull_request:
@@ -23,6 +26,9 @@ on:
       - "Makefile"
       - "tests/agentd/**"
       - "tests/runtime/**"
+      - "tests/pi/**"
+      - "egressd/**"
+      - "broker/**"
       - "protocol/**"
       - ".github/workflows/runtime.yml"
 
@@ -108,3 +114,32 @@ jobs:
         run: make dind-build
       - name: Run Docker prune and nested kind network smoke
         run: bash tests/runtime/kind-required-network-smoke.sh
+
+  pi-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install Pi fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+          python3 -m pip install PyYAML
+          npm install --prefix "$RUNNER_TEMP/pi-test" --no-audit --no-fund @earendil-works/pi-coding-agent@0.85.1
+      - name: Build trusted egress fixture
+        working-directory: egressd
+        run: go build -o "$RUNNER_TEMP/pi-test/egressd" ./cmd/egressd
+      - name: Test real Pi terminal and mediated model access
+        run: |
+          NVT_PI_TEST_BINARY="$RUNNER_TEMP/pi-test/node_modules/.bin/pi" \
+          NVT_PI_TEST_EGRESSD="$RUNNER_TEMP/pi-test/egressd" \
+            python3 tests/pi/compatibility.py

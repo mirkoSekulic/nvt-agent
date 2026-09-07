@@ -1498,3 +1498,5 @@ grep -q 'namespace: "nvt"' "${PRODUCER_CROSS_NAMESPACE_RENDER}"
 grep -q 'scheduleNamespace: "nvt"' "${PRODUCER_CROSS_NAMESPACE_RENDER}"
 
 echo "helm render test passed"
+
+python3 "${ROOT}/tests/pi/helm_test.py"

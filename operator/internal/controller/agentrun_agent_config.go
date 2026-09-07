@@ -7,6 +7,8 @@ import (
 	"sigs.k8s.io/yaml"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 // RenderAgentConfigYAML converts the preserved AgentRun agent config payload to YAML.
@@ -80,6 +82,20 @@ func InjectAgentRunRuntimeConfig(config map[string]any, agentRun *nvtv1alpha1.Ag
 	}
 	runtimeConfig = cloneStringAnyMap(runtimeConfig)
 	runtimeType := agentRun.Spec.Runtime.Type
+	if runtimeType == "pi" {
+		if err := validatePiBinding(agentRun); err != nil {
+			return nil, err
+		}
+		managed, err := resolvedrun.ManagedPiRuntime(runtimeConfig, piSelection(agentRun.Spec.Runtime))
+		if err != nil {
+			return nil, err
+		}
+		// Explicit binding wins over destination-derived/default proxy selection.
+		managed["proxy"] = map[string]any{"provider": agentRun.Spec.Runtime.CredentialProvider}
+		updated := cloneStringAnyMap(config)
+		updated["runtime"] = managed
+		return updated, nil
+	}
 	if runtimeType != "codex" && runtimeType != "claude" {
 		return nil, fmt.Errorf("render AgentRun agent config: unsupported spec.runtime.type %q", runtimeType)
 	}

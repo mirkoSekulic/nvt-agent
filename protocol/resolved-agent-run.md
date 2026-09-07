@@ -273,3 +273,15 @@ that the Kubernetes renderer still emits that adapter and that the portable
 renderer does not. It also verifies that local resolution does not mutate the
 Kubernetes object. The operator and local-platform suites remain regression
 gates for existing Pod and Docker behavior.
+
+## Pi model access
+
+`runtime.type: pi` requires `autonomy: trusted-local`, a typed `model`, public
+`pi` catalog/settings/extension assets, and `credentialProvider`. The selected
+provider must match `egress.proxy_provider` and an injection-only `header-inject`
+grant authorizing the catalog HTTPS host. Direct/redirect transports and raw
+runtime overrides are rejected. The shared renderer produces managed fresh and
+resume commands; bootstrap adds a state-scoped session path and placeholder
+model authentication. Repository credentials remain separate. See the
+[Pi configuration and lifecycle guide](../docs/pi-runtime.md) for the public
+schema, failure semantics, and local/Kubernetes examples.

@@ -962,3 +962,7 @@ make operator-helm-test
 
 The render suite checks TLS, Secrets, policy mounts, gateway authorization,
 and egress configuration.
+
+### Pi with broker-backed API keys
+
+See the [Pi runtime guide](../../docs/pi-runtime.md) and [Helm values example](../../examples/pi/values.example.yaml) for typed profile selection, a public model catalog, and a broker-only Secret seed. Pi requires `trusted-local` and mediated tunnel egress; it does not support interactive tool approvals.

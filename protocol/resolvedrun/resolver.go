@@ -86,7 +86,7 @@ func NewResolver(configuration TrustedConfiguration) (*Resolver, error) {
 		}
 		image, runtime, agentConfig, resources, lifecycle := resolver.effective(profile)
 		if validateEffective(image, runtime, agentConfig, resources, lifecycle) != nil ||
-			validateBrokerAndEgress(profile.Broker, profile.Egress) != nil {
+			validateBrokerAndEgress(profile.Broker, profile.Egress) != nil || ValidatePiBinding(runtime, profile.Egress, profile.Broker) != nil {
 			return nil, ErrInvalidConfiguration
 		}
 		if err := validateAllowedSelections(profile, resolver.backends, resolver.retentions); err != nil {

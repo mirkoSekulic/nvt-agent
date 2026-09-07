@@ -275,6 +275,8 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 	args := []string{}
 	resumeArgs := []string(nil)
 	switch runtimeType {
+	case "pi":
+		// The shared renderer supplies managed fresh/resume commands.
 	case "codex":
 		resumeArgs = []string{"resume", "--last"}
 		if autonomy == "trusted-local" {
@@ -332,15 +334,19 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 			},
 		}
 	}
+	runtimeConfig := map[string]any{"command": command, "args": args, "resume": map[string]any{"command": command, "args": resumeArgs}}
+	if runtimeType == "pi" {
+		delete(runtimeConfig, "resume")
+	}
 	agentConfig := mustJSON(map[string]any{
-		"runtime":     map[string]any{"command": command, "args": args, "resume": map[string]any{"command": command, "args": resumeArgs}},
+		"runtime":     runtimeConfig,
 		"preseed":     runtimePreseed(runtimeType),
 		"tools":       map[string]any{"packages": intent.Profile.Tools.Packages, "mise": intent.Profile.Tools.Mise},
 		"code-server": codeServer,
 		"plugins":     plugins,
 	})
 	profile := resolvedrun.Profile{
-		Name: intent.Name, Runtime: &resolvedrun.Runtime{Type: runtimeType, Autonomy: autonomy, Model: intent.Profile.Runtime.Model, Effort: intent.Profile.Runtime.Effort, User: "root", Container: &resolvedrun.RuntimeContainer{Capabilities: append([]string(nil), intent.Profile.Capabilities...)}, Docker: &resolvedrun.RuntimeDocker{}},
+		Name: intent.Name, Runtime: &resolvedrun.Runtime{Type: runtimeType, Autonomy: autonomy, CredentialProvider: intent.Profile.Runtime.CredentialProvider, Pi: intent.Profile.Runtime.Pi.DeepCopy(), Model: intent.Profile.Runtime.Model, Effort: intent.Profile.Runtime.Effort, User: "root", Container: &resolvedrun.RuntimeContainer{Capabilities: append([]string(nil), intent.Profile.Capabilities...)}, Docker: &resolvedrun.RuntimeDocker{}},
 		AgentConfig: agentConfig, WorkspaceInstructions: instructions, AllowedBackends: []string{"local-docker"}, DefaultBackend: "local-docker", AllowedRetentions: append([]string(nil), retentionNames...),
 	}
 	repositoryGrants := map[string]struct {
@@ -350,6 +356,19 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		permissions  map[string]string
 	}{}
 	for _, grant := range intent.BrokerGrants {
+		if grant.Purpose == "runtime-api-injection" {
+			if grant.Mediation == nil {
+				return resolvedrun.Profile{}, errors.New("missing model provider mediation")
+			}
+			hosts := []string{}
+			for _, h := range grant.Mediation.Hosts {
+				hosts = append(hosts, h+":443")
+			}
+			profile.Broker.Grants = append(profile.Broker.Grants, resolvedrun.BrokerGrant{Provider: grant.Provider, Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: hosts})
+			profile.Egress.ProxyProvider = grant.Provider
+			continue
+		}
+
 		if grant.Purpose == "azure-injection" {
 			resolved := resolvedrun.BrokerGrant{Provider: grant.Provider, Resources: append([]string(nil), grant.Resources...),
 				Capabilities: []string{"injection.headers"}, Materialization: "header-inject",

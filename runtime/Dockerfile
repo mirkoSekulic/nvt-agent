@@ -58,11 +58,14 @@ COPY runtime/code-server-agent-terminal /tmp/nvt-code-server-agent-terminal
 RUN /bin/sh /tmp/nvt-code-server-agent-terminal/install.sh /tmp/nvt-code-server-agent-terminal \
   && rm -rf /tmp/nvt-code-server-agent-terminal
 
-RUN npm install -g @openai/codex @anthropic-ai/claude-code
+ARG PI_VERSION=0.85.1
+RUN npm install -g @openai/codex @anthropic-ai/claude-code @earendil-works/pi-coding-agent@${PI_VERSION} \
+  && pi --version
 
 COPY runtime/core/entrypoint.sh /usr/local/bin/entrypoint
 COPY runtime/core/nvt-as-root /usr/local/bin/nvt-as-root
 COPY runtime/core/bootstrap.py /usr/local/bin/bootstrap
+COPY runtime/core/pi_runtime.py /usr/local/bin/pi_runtime.py
 COPY runtime/core/run-plugins.py /usr/local/bin/run-plugins
 COPY runtime/core/export-plugin-tools.py /usr/local/bin/export-plugin-tools
 COPY runtime/core/plugin-egress-exec.py /usr/local/bin/plugin-egress-exec

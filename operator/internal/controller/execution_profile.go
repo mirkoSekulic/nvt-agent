@@ -148,6 +148,22 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 		if _, duplicate := profiles[profile.Name]; duplicate {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
+		if err := validateRuntimeSelection(profile.Runtime); err != nil {
+			return nil, err
+		}
+		if profile.Runtime.Type == "pi" {
+			candidate := &nvtv1alpha1.AgentRun{Spec: nvtv1alpha1.AgentRunSpec{Runtime: profile.Runtime, Egress: profile.Egress, EgressTransport: profile.EgressTransport, Broker: profile.Broker}}
+			if err := validatePiBinding(candidate); err != nil {
+				return nil, err
+			}
+			config, err := jsonObject(profile.AgentRuntimeConfig)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := InjectAgentRunRuntimeConfig(map[string]any{"runtime": config}, candidate); err != nil {
+				return nil, err
+			}
+		}
 		if _, err := jsonObject(profile.AgentRuntimeConfig); err != nil {
 			return nil, errInvalidExecutionProfileConfiguration
 		}

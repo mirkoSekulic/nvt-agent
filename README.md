@@ -6,7 +6,7 @@
 Docker Compose for local development and a Kubernetes operator for production.
 
 Each agent receives a workspace, a terminal coding CLI, optional code-server
-access, runtime plugins, and its own Docker daemon. Codex and Claude Code are
+access, runtime plugins, and its own Docker daemon. Codex, Claude Code, and [Pi](docs/pi-runtime.md) are
 supported, while the runtime contract remains CLI-agnostic.
 
 ## Architecture

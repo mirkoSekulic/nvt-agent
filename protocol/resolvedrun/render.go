@@ -33,7 +33,12 @@ func RenderAgentConfig(run ResolvedAgentRun, bindings AgentConfigBindings) (json
 		return nil, ErrInvalidRenderBinding
 	}
 	runtime := cloneStringAnyMap(root["runtime"].(map[string]any))
-	if err := applyRuntimeSelection(runtime, run.Runtime); err != nil {
+	if run.Runtime.Type == "pi" {
+		runtime, err = ManagedPiRuntime(runtime, run.Runtime)
+		if err != nil {
+			return nil, err
+		}
+	} else if err := applyRuntimeSelection(runtime, run.Runtime); err != nil {
 		return nil, ErrInvalidRenderBinding
 	}
 	if run.Prompt != "" {

@@ -189,6 +189,26 @@ escapes inside ordinary quoted shell strings.
 EOF
 fi
 
+if [ -f "$HOME/.nvt-agent/agent-command.json" ] && python3 - "$HOME/.nvt-agent/agent-command.json" <<'PY_RUNTIME'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    raise SystemExit(0 if json.load(handle).get("command") == "pi" else 1)
+PY_RUNTIME
+then
+  cat >> "$target" <<'EOF_PI'
+
+## Pi Runtime
+
+This session uses Pi with trusted-local autonomy. Pi has no built-in tool
+approval mode or sandbox; NVT provides runtime isolation and mediated model
+access. Project-local Pi resources are ignored. This generated guidance and
+explicit administrator-configured extensions are supplied by NVT.
+Managed model/settings files are replaced from declarative configuration at
+bootstrap. Use the exported NVT tools for watcher and completion workflows.
+EOF_PI
+fi
+
 canonical_path() {
   readlink -f -- "$1" 2>/dev/null || printf '%s\n' "$1"
 }

@@ -1,0 +1,56 @@
+apiVersion: nvt.dev/v1alpha1
+kind: AgentRun
+metadata:
+  name: pi-example
+  namespace: nvt
+spec:
+  image: nvt-agent-runtime:pi-test
+  runtime:
+    autonomy: trusted-local
+    credentialProvider: model-api
+    model: custom/example-model
+    effort: 'off'
+    pi:
+      provider: custom
+      baseUrl: https://models.example.test/v1
+      api: openai-completions
+      models:
+      - id: example-model
+        contextWindow: 128000
+        maxTokens: 8192
+      compat:
+        supportsDeveloperRole: false
+        supportsReasoningEffort: false
+      settings:
+        hideThinkingBlock: false
+    type: pi
+  egress: mediated
+  egressTransport: forward-proxy
+  egressEnforcement: true
+  workspace:
+    mode: Persistent
+    size: 10Gi
+  broker:
+    grants:
+    - provider: model-api
+      materialization: header-inject
+      egressHosts:
+      - models.example.test:443
+      repositories: []
+  agent:
+    config:
+      runtime:
+        command: pi
+      plugins:
+      - name: work-control
+        source: builtin
+      code-server:
+        agentTerminal:
+          openOnStartup: true
+  prompt:
+    text: Inspect the workspace guidance. When done, run nvt-work complete.
+  lifecycle:
+    completeOn:
+    - plugin.work.completed
+    failOn:
+    - plugin.work.failed
