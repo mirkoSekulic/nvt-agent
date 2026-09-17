@@ -1,5 +1,8 @@
 # Local development
 
+For standalone HTTPS API access and manual Git using a shared broker-only PAT
+without checkout declarations, see [HTTP credentials](http-credentials.md).
+
 For broker-mediated Azure CLI enrollment, optional image packaging, local
 `profiles[].azure` configuration and operation/query scope guarantees, see
 [Azure CLI mediation](azure-cli-mediation.md).

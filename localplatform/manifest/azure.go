@@ -53,7 +53,7 @@ func validateAzureProvider(provider BrokerProvider) error {
 	if cloud, ok := provider.Config["cloud"]; ok && cloud != "AzureCloud" {
 		return invalid
 	}
-	subscriptions, ok := azureStringList(provider.Config["subscriptions"])
+	subscriptions, ok := providerStringList(provider.Config["subscriptions"])
 	if !ok || len(subscriptions) == 0 || len(subscriptions) > 256 || uniqueStrings(subscriptions) != nil {
 		return invalid
 	}
@@ -67,7 +67,7 @@ func validateAzureProvider(provider BrokerProvider) error {
 			return invalid
 		}
 	}
-	resources, ok := azureStringList(provider.Allow["resources"])
+	resources, ok := providerStringList(provider.Allow["resources"])
 	if !ok || !azureResources(resources, tenant) {
 		return invalid
 	}
@@ -87,25 +87,6 @@ func validateAzureProvider(provider BrokerProvider) error {
 		}
 	}
 	return nil
-}
-
-func azureStringList(value any) ([]string, bool) {
-	if values, ok := value.([]string); ok {
-		return values, true
-	}
-	values, ok := value.([]any)
-	if !ok {
-		return nil, false
-	}
-	result := make([]string, len(values))
-	for index, value := range values {
-		text, ok := value.(string)
-		if !ok {
-			return nil, false
-		}
-		result[index] = text
-	}
-	return result, true
 }
 
 func hasAzureAccess(profile Profile, provider string) bool {

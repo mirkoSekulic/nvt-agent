@@ -350,6 +350,10 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 		permissions  map[string]string
 	}{}
 	for _, grant := range intent.BrokerGrants {
+		if grant.Purpose == "http-injection" {
+			profile.Broker.Grants = append(profile.Broker.Grants, repositoryGrant(grant.Provider, "", grant.Mediation, nil, nil))
+			continue
+		}
 		if grant.Purpose == "azure-injection" {
 			resolved := resolvedrun.BrokerGrant{Provider: grant.Provider, Resources: append([]string(nil), grant.Resources...),
 				Capabilities: []string{"injection.headers"}, Materialization: "header-inject",
@@ -464,7 +468,7 @@ func pluginEgressProvider(intent manifest.ControllerProfileIntent, account strin
 			continue
 		}
 		candidates := []string{account}
-		if grant.Purpose != "runtime-injection" && grant.Purpose != "azure-injection" {
+		if grant.Purpose != "runtime-injection" && grant.Purpose != "azure-injection" && grant.Purpose != "http-injection" {
 			candidates = candidates[:0]
 			for _, repositoryName := range grant.Repositories {
 				repository := brokerRepositoryByIdentity(repositories, repositoryName, account)
