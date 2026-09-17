@@ -1,0 +1,46 @@
+apiVersion: nvt.dev/local/v1
+secrets:
+  forge-pat:
+    # Illustrative path only; never commit a real credential.
+    file: ./.nvt-local/secrets/forge-pat
+brokerProviders:
+  forge-api:
+    plugin: token
+    config:
+      injection-hosts: [forge.example.test]
+      injection-scheme: Bearer
+    secrets: {token-file: forge-pat}
+    mediation:
+      hosts: [forge.example.test]
+      materialization: header-inject
+      git: false
+  forge-git:
+    plugin: token
+    config:
+      injection-hosts: [forge.example.test]
+      injection-basic-username: git
+    secrets: {token-file: forge-pat}
+    mediation:
+      hosts: [forge.example.test]
+      materialization: header-inject
+      git: false
+retentionPolicies:
+  persistent:
+    persistence: {workspace: true, runtimeState: true, dockerData: true}
+profiles:
+  api-only:
+    runtime: {preset: shell, autonomy: trusted-local}
+    httpCredentials: [forge-api]
+    egress:
+      domainPolicy: {defaultAction: deny, allow: [forge.example.test]}
+  git-and-api:
+    runtime: {preset: shell, autonomy: trusted-local}
+    httpCredentials: [forge-git, forge-api]
+    egress:
+      domainPolicy: {defaultAction: deny, allow: [forge.example.test]}
+  ungranted:
+    runtime: {preset: shell, autonomy: trusted-local}
+workstations:
+  - {name: api-only, profile: api-only}
+  - {name: git-and-api, profile: git-and-api}
+  - {name: ungranted, profile: ungranted}

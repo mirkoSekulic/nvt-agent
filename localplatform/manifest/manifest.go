@@ -120,6 +120,7 @@ type Profile struct {
 	Runtime                   Runtime            `json:"runtime"`
 	Accounts                  []string           `json:"accounts,omitempty"`
 	CredentialProviders       []string           `json:"credentialProviders,omitempty"`
+	HTTPCredentials           []string           `json:"httpCredentials,omitempty"` // host-scoped, independent of checkout
 	DefaultCredentialProvider string             `json:"defaultCredentialProvider,omitempty"`
 	Tools                     Tools              `json:"tools,omitempty"`
 	Capabilities              []string           `json:"capabilities,omitempty"`
@@ -368,8 +369,8 @@ func (m Manifest) Validate() error {
 	if m.APIVersion != APIVersion {
 		return fmt.Errorf("apiVersion must be %q", APIVersion)
 	}
-	if len(m.RetentionPolicies) == 0 || len(m.Profiles) == 0 || len(m.Workflows) == 0 {
-		return errors.New("retentionPolicies, profiles, and workflows are required")
+	if len(m.RetentionPolicies) == 0 || len(m.Profiles) == 0 || len(m.Workflows) == 0 && len(m.Workstations) == 0 {
+		return errors.New("retentionPolicies, profiles, and at least one workflow or workstation are required")
 	}
 	for label, count := range map[string]int{"secrets": len(m.Secrets), "accounts": len(m.Accounts), "brokerProviders": len(m.BrokerProviders), "retentionPolicies": len(m.RetentionPolicies), "profiles": len(m.Profiles), "repositories": len(m.Repositories), "workstations": len(m.Workstations), "workflows": len(m.Workflows), "producers": len(m.Producers)} {
 		if count > MaxItems {
@@ -459,6 +460,18 @@ func (m Manifest) Validate() error {
 		if err := uniqueRefs(profile.CredentialProviders, m.BrokerProviders, "credential provider"); err != nil {
 			return fmt.Errorf("profile %q: %w", name, err)
 		}
+		if err := uniqueRefs(profile.HTTPCredentials, m.BrokerProviders, "HTTP credential provider"); err != nil {
+			return fmt.Errorf("profile %q: %w", name, err)
+		}
+		if len(profile.HTTPCredentials) > MaxItems {
+			return fmt.Errorf("profile %q has too many HTTP credentials", name)
+		}
+		for _, providerName := range profile.HTTPCredentials {
+			provider := m.BrokerProviders[providerName]
+			if provider.Mediation.Materialization != "header-inject" || provider.Mediation.Git || len(provider.Mediation.Hosts) == 0 || contains(profile.CredentialProviders, providerName) {
+				return fmt.Errorf("profile %q HTTP credentials require a separate host-scoped header-inject provider", name)
+			}
+		}
 		seenKubeProviders := map[string]bool{}
 		if err := validateAzureAccess(m, profile); err != nil {
 			return fmt.Errorf("profile %q: %w", name, err)
@@ -513,7 +526,7 @@ func (m Manifest) Validate() error {
 			if err := validateConfig(plugin.Config, 0); err != nil {
 				return fmt.Errorf("profile %q plugin %q config: %w", name, plugin.Name, err)
 			}
-			if plugin.Egress != nil && !((has(m.Accounts, plugin.Egress.Provider) && contains(profile.Accounts, plugin.Egress.Provider)) || (has(m.BrokerProviders, plugin.Egress.Provider) && contains(profile.CredentialProviders, plugin.Egress.Provider)) || hasAzureAccess(profile, plugin.Egress.Provider)) {
+			if plugin.Egress != nil && !((has(m.Accounts, plugin.Egress.Provider) && contains(profile.Accounts, plugin.Egress.Provider)) || (has(m.BrokerProviders, plugin.Egress.Provider) && contains(profile.CredentialProviders, plugin.Egress.Provider)) || contains(profile.HTTPCredentials, plugin.Egress.Provider) || hasAzureAccess(profile, plugin.Egress.Provider)) {
 				return fmt.Errorf("profile %q plugin %q has an invalid egress provider", name, plugin.Name)
 			}
 		}
@@ -523,9 +536,6 @@ func (m Manifest) Validate() error {
 		if profile.Editor.Preset != "" && !oneOf(profile.Editor.Preset, "code-server", "none") {
 			return fmt.Errorf("profile %q has invalid editor preset", name)
 		}
-	}
-	if len(m.Repositories) == 0 {
-		return errors.New("repositories are required")
 	}
 	for name, repository := range m.Repositories {
 		if !validName(name) {
@@ -915,6 +925,9 @@ func validateRepository(value Repository, accounts map[string]Account, providers
 	if value.CredentialProvider != "" {
 		parsed, _ := url.Parse(value.URL)
 		provider := providers[value.CredentialProvider]
+		if !provider.Mediation.Git {
+			return errors.New("repository credentials require repository-scoped Git mediation; use httpCredentials for manual host-scoped access")
+		}
 		if parsed.Host != parsed.Hostname() || !contains(provider.Mediation.Hosts, parsed.Hostname()) {
 			return errors.New("repository host is not mediated by its credential provider")
 		}
@@ -1156,6 +1169,9 @@ func validateBrokerProvider(name string, provider BrokerProvider, secrets map[st
 		return nil
 	}
 	mediation := provider.Mediation
+	if !mediation.Git {
+		return validateHTTPMediation(name, provider)
+	}
 	if len(mediation.Hosts) == 0 || mediation.Materialization != "header-inject" || !mediation.Git || mediation.Username == "" || strings.ContainsAny(mediation.Username, ":\x00\r\n") || !oneOf(mediation.TargetMode, "github", "literal") {
 		return fmt.Errorf("broker provider %q has invalid static Git mediation", name)
 	}

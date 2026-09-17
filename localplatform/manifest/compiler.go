@@ -232,6 +232,8 @@ func Compile(m Manifest) (Compiled, error) {
 		}
 		sort.Strings(profile.Accounts)
 		sort.Strings(profile.CredentialProviders)
+		profile.HTTPCredentials = append([]string(nil), profile.HTTPCredentials...)
+		sort.Strings(profile.HTTPCredentials)
 		sort.Strings(profile.Tools.Packages)
 		sort.Strings(profile.Tools.Mise)
 		sort.Strings(profile.Capabilities)
@@ -252,7 +254,7 @@ func Compile(m Manifest) (Compiled, error) {
 			providers := map[string]any{}
 			for _, access := range profile.Azure {
 				config := m.BrokerProviders[access.Provider].Config
-				subscriptions, _ := azureStringList(config["subscriptions"])
+				subscriptions, _ := providerStringList(config["subscriptions"])
 				accounts := []any{}
 				for _, subscription := range subscriptions {
 					accounts = append(accounts, map[string]any{"id": subscription})
@@ -512,6 +514,14 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 		}
 	}
 	result := make([]BrokerGrantIntent, 0, len(groups)+1)
+	httpCredentials := append([]string(nil), m.Profiles[profileName].HTTPCredentials...)
+	sort.Strings(httpCredentials)
+	for _, provider := range httpCredentials {
+		mediation := m.BrokerProviders[provider].Mediation
+		mediation.Hosts = append([]string(nil), mediation.Hosts...)
+		sort.Strings(mediation.Hosts)
+		result = append(result, BrokerGrantIntent{Provider: provider, Purpose: "http-injection", Mediation: &mediation})
+	}
 	azureAccess := append([]AzureAccess(nil), m.Profiles[profileName].Azure...)
 	sort.Slice(azureAccess, func(i, j int) bool { return azureAccess[i].Provider < azureAccess[j].Provider })
 	for _, access := range azureAccess {
