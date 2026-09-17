@@ -88,8 +88,8 @@ func TestSharedPATForHostScopedGitAndHTTP(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
-	command := exec.CommandContext(ctx, "python3", filepath.Join(repo, "tests/http-credentials/broker_fixture.py"))
-	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + private, "NVT_BROKER_CONFIG=" + configPath, "NVT_BROKER_AGENTS_CONFIG=" + agentsPath, "NVT_BROKER_AUDIT_LOG=" + audit}
+	command := httpCredentialFixturePython(t, ctx, filepath.Join(repo, "tests/http-credentials/broker_fixture.py"))
+	command.Env = append(command.Env, "HOME="+private, "NVT_BROKER_CONFIG="+configPath, "NVT_BROKER_AGENTS_CONFIG="+agentsPath, "NVT_BROKER_AUDIT_LOG="+audit)
 	command.Stderr = logs
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -102,7 +102,10 @@ func TestSharedPATForHostScopedGitAndHTTP(t *testing.T) {
 	reader := bufio.NewReader(stdout)
 	brokerURL, err := reader.ReadString('\n')
 	if err != nil {
-		t.Fatalf("fixture broker startup failed: %v", err)
+		diagnostic := make([]byte, 4096)
+		n, _ := logs.ReadAt(diagnostic, 0)
+		redact := strings.NewReplacer(pat, "[redacted]", strings.TrimPrefix(basic, "Basic "), "[redacted]")
+		t.Fatalf("fixture broker startup failed (%s): %v; stderr=%q", command.Path, err, redact.Replace(string(diagnostic[:n])))
 	}
 	brokerURL = strings.TrimSpace(brokerURL)
 
