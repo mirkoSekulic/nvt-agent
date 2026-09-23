@@ -16,20 +16,21 @@ import (
 )
 
 type fakeBackend struct {
-	mu            sync.Mutex
-	resources     map[string]bool
-	ensureErr     error
-	ensureTarget  State
-	inspectErr    error
-	inspectTarget State
-	inspectCursor string
-	deleteErr     error
-	ensureCalls   int
-	ensuredRuns   []BackendRun
-	deleteCalls   int
-	deletedRuns   []BackendRun
-	ensureStarted chan struct{}
-	ensureRelease chan struct{}
+	mu              sync.Mutex
+	resources       map[string]bool
+	ensureErr       error
+	ensureTarget    State
+	inspectErr      error
+	inspectTarget   State
+	inspectCursor   string
+	inspectRecovery bool
+	deleteErr       error
+	ensureCalls     int
+	ensuredRuns     []BackendRun
+	deleteCalls     int
+	deletedRuns     []BackendRun
+	ensureStarted   chan struct{}
+	ensureRelease   chan struct{}
 }
 
 func newFakeBackend() *fakeBackend { return &fakeBackend{resources: map[string]bool{}} }
@@ -191,7 +192,55 @@ func (backend *fakeBackend) Inspect(_ context.Context, run BackendRun) (BackendO
 	if cursor == "" {
 		cursor = run.LifecycleCursor
 	}
-	return BackendObservation{Ready: true, LifecycleCursor: cursor}, nil
+	return BackendObservation{Ready: !backend.inspectRecovery, RecoveryRequired: backend.inspectRecovery, LifecycleCursor: cursor}, nil
+}
+
+func TestLiveBackendDriftRequestsDurableRecoveryWithoutCleanup(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	store, path := openTestStore(t, clock, 4)
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	run := createRun(t, store, "live-recovery", true)
+	reconcileToRunning(t, reconciler, store, run.RunID)
+	before, _, err := store.ResolvedSnapshot(context.Background(), run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.inspectRecovery = true
+	backend.inspectCursor = "v1:1:2:3"
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	preparing, err := store.Get(context.Background(), run.RunID)
+	if err != nil || preparing.State != StatePreparing || preparing.LastReason != "backend-recovery-requested" || backend.deleteCalls != 0 {
+		t.Fatalf("live recovery = %#v, %v, deletes=%d", preparing, err, backend.deleteCalls)
+	}
+	// A crash between detection and repair must retain preparation and cursor.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(context.Background(), path, StoreOptions{MaxActiveRuns: 4, MaxClaimLease: time.Minute, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	reconciler, _ = NewReconciler(store, backend, "restarted-controller", 30*time.Second, log.New(io.Discard, "", 0))
+	backend.ensureErr = ErrBackendRetryable
+	_ = reconciler.Reconcile(context.Background())
+	retained, _ := store.Get(context.Background(), run.RunID)
+	if retained.State != StatePreparing || backend.deleteCalls != 0 {
+		t.Fatalf("transient repair failure triggered cleanup: %#v", retained)
+	}
+	backend.ensureErr = nil
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _ := store.Get(context.Background(), run.RunID)
+	after, _, _ := store.ResolvedSnapshot(context.Background(), run.RunID)
+	last := backend.ensuredRuns[len(backend.ensuredRuns)-1]
+	if recovered.State != StateRunning || recovered.LastReason != "backend-recovered" || !bytes.Equal(before, after) || last.LifecycleCursor != backend.inspectCursor || backend.deleteCalls != 0 {
+		t.Fatalf("recovery did not preserve durable state: %#v, cursor=%q", recovered, last.LifecycleCursor)
+	}
 }
 
 func TestControllerRestartReconcilesRunningSnapshotAndRecreatesMissingRuntime(t *testing.T) {

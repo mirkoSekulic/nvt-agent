@@ -325,7 +325,7 @@ Allowed transitions are:
 | --- | --- |
 | `pending` | `preparing`, `stopping` |
 | `preparing` | `running`, `stopping` |
-| `running` | `preparing` during controller startup recovery, `stopping` |
+| `running` | `preparing` during controller startup or backend drift recovery, `stopping` |
 | `stopping` | `completed`, `failed`, `expired` |
 
 `completed`, `failed`, and `expired` are terminal. Entering `stopping` records
@@ -392,6 +392,30 @@ ephemeral containers are recreated under the same run ID, project, routes, and
 named volumes. A successful pass returns to `running` with reason
 `backend-recovered`. `pending`, already `preparing`, `stopping`, and terminal
 records retain their existing restart-safe semantics.
+
+Docker can restart a namespace owner after its dependants have already started.
+Those live agent/proxy processes remain in the old namespace even though their
+`container:<owner ID>` configuration is unchanged and loopback health succeeds.
+Inspection compares the actual init-process network namespaces of the owner,
+agent, capture proxy, and confinement guard before reporting readiness. It uses
+daemon-side `docker top` metadata; on minimal hosts without the `NETNS` column,
+a fixed-command, read-only helper reads the target's init namespace through a
+shared PID namespace. That helper has no network, agent-filesystem or credential
+mounts, or host PID access; its sole added capability is `SYS_PTRACE` for reading
+the kernel namespace link of a differently-owned init process. No agent-supplied
+command or namespace claim is trusted. Unavailable, ambiguous, or changing
+process metadata remains retryable and never authorizes replacement.
+
+Confirmed drift requests durable `preparing` with `backend-recovery-requested`,
+not terminal cleanup. Preparation revalidates exact ownership and removes only
+stale dependent containers (agent first); ordinary Compose dependency ordering
+then recreates them against the current owner and fresh confinement proof.
+The healthy namespace owner, egress service, and named volumes remain intact.
+Partial replacement retries from the durable preparing state. This applies to
+automatic reboot recovery, live namespace-owner restarts, and reconciliation
+triggered by `make local-up`; no YAML flag or destructive-reconcile approval is
+required. Namespace agreement plus runtime health gates readiness; the real-
+engine regression also verifies the browser upstream from the gateway network.
 
 Docker daemon restart does not replay Compose dependency ordering. For an
 enforced transparent run, automatic agent-container restart therefore begins

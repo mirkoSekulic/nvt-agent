@@ -49,9 +49,12 @@ type BackendRun struct {
 // reconciler. Backend object IDs, credentials and raw diagnostics never cross
 // this boundary.
 type BackendObservation struct {
-	Ready           bool
-	TerminalTarget  State
-	LifecycleCursor string
+	Ready bool
+	// RecoveryRequired requests durable, idempotent preparation rather than
+	// terminal cleanup when an otherwise live runtime has repairable drift.
+	RecoveryRequired bool
+	TerminalTarget   State
+	LifecycleCursor  string
 }
 
 // These sentinels classify a backend operation without exposing backend or
@@ -279,6 +282,17 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 		observation, inspectErr := reconciler.backend.Inspect(ctx, backendRun)
 		if inspectErr != nil {
 			return inspectErr
+		}
+		if observation.RecoveryRequired && observation.TerminalTarget == "" {
+			claimed, err := reconciler.claim(ctx, run)
+			if err != nil {
+				return err
+			}
+			_, err = reconciler.store.UpdateStatus(ctx, StatusInput{
+				RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
+				State: StatePreparing, Reason: "backend-recovery-requested", LifecycleCursor: &observation.LifecycleCursor,
+			})
+			return err
 		}
 		if observation.Ready && observation.LifecycleCursor == backendRun.LifecycleCursor {
 			return nil

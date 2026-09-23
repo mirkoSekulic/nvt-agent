@@ -54,12 +54,18 @@ type fakeDocker struct {
 	lifecycleEvents         []string
 	lifecycleCursor         string
 	lifecycleErr            error
+	networkNamespaces       map[string]uint64
+	networkTopErrors        map[string]bool
+	networkProbe            bool
+	networkStateOverride    map[string]string
 }
 
 func newFakeDocker() *fakeDocker {
 	return &fakeDocker{
 		objects: map[string]map[string]string{"network:agents-proxy": {}}, objectSubnets: map[string]string{}, networkMembers: map[string]map[string]bool{},
-		containers: map[string]map[string]string{"nvt-local-gateway": {localGatewayLabel: "true"}},
+		containers:        map[string]map[string]string{"nvt-local-gateway": {localGatewayLabel: "true"}},
+		networkNamespaces: map[string]uint64{}, networkTopErrors: map[string]bool{},
+		networkStateOverride: map[string]string{},
 	}
 }
 
@@ -121,8 +127,24 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		return nil, nil
 	}
 	if arguments[0] == "rm" && len(arguments) >= 3 {
+		if docker.failRemove == arguments[len(arguments)-1] {
+			docker.failRemove = ""
+			return nil, errors.New("temporary remove failure")
+		}
 		delete(docker.containers, arguments[len(arguments)-1])
+		delete(docker.networkNamespaces, arguments[len(arguments)-1])
 		return nil, nil
+	}
+	if arguments[0] == "top" {
+		id := arguments[1]
+		if docker.networkTopErrors[id] {
+			return nil, errors.New("process metadata unavailable")
+		}
+		return []byte(fmt.Sprintf("PID NETNS\n100 %d\n", docker.networkNamespaces[id])), nil
+	}
+	if arguments[0] == "run" && argumentAfter(arguments, "--entrypoint") == "readlink" && docker.networkProbe {
+		id := strings.TrimPrefix(argumentAfter(arguments, "--pid"), "container:")
+		return []byte(fmt.Sprintf("net:[%d]\n", docker.networkNamespaces[id])), nil
 	}
 	if arguments[0] == "stop" && len(arguments) == 2 {
 		if _, exists := docker.containers[arguments[1]]; !exists {
@@ -144,7 +166,13 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		id := arguments[len(arguments)-1]
 		if labels, exists := docker.containers[id]; exists {
 			if contains(arguments, "{{json .State}}") {
-				status := docker.agentStatus
+				if raw, exists := docker.networkStateOverride[id]; exists {
+					return []byte(raw), nil
+				}
+				status := "running"
+				if labels[composeServiceLabel] == "agent" {
+					status = docker.agentStatus
+				}
 				health := ""
 				if id == "nvt-local-gateway" {
 					status = docker.gatewayStatus
@@ -153,7 +181,10 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 				if status == "" {
 					status = "running"
 				}
-				state := map[string]any{"Running": status != "stopped", "OOMKilled": docker.agentOOM, "ExitCode": docker.agentExitCode}
+				state := map[string]any{"Running": status != "stopped", "Pid": 100, "OOMKilled": docker.agentOOM, "ExitCode": docker.agentExitCode}
+				if status == "stopped" {
+					state["Pid"] = 0
+				}
 				if health != "" {
 					state["Health"] = map[string]any{"Status": health}
 				} else if id != "nvt-local-gateway" && (status == "healthy" || status == "starting" || status == "unhealthy") {
@@ -249,6 +280,24 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 					} else if docker.caMalformed || docker.caNameSetDigest != digest {
 						return nil, errors.New("ca-init failed")
 					}
+				}
+				ownerID := "fake-network-id"
+				if _, exists := document.Services["docker"]; exists {
+					ownerID = "fake-docker-id"
+				}
+				if docker.networkNamespaces[ownerID] == 0 {
+					docker.networkNamespaces[ownerID] = 42
+				}
+				for service, definition := range document.Services {
+					id := "fake-" + service + "-id"
+					if existing, exists := docker.containers[id]; exists && existing[composeProjectLabel] == project && !contains(arguments, "--force-recreate") {
+						continue
+					}
+					serviceLabels := cloneLabels(definition.Labels)
+					serviceLabels[composeProjectLabel] = project
+					serviceLabels[composeServiceLabel] = service
+					docker.containers[id] = serviceLabels
+					docker.networkNamespaces[id] = docker.networkNamespaces[ownerID]
 				}
 			}
 		}
@@ -444,16 +493,13 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 			t.Fatalf("agent seed omitted %q", expected)
 		}
 	}
-	netInitID := "exact-owned-net-init"
+	netInitID := "fake-net-init-id"
 	docker.containers[netInitID] = map[string]string{
 		ownerLabel: backend.config.Owner, runLabel: run.RunID, digestLabel: desired.SnapshotDigest,
 		composeProjectLabel: names.project, composeServiceLabel: "net-init",
 	}
 	if _, err := backend.Ensure(context.Background(), desired); err != nil {
 		t.Fatalf("restart ensure: %v", err)
-	}
-	if _, exists := docker.containers[netInitID]; exists {
-		t.Fatal("restart reconciliation did not recreate the exact-owned net-init proof writer")
 	}
 	removeIndex, composeIndex := -1, -1
 	for index, command := range docker.commands {
