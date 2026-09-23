@@ -357,6 +357,17 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 	defer ticker.Stop()
 	for {
 		observation, inspectErr := backend.Inspect(operationContext, desired)
+		if inspectErr == nil && observation.RecoveryRequired {
+			// Preparation is durable before any live container is replaced. A
+			// controller crash or partial Compose failure therefore resumes here,
+			// rather than classifying the planned interruption as runtime failure.
+			if err := backend.repairSharedNetwork(operationContext, run, names, labels); err != nil {
+				return controller.BackendObservation{}, controller.ErrBackendRetryable
+			}
+			if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d", "--no-recreate"); err != nil {
+				return controller.BackendObservation{}, controller.ErrBackendRetryable
+			}
+		}
 		if inspectErr == nil && (observation.Ready || observation.TerminalTarget != "") {
 			return observation, nil
 		}
@@ -411,6 +422,13 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 		}
 		if target != "" {
 			return controller.BackendObservation{TerminalTarget: target, LifecycleCursor: cursor}, nil
+		}
+		_, drift, err := backend.inspectSharedNetwork(operationContext, desired.Resolved, names, labels)
+		if err != nil {
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
+		}
+		if drift {
+			return controller.BackendObservation{RecoveryRequired: true, LifecycleCursor: cursor}, nil
 		}
 		if state.Health != nil && state.Health.Status != "healthy" && state.Health.Status != "starting" {
 			return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: cursor}, nil
