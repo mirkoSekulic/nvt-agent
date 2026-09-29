@@ -3,10 +3,12 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -14,6 +16,95 @@ import (
 	localmanifest "github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
+
+func TestHTTPExposureRolloutFromLocalManifestPreservesOwnership(t *testing.T) {
+	raw, err := os.ReadFile("../../../examples/http-exposure/manifest.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := localmanifest.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := m.Profiles["personal"]
+	profile.Expose = nil
+	m.Profiles["personal"] = profile
+	m.Profiles["other"] = profile
+	m.Workstations = append(m.Workstations, localmanifest.Workstation{Name: "other", Profile: "other"})
+	path := filepath.Join(t.TempDir(), "controller.json")
+	clock := &fakeClock{value: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	stage := func() {
+		t.Helper()
+		compiled, err := localmanifest.Compile(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := serviceconfig.Controller(compiled, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		scheduler, err := LoadScheduler(path, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := scheduler.BootstrapWorkstations(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stage()
+	backend := newFakeBackend()
+	reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+	reconcileToRunning(t, reconciler, store, "personal")
+	reconcileToRunning(t, reconciler, store, "other")
+	_, ownership, err := store.ResolvedSnapshot(context.Background(), "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherBefore, err := store.Get(context.Background(), "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expose := range []*localmanifest.ProfileExpose{
+		{HTTP: []localmanifest.HTTPExposure{{Name: "website", TargetPort: 4321}}},
+		{HTTP: []localmanifest.HTTPExposure{{Name: "preview", TargetPort: 8080}}},
+		nil,
+	} {
+		profile.Expose = expose
+		m.Profiles["personal"] = profile
+		stage() // No immutable replacement/destructive acknowledgement flags.
+		if err := reconciler.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		backend.mu.Lock()
+		var applied BackendRun
+		for _, ensured := range backend.ensuredRuns {
+			if ensured.Resolved.RunID == "personal" {
+				applied = ensured
+			}
+		}
+		backend.mu.Unlock()
+		if !applied.ConfigurationRollout || applied.PreviousResolved == nil || applied.SnapshotDigest != ownership {
+			t.Fatal("exposure required replacement or changed ownership")
+		}
+		var settings struct {
+			Expose *localmanifest.ProfileExpose `json:"expose"`
+		}
+		if err := json.Unmarshal(applied.Resolved.AgentConfig, &settings); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(settings.Expose, expose) {
+			t.Fatal("exposure did not reach desired native configuration")
+		}
+		otherAfter, err := store.Get(context.Background(), "other")
+		if err != nil || otherAfter.SnapshotDigest != otherBefore.SnapshotDigest || otherAfter.Revision != otherBefore.Revision {
+			t.Fatal("unrelated workstation rolled out")
+		}
+	}
+}
 
 func TestHTTPBindingRolloutFromLocalManifestPreservesOwnership(t *testing.T) {
 	raw, err := os.ReadFile("../../../examples/http-credentials/manifest.example.yaml")

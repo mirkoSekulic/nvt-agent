@@ -1,0 +1,19 @@
+apiVersion: nvt.dev/local/v1
+retentionPolicies:
+  persistent:
+    persistence:
+      workspace: true
+      runtimeState: true
+      dockerData: true
+profiles:
+  personal:
+    runtime:
+      preset: shell
+      autonomy: approval-required
+    expose:
+      http:
+        - name: website
+          targetPort: 4321
+workstations:
+  - name: personal
+    profile: personal

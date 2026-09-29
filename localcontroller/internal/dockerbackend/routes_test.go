@@ -1,6 +1,7 @@
 package dockerbackend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,84 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 	"gopkg.in/yaml.v3"
 )
+
+func TestHTTPExposureConfigurationRolloutRetainsVolumesAndNamedTargets(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	run.Persistence = resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true}
+	run.Retention, run.TTL = "persistent", resolvedrun.TTL{}
+	ownership := strings.Repeat("a", 64)
+	if _, err := backend.Ensure(context.Background(), controller.BackendRun{Resolved: run, SnapshotDigest: ownership, DesiredDigest: ownership}); err != nil {
+		t.Fatal(err)
+	}
+	names := namesFor(backend.config, run.RunID, ownership)
+	for index, route := range []exposeRoute{{Name: "website", TargetPort: 4321}, {Name: "preview", TargetPort: 8080}, {}} {
+		previous := run
+		var settings map[string]any
+		if err := json.Unmarshal(run.AgentConfig, &settings); err != nil {
+			t.Fatal(err)
+		}
+		delete(settings, "expose")
+		if route.Name != "" {
+			settings["expose"] = map[string]any{"http": []map[string]any{{"name": route.Name, "targetPort": route.TargetPort}}}
+		}
+		run.AgentConfig, _ = json.Marshal(settings)
+		desired := controller.BackendRun{Resolved: run, PreviousResolved: &previous, SnapshotDigest: ownership, DesiredDigest: strings.Repeat(string(rune('b'+index)), 64), ConfigurationRollout: true}
+		before := len(docker.commands)
+		if observation, err := backend.Ensure(context.Background(), desired); err != nil || !observation.Ready {
+			t.Fatalf("rollout = %#v, %v", observation, err)
+		}
+		stopped, recreated := false, false
+		for _, command := range docker.commands[before:] {
+			if command[0] == "stop" {
+				stopped = true
+			}
+			if command[0] == "compose" && contains(command, "--force-recreate") {
+				recreated = stopped
+			}
+			if command[0] == "volume" && contains(command, "rm") {
+				t.Fatal("rollout removed a volume")
+			}
+		}
+		if !stopped || !recreated {
+			t.Fatal("rollout did not use existing stop/recreate path")
+		}
+		for _, volume := range []string{names.workspace, names.home, names.dockerData} {
+			labels, exists := docker.objects["volume:"+volume]
+			if !exists || labels[digestLabel] != ownership {
+				t.Fatalf("persistent volume identity changed: %s", volume)
+			}
+		}
+		routes, err := backend.Routes(context.Background(), desired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := renderCompose(backend.config, run, ownership, names)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(plan, []byte("ports:")) {
+			t.Fatal("route published a Docker host port")
+		}
+		if route.Name == "" {
+			if len(routes.Exposures) != 0 || bytes.Contains(plan, []byte(`"name":"preview"`)) {
+				t.Fatal("removed route retained metadata")
+			}
+			continue
+		}
+		if len(routes.Exposures) != 1 {
+			t.Fatalf("route count: %d", len(routes.Exposures))
+		}
+		got := routes.Exposures[0]
+		if got.Name != route.Name || got.Host != route.Name+"."+run.RunID+".agent.localhost" || got.UpstreamPort != route.TargetPort || got.UpstreamHost != names.namespace {
+			t.Fatalf("named target = %#v", got)
+		}
+		route.Source = "agent"
+		metadata, _ := json.Marshal([]exposeRoute{route})
+		if !bytes.Contains(plan, metadata) {
+			t.Fatal("runtime route instruction metadata missing")
+		}
+	}
+}
 
 func TestRoutesPublishOnlyStablePublicNamesAndIsolateAgentFromSharedProxy(t *testing.T) {
 	run := testMediatedRun(t)

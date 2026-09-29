@@ -332,13 +332,17 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 			},
 		}
 	}
-	agentConfig := mustJSON(map[string]any{
+	agentSettings := map[string]any{
 		"runtime":     map[string]any{"command": command, "args": args, "resume": map[string]any{"command": command, "args": resumeArgs}},
 		"preseed":     runtimePreseed(runtimeType),
 		"tools":       map[string]any{"packages": intent.Profile.Tools.Packages, "mise": intent.Profile.Tools.Mise},
 		"code-server": codeServer,
 		"plugins":     plugins,
-	})
+	}
+	if intent.Profile.Expose != nil && len(intent.Profile.Expose.HTTP) > 0 {
+		agentSettings["expose"] = intent.Profile.Expose
+	}
+	agentConfig := mustJSON(agentSettings)
 	profile := resolvedrun.Profile{
 		Name: intent.Name, Runtime: &resolvedrun.Runtime{Type: runtimeType, Autonomy: autonomy, Model: intent.Profile.Runtime.Model, Effort: intent.Profile.Runtime.Effort, User: "root", Container: &resolvedrun.RuntimeContainer{Capabilities: append([]string(nil), intent.Profile.Capabilities...)}, Docker: &resolvedrun.RuntimeDocker{}},
 		AgentConfig: agentConfig, WorkspaceInstructions: instructions, AllowedBackends: []string{"local-docker"}, DefaultBackend: "local-docker", AllowedRetentions: append([]string(nil), retentionNames...),

@@ -130,6 +130,7 @@ type Profile struct {
 	Egress                    *ProfileEgress     `json:"egress,omitempty"`
 	Kubernetes                []KubernetesAccess `json:"kubernetes,omitempty"`
 	Azure                     []AzureAccess      `json:"azure,omitempty"`
+	Expose                    *ProfileExpose     `json:"expose,omitempty"`
 }
 
 // KubernetesAccess selects context resources from one generic kubeconfig
@@ -448,6 +449,9 @@ func (m Manifest) Validate() error {
 		}
 		if !validRuntimeSelection(profile.Runtime) {
 			return fmt.Errorf("profile %q has an invalid runtime model or effort", name)
+		}
+		if err := validateExpose(profile.Expose); err != nil {
+			return fmt.Errorf("profile %q: %w", name, err)
 		}
 		if profile.Egress != nil {
 			if profile.Egress.DomainPolicy == nil || validateDomainPolicy(*profile.Egress.DomainPolicy) != nil {

@@ -198,6 +198,14 @@ func Compile(m Manifest) (Compiled, error) {
 	}
 	for _, name := range SortedNames(m.Profiles) {
 		profile := m.Profiles[name]
+		if profile.Expose != nil {
+			if len(profile.Expose.HTTP) == 0 {
+				profile.Expose = nil // Empty exposure is canonically identical to omission.
+			} else {
+				profile.Expose = &ProfileExpose{HTTP: append([]HTTPExposure(nil), profile.Expose.HTTP...)}
+				sort.Slice(profile.Expose.HTTP, func(i, j int) bool { return profile.Expose.HTTP[i].Name < profile.Expose.HTTP[j].Name })
+			}
+		}
 		profile.Accounts = append([]string(nil), profile.Accounts...)
 		profile.CredentialProviders = append([]string(nil), profile.CredentialProviders...)
 		profile.Tools.Packages = append([]string(nil), profile.Tools.Packages...)
