@@ -23,6 +23,16 @@ import (
 // material. Broker-core/protocol behavior is covered separately in tests/broker.
 // No Azure credentials or cloud calls are used.
 func TestAzureCLIThroughMediatedEgress(t *testing.T) {
+	for _, compact := range []bool{false, true} {
+		name := "explicit"
+		if compact {
+			name = "compact"
+		}
+		t.Run(name, func(t *testing.T) { testAzureCLIThroughMediatedEgress(t, compact) })
+	}
+}
+
+func testAzureCLIThroughMediatedEgress(t *testing.T, compact bool) {
 	python := os.Getenv("NVT_AZURE_CLI_PYTHON")
 	if python == "" {
 		t.Skip("optional pinned Azure CLI environment not installed")
@@ -30,11 +40,23 @@ func TestAzureCLIThroughMediatedEgress(t *testing.T) {
 	_, source, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(source), "..", "..", ".."))
 	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer fixture-egress-role" {
+		catalog := r.URL.Path == "/v1/catalog"
+		role := "fixture-egress-role"
+		if catalog {
+			role = "fixture-agent-role"
+		}
+		if r.Header.Get("Authorization") != "Bearer "+role {
 			w.WriteHeader(403)
 			return
 		}
 		input, _ := io.ReadAll(io.LimitReader(r.Body, 8192))
+		var params map[string]any
+		if json.Unmarshal(input, &params) != nil {
+			w.WriteHeader(400)
+			return
+		}
+		params["compact"], params["catalog"] = compact, catalog
+		input, _ = json.Marshal(params)
 		command := exec.Command("python3", filepath.Join(root, "tests/azure-cli/authorize_fixture.py"))
 		command.Stdin = bytes.NewReader(input)
 		output, err := command.Output()
@@ -92,6 +114,9 @@ func TestAzureCLIThroughMediatedEgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	metadata := `{"providers":{"azure-one":{"tenant":"22222222-2222-2222-2222-222222222222","subscriptions":[{"id":"11111111-1111-1111-1111-111111111111"}]},"azure-two":{"tenant":"22222222-2222-2222-2222-222222222222","subscriptions":[{"id":"11111111-1111-1111-1111-111111111111"}]}}}`
+	if compact {
+		metadata = `{"providers":{"azure-one":{"tenant":"22222222-2222-2222-2222-222222222222","catalog":true},"azure-two":{"tenant":"22222222-2222-2222-2222-222222222222","catalog":true}}}`
+	}
 	config := filepath.Join(agentHome, "plugin.json")
 	if err := os.WriteFile(config, []byte(metadata), 0600); err != nil {
 		t.Fatal(err)
@@ -99,6 +124,7 @@ func TestAzureCLIThroughMediatedEgress(t *testing.T) {
 	baseEnv := []string{"PATH=" + filepath.Join(agentHome, ".local/bin") + ":" + filepath.Join(agentHome, "fixture-bin"), "HOME=" + agentHome,
 		"NVT_STATE_DIR=" + filepath.Join(agentHome, ".nvt-agent"), "NVT_WORKSPACE=" + agentHome, "NVT_EGRESS_MODE=mediated",
 		"NVT_PLUGIN_CONFIG=" + config, "NVT_PLUGIN_EGRESS_PROVIDER=azure-one",
+		"NVT_BROKER_URL=" + broker.URL, "NVT_BROKER_TOKEN=fixture-agent-role",
 		"AZURE_EXTENSION_DIR=" + os.Getenv("AZURE_EXTENSION_DIR"), "REQUESTS_CA_BUNDLE=" + cert}
 	for _, capability := range []string{"azure-one", "azure-two"} {
 		parsed, _ := url.Parse(proxy.URL)
@@ -122,7 +148,7 @@ func TestAzureCLIThroughMediatedEgress(t *testing.T) {
 		if strings.Contains(string(output), "fixture-trusted") {
 			t.Fatal("broker token entered CLI output")
 		}
-		if args[0] == "account" && !strings.Contains(string(output), Placeholder) {
+		if args[0] == "account" && args[1] == "get-access-token" && !strings.Contains(string(output), Placeholder) {
 			t.Fatal("token output was not inert")
 		}
 	}
@@ -130,6 +156,11 @@ func TestAzureCLIThroughMediatedEgress(t *testing.T) {
 	run("azure-two", "group", "list")
 	run("azure-one", "monitor", "log-analytics", "query", "-w", "33333333-3333-3333-3333-333333333333", "--analytics-query", "print Result=42")
 	run("azure-one", "account", "get-access-token")
+	for _, provider := range []string{"azure-one", "azure-two"} {
+		run(provider, "account", "list")
+		run(provider, "account", "set", "--subscription", "11111111-1111-1111-1111-111111111111")
+		run(provider, "account", "show")
+	}
 	mu.Lock()
 	count := len(upstreamCalls)
 	records := strings.Join(upstreamCalls, "\n")

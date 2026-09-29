@@ -1,0 +1,43 @@
+apiVersion: nvt.dev/local/v1
+retentionPolicies:
+  persistent:
+    persistence: {workspace: true, runtimeState: true, dockerData: true}
+brokerProviders:
+  azure-one:
+    plugin: azure
+    config:
+      tenant: 22222222-2222-2222-2222-222222222222
+      allSubscriptions: true
+    allow:
+      authorization: {preset: observe}
+      # Separate consent to the identity's COMPLETE RBAC query boundary.
+      queryIdentity: true
+  azure-two:
+    plugin: azure
+    config:
+      tenant: 44444444-4444-4444-4444-444444444444
+      allSubscriptions: true
+    allow:
+      authorization: {preset: observe}
+      queryIdentity: true
+profiles:
+  azure-investigation:
+    runtime: {preset: shell, autonomy: trusted-local}
+    editor: {preset: none}
+    azure:
+      - provider: azure-one
+        inheritProviderScope: true
+        authorization: {preset: observe}
+        queryIdentity: true
+      - provider: azure-two
+        inheritProviderScope: true
+        authorization: {preset: observe}
+        queryIdentity: true
+    egress:
+      domainPolicy:
+        defaultAction: deny
+        allow: [management.azure.com, api.loganalytics.io]
+workstations:
+  - name: azure-investigation
+    profile: azure-investigation
+    repositories: []

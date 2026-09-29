@@ -1134,7 +1134,18 @@ func validateConfig(value any, depth int) error {
 }
 
 func validateBrokerProvider(name string, provider BrokerProvider, secrets map[string]Secret) error {
-	if err := validateProviderConfig(provider.Config, 0); err != nil {
+	publicConfig := provider.Config
+	if provider.Plugin == "azure" {
+		// Azure's typed selection flag is validated by validateAzureProvider;
+		// keep the generic provider's kebab-case key contract unchanged.
+		publicConfig = make(map[string]any, len(provider.Config))
+		for key, value := range provider.Config {
+			if key != "allSubscriptions" {
+				publicConfig[key] = value
+			}
+		}
+	}
+	if err := validateProviderConfig(publicConfig, 0); err != nil {
 		return fmt.Errorf("broker provider %q config: %w", name, err)
 	}
 	if containsUnsafePublicPath(provider.Config) {

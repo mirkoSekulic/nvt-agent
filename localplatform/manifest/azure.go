@@ -9,9 +9,11 @@ import (
 
 // AzureAccess carries public identity/scope intent. The broker owns enrollment.
 type AzureAccess struct {
-	Provider      string                   `json:"provider"`
-	Resources     []string                 `json:"resources"`
-	Authorization *KubernetesAuthorization `json:"authorization,omitempty"`
+	Provider             string                   `json:"provider"`
+	Resources            []string                 `json:"resources"`
+	InheritProviderScope *bool                    `json:"inheritProviderScope,omitempty"`
+	QueryIdentity        *bool                    `json:"queryIdentity,omitempty"`
+	Authorization        *KubernetesAuthorization `json:"authorization,omitempty"`
 }
 
 var azureUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -37,12 +39,12 @@ func azureResources(resources []string, tenant string) bool {
 }
 
 func validateAzureProvider(provider BrokerProvider) error {
-	invalid := errors.New("invalid Azure provider: require public tenant/subscriptions, explicit allow.resources and isolated broker enrollment")
-	if len(provider.Secrets) != 0 || len(provider.Mediation.Hosts) != 0 || provider.Mediation.Materialization != "" || provider.Mediation.Git || provider.Mediation.Username != "" || provider.Mediation.TargetMode != "" {
+	invalid := errors.New("invalid Azure provider: require tenant, exactly one subscription selection, explicit allow policy and isolated broker enrollment")
+	if provider.Allow == nil || len(provider.Secrets) != 0 || len(provider.Mediation.Hosts) != 0 || provider.Mediation.Materialization != "" || provider.Mediation.Git || provider.Mediation.Username != "" || provider.Mediation.TargetMode != "" {
 		return invalid
 	}
 	for key := range provider.Config {
-		if key != "tenant" && key != "subscriptions" && key != "cloud" {
+		if key != "tenant" && key != "subscriptions" && key != "cloud" && key != "allSubscriptions" {
 			return invalid
 		}
 	}
@@ -53,8 +55,13 @@ func validateAzureProvider(provider BrokerProvider) error {
 	if cloud, ok := provider.Config["cloud"]; ok && cloud != "AzureCloud" {
 		return invalid
 	}
+	all, hasAll := provider.Config["allSubscriptions"]
+	_, hasSubscriptions := provider.Config["subscriptions"]
+	if hasAll && (all != true || hasSubscriptions) {
+		return invalid
+	}
 	subscriptions, ok := providerStringList(provider.Config["subscriptions"])
-	if !ok || len(subscriptions) == 0 || len(subscriptions) > 256 || uniqueStrings(subscriptions) != nil {
+	if !hasAll && (!ok || len(subscriptions) == 0 || len(subscriptions) > 256 || uniqueStrings(subscriptions) != nil) {
 		return invalid
 	}
 	for _, subscription := range subscriptions {
@@ -63,12 +70,16 @@ func validateAzureProvider(provider BrokerProvider) error {
 		}
 	}
 	for key := range provider.Allow {
-		if key != "resources" && key != "authorization" {
+		if key != "resources" && key != "authorization" && key != "queryIdentity" {
 			return invalid
 		}
 	}
 	resources, ok := providerStringList(provider.Allow["resources"])
-	if !ok || !azureResources(resources, tenant) {
+	_, hasResources := provider.Allow["resources"]
+	if (hasAll && hasResources) || (!hasAll && (!ok || !azureResources(resources, tenant))) {
+		return invalid
+	}
+	if query, exists := provider.Allow["queryIdentity"]; exists && (query != true || contains(resources, "query-identity/"+tenant) || containsAzureWorkspace(resources)) {
 		return invalid
 	}
 	for _, resource := range resources {
@@ -82,7 +93,7 @@ func validateAzureProvider(provider BrokerProvider) error {
 			return invalid
 		}
 		var authorization KubernetesAuthorization
-		if strictJSON(encoded, &authorization) != nil || validateKubernetesAuthorization(&authorization) != nil || authorization.Preset != "" {
+		if strictJSON(encoded, &authorization) != nil || validateKubernetesAuthorization(&authorization) != nil {
 			return invalid
 		}
 	}
@@ -110,10 +121,37 @@ func validateAzureAccess(m Manifest, profile Profile) error {
 	for _, access := range profile.Azure {
 		provider, ok := m.BrokerProviders[access.Provider]
 		tenant, _ := provider.Config["tenant"].(string)
-		if !ok || provider.Plugin != "azure" || seen[access.Provider] || !azureResources(access.Resources, tenant) || validateKubernetesAuthorization(access.Authorization) != nil {
+		inherit := access.InheritProviderScope != nil && *access.InheritProviderScope
+		if !ok || provider.Plugin != "azure" || seen[access.Provider] || validateKubernetesAuthorization(access.Authorization) != nil ||
+			(access.InheritProviderScope != nil && (!inherit || access.Resources != nil)) ||
+			(!inherit && !azureResources(access.Resources, tenant)) ||
+			(access.QueryIdentity != nil && (!*access.QueryIdentity || !inherit)) {
 			return errors.New("invalid Azure access")
 		}
 		seen[access.Provider] = true
 	}
 	return nil
+}
+
+func containsAzureWorkspace(resources []string) bool {
+	for _, resource := range resources {
+		if strings.HasPrefix(resource, "workspace/") {
+			return true
+		}
+	}
+	return false
+}
+
+// Provider scope is an Azure-only, non-wildcard selector interpreted by the
+// trusted provider. Query permission always requires a separate selector.
+func azureAccessResources(access AzureAccess, provider BrokerProvider) []string {
+	if access.InheritProviderScope != nil && *access.InheritProviderScope {
+		tenant := provider.Config["tenant"].(string)
+		resources := []string{"provider-scope/" + tenant}
+		if access.QueryIdentity != nil && *access.QueryIdentity {
+			resources = append(resources, "query-identity/"+tenant)
+		}
+		return resources
+	}
+	return append([]string(nil), access.Resources...)
 }

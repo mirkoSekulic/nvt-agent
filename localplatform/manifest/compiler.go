@@ -260,6 +260,9 @@ func Compile(m Manifest) (Compiled, error) {
 					accounts = append(accounts, map[string]any{"id": subscription})
 				}
 				providers[access.Provider] = map[string]any{"tenant": config["tenant"], "subscriptions": accounts}
+				if config["allSubscriptions"] == true {
+					providers[access.Provider] = map[string]any{"tenant": config["tenant"], "catalog": true}
+				}
 			}
 			profile.Plugins = append(profile.Plugins, Plugin{Name: "azure-cli", Egress: &PluginEgress{Provider: profile.Azure[0].Provider}, Config: map[string]any{"providers": providers}})
 		}
@@ -525,7 +528,7 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 	azureAccess := append([]AzureAccess(nil), m.Profiles[profileName].Azure...)
 	sort.Slice(azureAccess, func(i, j int) bool { return azureAccess[i].Provider < azureAccess[j].Provider })
 	for _, access := range azureAccess {
-		resources := append([]string(nil), access.Resources...)
+		resources := azureAccessResources(access, m.BrokerProviders[access.Provider])
 		sort.Strings(resources)
 		authorization := resolveProviderAuthorization(access.Authorization, resources, "azure/")
 		result = append(result, BrokerGrantIntent{Provider: access.Provider, Preset: "azure", Purpose: "azure-injection", Resources: resources, Authorization: authorization})
