@@ -226,6 +226,16 @@ used by an agent repository.
 
 ## Canonical compilation and ownership
 
+Profiles may declare `expose.http: [{name: website, targetPort: 4321}]`.
+This projects to the existing native `agent_config.expose.http` contract,
+with its default agent-namespace source; no upstream host or source is accepted.
+At most 64 entries are allowed: unique lowercase DNS-label names (1–63 bytes)
+and integer ports in 1..65535. Unknown fields and invalid types are rejected.
+An omitted exposure, empty object, or empty HTTP list is canonically omitted;
+nonempty routes are sorted by name without mutating the authored manifest.
+See [local HTTP applications](../docs/local-development-agent.md#named-http-applications)
+for URLs, listening requirements, and compatible rollout semantics.
+
 Compilation produces deterministic JSON. Map entries and set-like lists are
 sorted, and named sequences are sorted by name. Therefore YAML spelling, map
 order, and set order do not affect the compiled bytes.

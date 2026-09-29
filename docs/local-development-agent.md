@@ -52,6 +52,50 @@ gateway. Enroll it there; the broker imports it into canonical private storage.
 
 ## Lifecycle
 
+### Named HTTP applications
+
+Declare application routes on the selected profile, without editing generated
+configuration or publishing a Docker port on the workstation host:
+
+```yaml
+profiles:
+  personal:
+    # Keep the existing runtime, accounts, and other profile settings.
+    expose:
+      http:
+        - name: website
+          targetPort: 4321
+```
+
+For a workstation named `personal`, the default gateway URL is
+`http://website.personal.agent.localhost:4090/`. The hostname uses the
+**workstation name**, not the profile name. See the complete, credential-free
+[example manifest](../examples/http-exposure/manifest.example.yaml).
+
+Start the application yourself and have it listen on `0.0.0.0:4321` in the
+workstation's shared network namespace. For an application inside nested Docker,
+publish its container port into that namespace (for example,
+`-p 0.0.0.0:4321:4321`) and listen on `0.0.0.0` inside that container too.
+This is not host Docker port publishing. Avoid ports already used by the runtime,
+such as `4090` and `2375`.
+
+Existing gateway owner authorization applies. These are host-based routes:
+root paths, deep links, and WebSockets retain their existing behavior; no special
+application base path is required. There is no arbitrary upstream URL or source
+setting. Each profile permits at most 64 routes with unique lowercase DNS-label
+names (1–63 characters) and integer `targetPort` values from 1 to 65535.
+Routes compile in name order. Omission, `expose: {}`, and `expose: {http: []}`
+produce the same no-exposure configuration.
+
+Adding, changing, or removing routes uses the existing compatible configuration
+rollout for workstations selecting that profile, not immutable replacement.
+A rollout can restart the affected runtime, but retains workspace, runtime-home,
+and Docker-data volumes. Other profiles do not acquire routes or roll out.
+A declaration does **not** automatically start or restart an unmanaged development
+server. The new route works only when the application is listening.
+
+### Platform operations
+
 - `make local-init` validates and compiles the manifest, resolves inputs, and
   creates or adopts only exact-labeled state without starting the platform.
 - `make local-up` reconciles state and starts the control plane, portal,
