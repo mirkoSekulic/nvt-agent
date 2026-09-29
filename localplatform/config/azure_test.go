@@ -10,6 +10,59 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
 )
 
+func TestAzureCompactExampleRendersPortableIsolatedScopes(t *testing.T) {
+	raw, err := os.ReadFile("../../examples/azure/compact.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := manifest.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second profile has no Azure grant merely because providers exist.
+	profile := m.Profiles["azure-investigation"]
+	profile.Azure = nil
+	profile.Egress = nil
+	m.Profiles["ungranted"] = profile
+	before, _ := json.Marshal(m)
+	compiled, err := manifest.Compile(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker, err := serviceconfig.Broker(compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := serviceconfig.Controller(compiled, serviceconfig.Instructions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"allSubscriptions":true`, `/providers/azure-one`, `/providers/azure-two`, `"preset":"observe"`} {
+		if !bytes.Contains(broker, []byte(expected)) {
+			t.Fatalf("missing %s", expected)
+		}
+	}
+	for _, expected := range []string{`"catalog":true`, `azure/provider-scope/22222222`, `azure/query-identity/44444444`, `"materialization":"header-inject"`} {
+		if !bytes.Contains(controller, []byte(expected)) {
+			t.Fatalf("missing %s", expected)
+		}
+	}
+	for _, forbidden := range []string{`"state-dir"`, `msal`, `accessToken`, `"preparations":["catalog"]`} {
+		if bytes.Contains(controller, []byte(forbidden)) {
+			t.Fatalf("wrong runtime boundary: %s", forbidden)
+		}
+	}
+	for _, p := range compiled.Broker.Profiles {
+		if p.Name == "ungranted" && len(p.Grants) != 0 {
+			t.Fatal("ungranted profile acquired Azure access")
+		}
+	}
+	after, _ := json.Marshal(m)
+	if !bytes.Equal(before, after) {
+		t.Fatal("render changed authored manifest")
+	}
+}
+
 func TestAzureExampleCompilesWithExplicitCeilingAndPublicRuntimeMetadata(t *testing.T) {
 	raw, err := os.ReadFile("../../examples/azure/manifest.example.yaml")
 	if err != nil {

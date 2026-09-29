@@ -24,6 +24,28 @@ WORKSPACE = "33333333-3333-3333-3333-333333333333"
 
 
 class Compatibility(unittest.TestCase):
+    def test_public_accounts_two_identities_selection_and_removal(self):
+        import requests
+        from azure.cli.core import get_default_cli
+        with tempfile.TemporaryDirectory(prefix="nvt-azure-accounts-") as tmp, patch.dict(os.environ, {"HOME": tmp}), patch.object(requests.Session, "send", side_effect=AssertionError("account commands must not contact Azure")):
+            for provider in ["azure-one", "azure-two"]:
+                directory = Path(tmp) / provider
+                metadata = {"tenant": TENANT, "subscriptions": [{"id": SUB, "name": provider+"-one"}, {"id": WORKSPACE, "name": provider+"-two"}]}
+                def invoke(args):
+                    adapter.configure(metadata, directory)
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        cli = get_default_cli()
+                        cli.out_file = output
+                        self.assertEqual(cli.invoke(args), 0)
+                    return output.getvalue()
+                self.assertEqual(len(json.loads(invoke(["account", "list"]))), 2)
+                invoke(["account", "set", "--subscription", WORKSPACE])
+                self.assertEqual(json.loads(invoke(["account", "show"]))["id"], WORKSPACE)
+                metadata["subscriptions"] = metadata["subscriptions"][:1]
+                self.assertEqual(json.loads(invoke(["account", "show"]))["id"], SUB)
+                self.assertFalse(list(directory.rglob("*token_cache*")))
+
     def test_trusted_source_pins_public_cloud_and_uses_real_cli_token_path(self):
         import copy
         import requests

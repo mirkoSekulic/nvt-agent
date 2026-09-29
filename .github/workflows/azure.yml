@@ -38,3 +38,9 @@ jobs:
           NVT_AZURE_CLI_PYTHON: /tmp/nvt-azure-cli/bin/python
           AZURE_EXTENSION_DIR: /tmp/nvt-azure-extensions
         run: go test -race -count=1 -v -run TestAzureCLIThroughMediatedEgress ./internal/egress
+      - name: Real CLI with rendered zero-secret local and operator environments
+        env:
+          NVT_AZURE_CLI_PYTHON: /tmp/nvt-azure-cli/bin/python
+        run: |
+          (cd localcontroller && go test -count=1 -v -run TestAzureRenderedAgentEnvironment ./internal/dockerbackend)
+          (cd operator && go test -count=1 -v -run TestAzureRenderedAgentEnvironment ./internal/controller)

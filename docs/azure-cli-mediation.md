@@ -89,6 +89,11 @@ Future sharing with a kubeconfig credential helper need not change kubeconfig.
 
 ## Scopes and optional observe authorization
 
+For automatic subscription inventory, independent compact provider/agent observe
+policies and a two-identity example, see
+[compact Azure scope](azure-compact-configuration.md). Existing explicit scopes
+below remain supported.
+
 See the complete [local YAML](../examples/azure/manifest.example.yaml),
 [direct broker configuration](../examples/azure/broker.yaml) and
 [Helm/operator overlay](../examples/azure/helm-values.yaml).
@@ -126,7 +131,8 @@ authorization:
       resource: azure/arm:/subscriptions/11111111-1111-1111-1111-111111111111
 ```
 
-Set an independent concrete `allow.authorization` ceiling on the provider.
+Set an independent `allow.authorization` ceiling on the provider, using concrete
+rules or `{preset: observe}` over that provider's current allowed scope.
 Both the provider ceiling and selected grant must allow an actual operation.
 Omitting authorization removes that layer's observe restriction, not resource
 ceilings or credential isolation. The initial non-observe mutation coverage is

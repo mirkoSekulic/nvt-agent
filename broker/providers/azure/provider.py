@@ -30,6 +30,7 @@ TYPES = {
     "microsoft.resources/deployments": {"2025-04-01"},
 }
 RESOURCE_VERSIONS = {"2024-11-01"}
+DISCOVERY_TTL = 60
 
 
 class Failure(Exception):
@@ -55,9 +56,11 @@ def scope(value, tenant):
     raise Failure()
 
 
-def policy(value):
+def policy(value, preset=False):
     if value is None:
         return None
+    if preset and value == {"preset": "observe"}:
+        return value
     if not isinstance(value, dict) or set(value) - {"defaultAction", "rules"} or value.get("defaultAction") not in {"allow", "deny"}:
         raise Failure()
     rules = value.get("rules", [])
@@ -70,6 +73,8 @@ def policy(value):
 
 
 def permits(value, operation, resource):
+    if value == {"preset": "observe"}:
+        return operation == "observe"
     return value is None or value["defaultAction"] == "allow" or {"operation": operation, "resource": resource} in value.get("rules", [])
 
 
@@ -81,11 +86,29 @@ class AzureCLITokenSource:
     def acquire(self, audience):
         if audience not in AUDIENCES.values():
             raise Failure("azure-audience-denied", 403)
+        result = self._request(audience)
+        try:
+            expiry = result.get("expires_on")
+            token = result.get("accessToken")
+            if (result.get("tenant", "").lower() != self.tenant or result.get("tokenType") != "Bearer"
+                    or not isinstance(expiry, (int, str)) or isinstance(expiry, bool)
+                    or not isinstance(token, str) or not 0 < len(token) <= 65536
+                    or any(ord(c) <= 32 or ord(c) > 126 for c in token)
+                    or int(expiry) <= time.time() + 60):
+                raise ValueError()
+            return token, int(expiry)
+        except (ValueError, TypeError, AttributeError):
+            raise Failure("azure-credentials-unavailable", 503) from None
+
+    def discover(self):
+        return self._request("subscriptions")
+
+    def _request(self, operation):
         environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": self.directory,
                        "AZURE_CONFIG_DIR": self.directory, "AZURE_CORE_COLLECT_TELEMETRY": "false",
                        "AZURE_LOGGING_ENABLE_LOG_FILE": "false",
                        "AZURE_EXTENSION_USE_DYNAMIC_INSTALL": "no"}
-        command = [self.executable, str(Path(__file__).with_name("token_source.py")), self.tenant, audience]
+        command = [self.executable, str(Path(__file__).with_name("token_source.py")), self.tenant, operation]
         try:
             with subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as child:
@@ -111,15 +134,7 @@ class AzureCLITokenSource:
                     if child.poll() is None:
                         child.kill()
                     child.wait()
-            expiry = result.get("expires_on")
-            token = result.get("accessToken")
-            if (result.get("tenant", "").lower() != self.tenant or result.get("tokenType") != "Bearer"
-                    or not isinstance(expiry, (int, str)) or isinstance(expiry, bool)
-                    or not isinstance(token, str) or not 0 < len(token) <= 65536
-                    or any(ord(c) <= 32 or ord(c) > 126 for c in token)
-                    or int(expiry) <= time.time() + 60):
-                raise Failure("azure-credentials-unavailable", 503)
-            return token, int(expiry)
+            return result
         except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
             raise Failure("azure-credentials-unavailable", 503) from None
 
@@ -127,32 +142,89 @@ class AzureCLITokenSource:
 class AzureProvider:
     def __init__(self, params, source=None):
         config, allow = params.get("config"), params.get("allow")
-        if not isinstance(config, dict) or not isinstance(allow, dict) or set(config) - {"tenant", "subscriptions", "state-dir", "cloud"} or set(allow) - {"resources", "authorization"}:
+        if not isinstance(config, dict) or not isinstance(allow, dict) or set(config) - {"tenant", "subscriptions", "allSubscriptions", "state-dir", "cloud"} or set(allow) - {"resources", "authorization", "queryIdentity"}:
             raise Failure()
         self.tenant = config.get("tenant", "")
-        if not re.fullmatch(UUID, self.tenant) or config.get("cloud", "AzureCloud") != "AzureCloud":
+        if not isinstance(self.tenant, str) or not re.fullmatch(UUID, self.tenant) or config.get("cloud", "AzureCloud") != "AzureCloud":
             raise Failure()
-        self.subscriptions = strings(config.get("subscriptions"))
+        self.all_subscriptions = config.get("allSubscriptions", False)
+        if "allSubscriptions" in config and (self.all_subscriptions is not True or "subscriptions" in config or "resources" in allow):
+            raise Failure()
+        self.subscriptions = [] if self.all_subscriptions else strings(config.get("subscriptions"))
         if any(not re.fullmatch(UUID, s) for s in self.subscriptions):
             raise Failure()
-        self.ceiling = self.scopes(allow.get("resources"))
-        self.policy = policy(allow.get("authorization"))
+        self.ceiling = [] if self.all_subscriptions else self.scopes(allow.get("resources"))
+        self.query_identity = allow.get("queryIdentity", False)
+        if "queryIdentity" in allow and (self.query_identity is not True or "query-identity/"+self.tenant in self.ceiling or any(s.startswith("workspace/") for s in self.ceiling)):
+            raise Failure()
+        if self.query_identity:
+            self.ceiling.append("query-identity/"+self.tenant)
+        self.policy = policy(allow.get("authorization"), preset=True)
+        self.accounts = [{"id": s, "name": s} for s in self.subscriptions]
+        self.discovery_deadline = 0
         directory = config.get("state-dir")
         if not isinstance(directory, str) or not Path(directory).is_absolute():
             raise Failure()
         self.source = source or AzureCLITokenSource(directory, self.tenant)
 
-    def scopes(self, values):
-        result = [scope(s, self.tenant) for s in strings(values)]
+    def scopes(self, values, grant=False):
+        marker = "provider-scope/" + self.tenant
+        result = [s if grant and s == marker else scope(s, self.tenant) for s in strings(values)]
+        if marker in result and any(s.startswith(("arm:", "workspace/")) for s in result):
+            raise Failure()
         for item in result:
-            if item.startswith("arm:") and item.split("/")[2] not in self.subscriptions:
+            if item.startswith("arm:") and not (grant and self.all_subscriptions) and item.split("/")[2] not in self.subscriptions:
                 raise Failure()
         if any(s.startswith("workspace/") for s in result) and any(s.startswith("query-identity/") for s in result):
             raise Failure()
         return result
 
+    def refresh(self):
+        if not self.all_subscriptions or time.monotonic() < self.discovery_deadline:
+            return
+        # Never retain a usable stale snapshot after expiry or a failed refresh.
+        self.subscriptions, self.accounts, self.ceiling = [], [], []
+        try:
+            result = self.source.discover()
+            if not isinstance(result, dict) or set(result) != {"tenant", "subscriptions"} or result["tenant"] != self.tenant:
+                raise ValueError()
+            accounts = result["subscriptions"]
+            if not isinstance(accounts, list) or len(accounts) > 256:
+                raise ValueError()
+            seen = set()
+            for item in accounts:
+                if (not isinstance(item, dict) or set(item) != {"id", "name"} or not isinstance(item["id"], str)
+                        or not re.fullmatch(UUID, item["id"]) or item["id"] in seen
+                        or not isinstance(item["name"], str) or not 0 < len(item["name"].encode()) <= 512
+                        or any(ord(c) < 32 or ord(c) == 127 for c in item["name"])):
+                    raise ValueError()
+                seen.add(item["id"])
+            self.accounts = sorted(accounts, key=lambda s: s["id"])
+            self.subscriptions = [s["id"] for s in self.accounts]
+            self.ceiling = ["arm:/subscriptions/"+s for s in self.subscriptions]
+            if self.query_identity:
+                self.ceiling.append("query-identity/"+self.tenant)
+            self.discovery_deadline = time.monotonic() + DISCOVERY_TTL
+        except Exception:
+            raise Failure("azure-discovery-unavailable", 503) from None
+
+    def catalog(self, params):
+        self.refresh()
+        grant = params.get("grant", {})
+        if grant.get("materialization") != "header-inject":
+            raise Failure("azure-scope-denied", 403)
+        scopes = self.scopes(grant.get("resources"), grant=True)
+        marker = "provider-scope/" + self.tenant
+        def visible(subscription):
+            root = "arm:/subscriptions/"+subscription
+            return any(s == root or s.startswith(root+"/") for s in self.ceiling) and (marker in scopes or any(s == root or s.startswith(root+"/") for s in scopes))
+        metadata = {"tenant": self.tenant, "subscriptions": [s for s in self.accounts if visible(s["id"])]}
+        content = json.dumps(metadata, separators=(",", ":"))
+        return {"files": [{"path": "azure-account-metadata.json", "content": content, "mode": "0600"}], "routes": [],
+                "expires_at": datetime.datetime.fromtimestamp(time.time()+DISCOVERY_TTL, datetime.timezone.utc).isoformat()}
+
     def initialize_result(self):
-        return {"protocol_version": PROTOCOL, "capabilities": ["injection.authorization", "injection.headers"],
+        return {"protocol_version": PROTOCOL, "capabilities": ["catalog", "injection.authorization", "injection.headers"],
                 "injection_hosts": [ARM, LOGS], "injection_git": False, "bundle_ttl_seconds": None}
 
     def classify(self, params):
@@ -239,17 +311,18 @@ class AzureProvider:
     def injection_authorization(self, params):
         denied = {"allowed": False, "operation": "unclassified", "resource": "azure/unclassified"}
         try:
+            self.refresh()
             grant = params.get("grant")
             if not isinstance(grant, dict) or grant.get("materialization") != "header-inject":
                 return denied
-            granted = self.scopes(grant.get("resources"))
+            granted = self.scopes(grant.get("resources"), grant=True)
             grant_policy = policy(grant.get("authorization"))
             classified = self.classify(params)
             if not classified:
                 return denied
             operation, target = classified
             ceiling = [s for s in self.ceiling if self.covers(s, target) and permits(self.policy, operation, "azure/" + s)]
-            selected = [s for s in granted if self.covers(s, target) and permits(grant_policy, operation, "azure/" + s)]
+            selected = [s for s in granted if (self.covers(s, target) or (s == "provider-scope/"+self.tenant and target.startswith("arm:") and ceiling)) and permits(grant_policy, operation, "azure/" + s)]
             return {"allowed": bool(ceiling and selected), "operation": operation,
                     "resource": "azure/" + (sorted(selected)[0] if selected else "out-of-scope")}
         except (Failure, ValueError, TypeError):
@@ -290,6 +363,8 @@ def main():
                 return
             elif provider and method == "injection.authorization":
                 result = provider.injection_authorization(params)
+            elif provider and method == "catalog":
+                result = provider.catalog(params)
             elif provider and method == "injection.headers":
                 result = provider.injection_headers(params)
             else:

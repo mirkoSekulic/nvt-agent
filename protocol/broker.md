@@ -516,6 +516,30 @@ credential configuration, refresh state, or provider-private paths. The local
 backend consumes catalogs before starting the workload and does not mount its
 broker identity into the agent.
 
+### POST /v1/injection/catalog
+
+Trusted **egress-role only** public catalog retrieval. The request is
+`{"provider":"<granted-provider>"}`. The broker resolves the egress identity's
+paired agent itself; a caller cannot choose another subject. The paired agent
+must retain a mediated grant and the provider must implement `catalog`. The
+provider applies the same resource ceiling/grant intersection as normal catalog
+preparation. The response is only `{ok,files,expires_at}`: routes are omitted.
+This endpoint never returns material from token/files/header export methods.
+Catalog files remain explicitly non-secret under the existing catalog contract.
+
+The per-workload egress forward-proxy listener exposes `GET /_nvt/catalog` in
+origin form, with the same non-secret `Proxy-Authorization` provider selector
+used for CONNECT. Only configured inject-route capabilities are accepted; empty
+or unconfigured selectors, query parameters, request bodies, absolute-form URLs
+and other methods are refused. Egress calls the broker with its own credential,
+never the agent's. No upstream URL or arbitrary broker endpoint can be supplied.
+It returns only the public file schema, does not follow redirects or cache
+responses, and suppresses broker failure details. Catalog requests share the
+existing bounded tunnel concurrency/queue budget, have a 40-second request
+deadline, and cap broker and re-encoded responses at 1 MiB (at most 1024 files).
+This allows refreshable public metadata without distributing broker identities
+to local or enforced Kubernetes agents. Ordinary HTTP proxying remains disabled.
+
 ### POST /v1/identity
 
 Returns commit identity metadata for a broker provider after applying the same
