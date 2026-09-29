@@ -40,11 +40,8 @@ func testAzureCLIThroughMediatedEgress(t *testing.T, compact bool) {
 	_, source, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(source), "..", "..", ".."))
 	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		catalog := r.URL.Path == "/v1/catalog"
+		catalog := r.URL.Path == "/v1/injection/catalog"
 		role := "fixture-egress-role"
-		if catalog {
-			role = "fixture-agent-role"
-		}
 		if r.Header.Get("Authorization") != "Bearer "+role {
 			w.WriteHeader(403)
 			return
@@ -124,7 +121,6 @@ func testAzureCLIThroughMediatedEgress(t *testing.T, compact bool) {
 	baseEnv := []string{"PATH=" + filepath.Join(agentHome, ".local/bin") + ":" + filepath.Join(agentHome, "fixture-bin"), "HOME=" + agentHome,
 		"NVT_STATE_DIR=" + filepath.Join(agentHome, ".nvt-agent"), "NVT_WORKSPACE=" + agentHome, "NVT_EGRESS_MODE=mediated",
 		"NVT_PLUGIN_CONFIG=" + config, "NVT_PLUGIN_EGRESS_PROVIDER=azure-one",
-		"NVT_BROKER_URL=" + broker.URL, "NVT_BROKER_TOKEN=fixture-agent-role",
 		"AZURE_EXTENSION_DIR=" + os.Getenv("AZURE_EXTENSION_DIR"), "REQUESTS_CA_BUNDLE=" + cert}
 	for _, capability := range []string{"azure-one", "azure-two"} {
 		parsed, _ := url.Parse(proxy.URL)

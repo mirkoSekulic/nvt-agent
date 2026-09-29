@@ -109,8 +109,11 @@ agent or audit log.
 
 ## Public CLI account metadata
 
-For discovered providers, each `az` invocation fetches the existing authenticated
-broker `/v1/catalog` endpoint. The provider emits one validated public JSON file
+For discovered providers, each `az` invocation fetches `/_nvt/catalog` from its
+existing per-workload egress proxy using the non-secret provider selector.
+Egress authenticates to broker `/v1/injection/catalog` using its own egress-role
+identity, and the broker applies the paired agent's grant. Broker URLs/tokens are
+never added to the agent environment. The provider emits one validated public JSON file
 and no routes. Subscription metadata is filtered by provider and selected grant
 ARM scope; query-only grants do not expose ARM inventory. Failures stop the CLI
 invocation instead of falling back to its previous local metadata. An empty list
@@ -119,13 +122,15 @@ exists. A removed default selection switches to the first remaining account.
 
 `account list/show/set` and `NVT_AZURE_PROVIDER` retain separate public state per
 identity. The adapter never authenticates to discover accounts. Explicit provider
-configurations keep their existing static metadata behavior. Catalog traffic goes
-directly to the configured broker with its agent-role capability, not through an
-Azure proxy; redirects are refused and responses are bounded to 1 MiB.
+configurations keep their existing static metadata behavior. Catalog traffic
+terminates at the trusted egress service, not Azure; redirects are refused and
+responses are bounded to 1 MiB. Failures never reflect broker bodies/credentials.
 
 ## Direct broker / Helm / operator
 
-No new service, protocol, AgentRun field, CRD or agentd responsibility is needed.
+No new service, AgentRun field, CRD or agentd responsibility is needed. The small
+provider-neutral public-catalog relay extends the existing broker/egress contract;
+the Azure adapter does not need a backend-specific credential or mount.
 Use the same compact provider config in direct broker `providers[]` or Helm
 `broker.config.providers[]`, adding the existing broker-only `state-dir` separately
 for each identity. The local compiler translates inheritance into the Azure-only
@@ -152,7 +157,7 @@ choose inherited or narrowed scope.
 
 In the builtin azure-cli plugin `config.providers.<provider>`, replace static
 `subscriptions` with `catalog: true`, retaining `tenant` and `egress.provider`.
-Do **not** add catalog preparation: the adapter fetches metadata itself, and
+Do **not** add catalog preparation: the adapter fetches metadata through egress, and
 existing Kubernetes kubeconfig preparation/routes remain untouched. Traffic still
 uses explicit provider-scoped proxy selection when identities share Azure hosts.
 The [existing Helm overlay](../examples/azure/helm-values.yaml) remains valid;

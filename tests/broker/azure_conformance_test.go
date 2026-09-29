@@ -55,6 +55,16 @@ func TestAzureCompactCatalogAndDiscoveryBoundary(t *testing.T) {
 		if status, _ := f.postJSONWithToken("denied-token", "/v1/catalog", map[string]any{"provider": provider}); status != 403 {
 			t.Fatal("ungranted metadata available")
 		}
+		status, body = f.postJSONWithToken("egress-token", "/v1/injection/catalog", map[string]any{"provider": provider, "agent_id": "denied"})
+		if status != 200 || !strings.Contains(fmt.Sprint(body), subscription) || body["routes"] != nil || strings.Contains(fmt.Sprint(body), "fixture-trusted") {
+			t.Fatalf("paired public catalog failed: %d %v", status, body)
+		}
+		if status, _ := f.postJSONWithToken("agent-token", "/v1/injection/catalog", map[string]any{"provider": provider}); status != 403 {
+			t.Fatal("agent may not impersonate egress")
+		}
+	}
+	if status, _ := f.postJSONWithToken("egress-token", "/v1/injection/catalog", map[string]any{"provider": "ungranted"}); status != 403 {
+		t.Fatal("ungranted egress catalog permitted")
 	}
 	request := func(provider, subscription string) int {
 		status, _ := f.postJSONWithToken("egress-token", "/v1/injection/headers", map[string]any{"capability": provider, "host": "management.azure.com", "method": "GET", "path": "/subscriptions/" + subscription + "/resourcegroups?api-version=2024-11-01"})

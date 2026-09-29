@@ -53,10 +53,13 @@ class AdapterTests(unittest.TestCase):
         catalog = {"ok": True, "routes": [], "files": [{"path": "azure-account-metadata.json", "content": json.dumps(metadata)}]}
         class Opener:
             def open(inner, request, timeout):
-                self.assertEqual(request.full_url, "http://broker.test/v1/catalog")
-                self.assertEqual(json.loads(request.data), {"provider": "azure-one"})
+                self.assertEqual(request.full_url, "http://egress.test/_nvt/catalog")
+                self.assertIsNone(request.data)
+                self.assertIsNone(request.get_header("Authorization"))
+                self.assertEqual(request.get_header("Proxy-authorization"), "Basic YXp1cmUtb25lOng=")
                 return io.BytesIO(json.dumps(catalog).encode())
-        with patch.dict(os.environ, {"NVT_BROKER_URL": "http://broker.test", "NVT_BROKER_TOKEN": "fixture-agent-role", "NVT_BROKER_CA_FILE": ""}), patch.object(adapter, "build_opener", return_value=Opener()):
+        environment = {"NVT_EGRESS_FORWARD_PROXY_URL_AZURE_ONE": "http://azure-one:x@egress.test"}
+        with patch.dict(os.environ, environment, clear=True), patch.object(adapter, "build_opener", return_value=Opener()):
             self.assertEqual(adapter.account_metadata("azure-one", {"tenant": tenant, "catalog": True}), metadata)
             with self.assertRaises(ValueError):
                 adapter.account_metadata("azure-one", {"tenant": metadata["subscriptions"][0]["id"], "catalog": True})
@@ -66,7 +69,7 @@ class AdapterTests(unittest.TestCase):
             catalog["files"][0]["content"] = "x" * (adapter.METADATA_LIMIT+1)
             with self.assertRaises(ValueError):
                 adapter.account_metadata("azure-one", {"tenant": tenant, "catalog": True})
-        with patch.object(adapter, "build_opener", side_effect=OSError("fixture failure")), patch.dict(os.environ, {"NVT_BROKER_URL": "http://broker.test", "NVT_BROKER_TOKEN": "fixture", "NVT_BROKER_CA_FILE": ""}), self.assertRaises(OSError):
+        with patch.object(adapter, "build_opener", side_effect=OSError("fixture failure")), patch.dict(os.environ, environment, clear=True), self.assertRaises(OSError):
             adapter.account_metadata("azure-one", {"tenant": tenant, "catalog": True})
         with self.assertRaises(ValueError):
             adapter.NoRedirect().redirect_request(None)

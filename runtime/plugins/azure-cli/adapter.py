@@ -2,6 +2,7 @@
 """Untrusted Azure CLI authentication adapter: only inert credentials exist here."""
 
 import importlib.metadata
+import base64
 import datetime
 import fcntl
 import json
@@ -41,22 +42,23 @@ def account_metadata(provider, config):
         return config
     if config.get("catalog") is not True or set(config) != {"tenant", "catalog"}:
         raise ValueError("nvt-azure: invalid catalog configuration")
-    base = os.environ["NVT_BROKER_URL"].rstrip("/")
-    parsed = urlsplit(base)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path:
-        raise ValueError("nvt-azure: invalid broker URL")
-    context = ssl.create_default_context(cafile=os.environ.get("NVT_BROKER_CA_FILE") or None)
-    # The existing agent-role broker capability is not an Azure credential.
-    # Do not send it via the Azure proxy or follow a redirect to another host.
-    request = Request(base + "/v1/catalog", data=json.dumps({"provider": provider}).encode(),
-                      headers={"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["NVT_BROKER_TOKEN"]})
+    key = "NVT_EGRESS_FORWARD_PROXY_URL_" + re.sub(r"[^a-zA-Z0-9]+", "_", provider).upper()
+    parsed = urlsplit(os.environ[key])
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        raise ValueError("nvt-azure: invalid egress proxy URL")
+    context = ssl.create_default_context(cafile=os.environ.get("NVT_EGRESS_CA_FILE") or None)
+    # Public egress control endpoint: the selector is not a credential. Broker
+    # identities remain exclusively in trusted services, including local/K8s.
+    base = parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1], path="", query="", fragment="").geturl()
+    selector = base64.b64encode((provider+":x").encode()).decode()
+    request = Request(base + "/_nvt/catalog", headers={"Proxy-Authorization": "Basic " + selector})
     with build_opener(ProxyHandler({}), NoRedirect(), HTTPSHandler(context=context)).open(request, timeout=40) as response:
         raw = response.read(METADATA_LIMIT + 1)
     if len(raw) > METADATA_LIMIT:
         raise ValueError("nvt-azure: catalog too large")
     result = json.loads(raw)
     files = result.get("files")
-    if result.get("ok") is not True or result.get("routes") != [] or not isinstance(files, list) or len(files) != 1 or files[0].get("path") != "azure-account-metadata.json":
+    if result.get("ok") is not True or not isinstance(files, list) or len(files) != 1 or files[0].get("path") != "azure-account-metadata.json":
         raise ValueError("nvt-azure: invalid catalog")
     metadata = json.loads(files[0]["content"])
     validate_metadata(metadata)

@@ -30,7 +30,8 @@ if params.get("compact"):
     params["grant"] = {"materialization": "header-inject", "resources": resources, "authorization": fixture.observe(resources)}
     provider = fixture.p.AzureProvider(config, DiscoverySource())
 if params.get("catalog"):
-    print(json.dumps({"ok": True, **provider.catalog(params)}))
+    result = provider.catalog(params)
+    print(json.dumps({"ok": True, "files": result["files"], "expires_at": result["expires_at"]}))
     sys.exit(0)
 if provider.injection_authorization(params)["allowed"]:
     print(json.dumps({"ok": True, "headers": {"authorization": "Bearer fixture-trusted-" + capability},

@@ -429,6 +429,19 @@ class Broker:
         # may contain sanitized files, pinned endpoints, and public CA data,
         # but never injectable credentials.
         agent = self.authenticate_role(authorization, "agent")
+        return self._catalog(request_id, payload, agent)
+
+    def injection_catalog(self, request_id, payload, authorization):
+        # Only trusted egress may fetch refreshable public files for its paired
+        # agent. No caller-selected subject and no routing/private material.
+        identity = self.authenticate_role(authorization, "egress")
+        agent = self.agents.by_id(identity.get("paired_agent") or "")
+        if agent is None or agent.get("role", "agent") != "agent":
+            raise ProviderError("pairing-invalid", status=403)
+        result = self._catalog(request_id, payload, agent)
+        return {"ok": True, "files": result["files"], "expires_at": result["expires_at"]}
+
+    def _catalog(self, request_id, payload, agent):
         provider_name = string_field(payload, "provider")
         grant = self._injection_grant(agent, provider_name)
         provider = self.provider(provider_name)
@@ -813,6 +826,10 @@ def make_handler(broker):
                     return
                 if self.path == "/v1/injection/headers":
                     response = broker.injection_headers(request_id, payload, self.headers.get("authorization"))
+                    self.write_json(200, response)
+                    return
+                if self.path == "/v1/injection/catalog":
+                    response = broker.injection_catalog(request_id, payload, self.headers.get("authorization"))
                     self.write_json(200, response)
                     return
                 if self.path == "/v1/injection/routing":

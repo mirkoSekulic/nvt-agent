@@ -73,6 +73,10 @@ type injectProxy struct {
 }
 
 func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == publicCatalogPath {
+		p.servePublicCatalog(w, r)
+		return
+	}
 	if r.Method != http.MethodConnect {
 		p.writeDecision("", 0, "deny", "plain_http_not_supported")
 		http.Error(w, "plain HTTP proxying is not supported", http.StatusMethodNotAllowed)
