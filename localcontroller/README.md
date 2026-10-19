@@ -44,6 +44,12 @@ their named data volumes. The nested-daemon smoke covers Linux
 dockerd semantics; native Docker Desktop restart remains a platform smoke.
 Docker data reset or volume pruning is intentionally outside restart recovery.
 
+Recovery also detects live agent/proxy processes stranded in a previous network
+namespace when Docker restarts their namespace owner later. Loopback health is
+not enough: the controller checks actual process namespaces, stages durable
+recovery, and replaces only stale dependants while retaining named volumes.
+The same repair runs during `make local-up` and steady-state reconciliation.
+
 For installation, native workstation configuration, operation, and
 troubleshooting, see [Native local workstations](../docs/local-development-agent.md).
 
@@ -80,3 +86,15 @@ NVT_LOCAL_CONTROLLER_DAEMON_RESTART_SMOKE=1 \
 
 This proof uses the repository's executable synthetic provider. Real
 Codex/Claude account proofs are deliberately separate and non-hermetic.
+
+A smaller deterministic regression restarts only a disposable stack's namespace
+owner while its healthy agent/proxy remain alive. It verifies the broken browser
+upstream, namespace mismatch detection, targeted recovery, fresh confinement,
+generic resume, retained workspace, healthy-container preservation, and browser
+access from the gateway network. It does not restart the host Docker daemon or
+require a real provider account:
+
+```sh
+NVT_LOCAL_CONTROLLER_NETWORK_RECOVERY_SMOKE=1 \
+  go test -count=1 -run '^TestDockerBackendNetworkNamespaceRecoverySmoke$' ./internal/dockerbackend
+```
