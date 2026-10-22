@@ -17,7 +17,9 @@ import (
 func TestOAuth2ProducesNormalizedPrincipalWithStateAndPKCE(t *testing.T) {
 	const accessToken = "oauth2-access-token-canary"
 	const bodyCanary = "oauth2-identity-response-canary"
-	fixture := newOAuth2Fixture(t, accessToken, `{"id":424242,"login":"octocat","raw":"`+bodyCanary+`"}`)
+	const pidCanary = "oauth2-pid-value-canary"
+	const ssnCanary = "oauth2-ssn-value-canary"
+	fixture := newOAuth2Fixture(t, accessToken, `{"id":424242,"login":"octocat","raw":"`+bodyCanary+`","pid":"`+pidCanary+`","SSN":"`+ssnCanary+`"}`)
 	server := mustNewServer(t, oauth2TestConfig(fixture.URL), fakeClient(t))
 
 	loginRequest := httptest.NewRequest(http.MethodGet, "http://agents.localhost/oauth2/login?return_url=%2Fdashboard", nil)
@@ -67,17 +69,25 @@ func TestOAuth2ProducesNormalizedPrincipalWithStateAndPKCE(t *testing.T) {
 	if principal.Issuer != "https://github.enterprise.test" || principal.Subject != "424242" || principal.DisplayName != "octocat" {
 		t.Fatalf("principal=%#v", principal)
 	}
-	if principal.Claims["oauth2_subject"] != "424242" || principal.Claims["oauth2_display_name"] != "octocat" {
+	if len(principal.Claims) != 2 || principal.Claims["oauth2_subject"] != "424242" || principal.Claims["oauth2_display_name"] != "octocat" {
 		t.Fatalf("claims=%#v", principal.Claims)
 	}
 	for _, exposed := range []string{callbackResponse.Body.String(), callbackResponse.Header().Get("Location"), sessionCookie.String(), logs.String(), fmt.Sprintf("%#v", principal.Claims)} {
-		if strings.Contains(exposed, accessToken) || strings.Contains(exposed, bodyCanary) {
+		if strings.Contains(exposed, accessToken) || strings.Contains(exposed, bodyCanary) || strings.Contains(exposed, pidCanary) || strings.Contains(exposed, ssnCanary) {
 			t.Fatalf("OAuth2 credential material escaped callback: %q", exposed)
 		}
 	}
-	for _, forbidden := range []string{"424242", "oauth2-refresh-token-canary", "authorization_details", "pid", "SSN", "response-body-canary"} {
+	for _, forbidden := range []string{"424242", "oauth2-refresh-token-canary", "authorization_details", "response-body-canary"} {
 		if strings.Contains(sessionCookie.String(), forbidden) || strings.Contains(logs.String(), forbidden) {
 			t.Fatalf("session cookie or log exposed %q", forbidden)
+		}
+	}
+	// Randomized encrypted cookies can coincidentally contain three-character
+	// field names. Check those names in plaintext logs, and use the full sensitive
+	// value canaries above for cookies, responses, logs, and normalized claims.
+	for _, forbidden := range []string{"pid", "SSN"} {
+		if strings.Contains(logs.String(), forbidden) {
+			t.Fatalf("log exposed %q", forbidden)
 		}
 	}
 }
