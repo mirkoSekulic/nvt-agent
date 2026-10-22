@@ -1,0 +1,27 @@
+apiVersion: nvt.dev/v1alpha1
+kind: AgentRun
+metadata: {name: api-example, namespace: nvt}
+spec:
+  image: ghcr.io/mirkosekulic/nvt-agent:latest
+  workspace: {mode: Ephemeral}
+  agent:
+    config:
+      runtime:
+        command: bash
+        args: [-lc, "sleep infinity"]
+        proxy: {provider: api}
+  egress: mediated
+  egressEnforcement: true
+  egressTransport: forward-proxy
+  egressDomainPolicy:
+    defaultAction: deny
+    allow: [api.example.test]
+  broker:
+    grants:
+      - provider: api
+        materialization: header-inject
+        egressHosts: [api.example.test:443]
+        authorization:
+          defaultAction: deny
+          rules:
+            - {operation: http.POST, resource: http/api.example.test/graphql}

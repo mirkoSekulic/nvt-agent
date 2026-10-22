@@ -240,8 +240,11 @@ func Compile(m Manifest) (Compiled, error) {
 		}
 		sort.Strings(profile.Accounts)
 		sort.Strings(profile.CredentialProviders)
-		profile.HTTPCredentials = append([]string(nil), profile.HTTPCredentials...)
-		sort.Strings(profile.HTTPCredentials)
+		profile.HTTPCredentials = append([]HTTPCredentialAccess(nil), profile.HTTPCredentials...)
+		for i := range profile.HTTPCredentials {
+			profile.HTTPCredentials[i].Authorization = compileHTTPAuthorization(profile.HTTPCredentials[i].Authorization)
+		}
+		sort.Slice(profile.HTTPCredentials, func(i, j int) bool { return profile.HTTPCredentials[i].Provider < profile.HTTPCredentials[j].Provider })
 		sort.Strings(profile.Tools.Packages)
 		sort.Strings(profile.Tools.Mise)
 		sort.Strings(profile.Capabilities)
@@ -525,13 +528,14 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 		}
 	}
 	result := make([]BrokerGrantIntent, 0, len(groups)+1)
-	httpCredentials := append([]string(nil), m.Profiles[profileName].HTTPCredentials...)
-	sort.Strings(httpCredentials)
-	for _, provider := range httpCredentials {
+	httpCredentials := append([]HTTPCredentialAccess(nil), m.Profiles[profileName].HTTPCredentials...)
+	sort.Slice(httpCredentials, func(i, j int) bool { return httpCredentials[i].Provider < httpCredentials[j].Provider })
+	for _, access := range httpCredentials {
+		provider := access.Provider
 		mediation := m.BrokerProviders[provider].Mediation
 		mediation.Hosts = append([]string(nil), mediation.Hosts...)
 		sort.Strings(mediation.Hosts)
-		result = append(result, BrokerGrantIntent{Provider: provider, Purpose: "http-injection", Mediation: &mediation})
+		result = append(result, BrokerGrantIntent{Provider: provider, Purpose: "http-injection", Mediation: &mediation, Authorization: compileHTTPAuthorization(access.Authorization)})
 	}
 	azureAccess := append([]AzureAccess(nil), m.Profiles[profileName].Azure...)
 	sort.Slice(azureAccess, func(i, j int) bool { return azureAccess[i].Provider < azureAccess[j].Provider })

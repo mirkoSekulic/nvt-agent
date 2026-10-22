@@ -2,6 +2,13 @@
 
 Status: active for the local Docker backend.
 
+`profiles.<name>.httpCredentials` accepts legacy provider-name strings or
+`{provider: api, authorization: {defaultAction: deny, rules: [...]}}` entries.
+Token provider ceilings are authored under `brokerProviders.<name>.allow.authorization`.
+Both explicit policies are required for HTTP-policy mode and are projected to the
+existing broker/native grant authorization fields. See [HTTP endpoint authorization](../docs/http-authorization.md)
+for the provider-owned method/path vocabulary, bounds, examples, and body-scope limits.
+
 `nvt.dev/local/v1` is the single human-authored, non-secret local-platform
 manifest. The implementation lives in `localplatform/manifest`, with private
 input and trusted-volume preparation in `localplatform/state`. It accepts one

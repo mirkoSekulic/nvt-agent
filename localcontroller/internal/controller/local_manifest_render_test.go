@@ -157,7 +157,10 @@ func TestHTTPBindingRolloutFromLocalManifestPreservesOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, selected := range [][]string{{"forge-api"}, {"forge-api", "forge-git"}, nil} {
-		profile.HTTPCredentials = selected
+		profile.HTTPCredentials = nil
+		for _, provider := range selected {
+			profile.HTTPCredentials = append(profile.HTTPCredentials, localmanifest.HTTPCredentialAccess{Provider: provider})
+		}
 		m.Profiles["api-only"] = profile
 		stage() // no replacement or destructive acknowledgement flags
 		if err := reconciler.Reconcile(context.Background()); err != nil {

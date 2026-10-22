@@ -1,0 +1,13 @@
+providers:
+  - name: api
+    plugin: token
+    config:
+      token-file: /private/api-token
+      injection-hosts: [api.example.test]
+      injection-git: false
+    allow:
+      authorization:
+        defaultAction: deny
+        rules:
+          - {operation: http.POST, resource: http/api.example.test/graphql}
+          - {operation: http.POST, resource: http/api.example.test/designer/api/*/*/deployments/undeploy}

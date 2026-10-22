@@ -495,7 +495,11 @@ class Broker:
             raise ProviderError("pairing-invalid", "egress identity has no valid paired agent", 403)
         capability = string_field(payload, "capability")
         host = string_field(payload, "host")
-        method = string_field(payload, "method").upper()
+        method = string_field(payload, "method")
+        # HTTP method tokens are case-sensitive. Never authorize one spelling
+        # while trusted egress forwards a different method to the upstream.
+        if method != method.upper():
+            raise ProviderError("method-not-allowed", status=403)
         request_uri = string_field(payload, "path")
         path = request_uri.split("?", 1)[0]
         upgrade = payload.get("upgrade", False)

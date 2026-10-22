@@ -355,7 +355,9 @@ func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]
 	}{}
 	for _, grant := range intent.BrokerGrants {
 		if grant.Purpose == "http-injection" {
-			profile.Broker.Grants = append(profile.Broker.Grants, repositoryGrant(grant.Provider, "", grant.Mediation, nil, nil))
+			resolved := repositoryGrant(grant.Provider, "", grant.Mediation, nil, nil)
+			resolved.Authorization = resolvedGrantAuthorization(grant.Authorization)
+			profile.Broker.Grants = append(profile.Broker.Grants, resolved)
 			continue
 		}
 		if grant.Purpose == "azure-injection" {
@@ -676,6 +678,9 @@ func Broker(compiled manifest.Compiled) ([]byte, error) {
 			config[configKey] = plancontract.PrivateTarget(secretName)
 		}
 		allow := map[string]any{"repositories": brokerRepositoriesFor(compiled, named.Name, "")}
+		if provider.Plugin == "token" && provider.Allow != nil {
+			allow["authorization"] = provider.Allow["authorization"]
+		}
 		if provider.Plugin == "azure" {
 			config["state-dir"] = "/var/lib/nvt/broker/providers/" + named.Name
 			allow = provider.Allow
