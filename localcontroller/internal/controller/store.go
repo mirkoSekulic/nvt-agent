@@ -19,7 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 type StoreOptions struct {
 	MaxActiveRuns int
@@ -198,6 +198,14 @@ UPDATE local_runs SET ownership_digest=snapshot_digest;
 PRAGMA user_version = 6;`); err != nil {
 			return ErrStoreUnavailable
 		}
+		version = 6
+	}
+	if version == 6 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE local_runs ADD COLUMN restart_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE local_runs ADD COLUMN restart_phase TEXT NOT NULL DEFAULT '';
+PRAGMA user_version = 7;`); err != nil {
+			return ErrStoreUnavailable
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return ErrStoreUnavailable
@@ -245,7 +253,7 @@ func (store *Store) validate(ctx context.Context) error {
 const selectRuns = `SELECT run_id, idempotency_key, active_group, request_digest, snapshot, snapshot_digest,
 state, revision, created_at, updated_at, deadline_at, terminal_expires_at,
 reconcile_owner, reconcile_until, delete_requested, deleted_at, last_reason, terminal_target, lifecycle_cursor,
-ownership_digest, pending_snapshot, pending_snapshot_digest FROM local_runs`
+ownership_digest, pending_snapshot, pending_snapshot_digest, restart_id, restart_phase FROM local_runs`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -261,6 +269,7 @@ func scanStoredRun(row scanner) (storedRun, error) {
 		&state, &record.view.Revision, &createdAt, &updatedAt, &deadlineAt, &terminalExpiresAt,
 		&reconcileOwner, &reconcileUntil, &deleteRequested, &deletedAt, &record.view.LastReason, &record.view.TerminalTarget, &record.lifecycleCursor,
 		&record.ownershipDigest, &record.pendingSnapshot, &record.pendingDigest,
+		&record.view.RestartID, &record.view.RestartPhase,
 	)
 	if err != nil {
 		return storedRun{}, err
@@ -294,6 +303,9 @@ func scanStoredRun(row scanner) (storedRun, error) {
 }
 
 func validateStoredRun(record *storedRun) error {
+	if !validRestartState(record.view) {
+		return ErrStoreUnavailable
+	}
 	if !validRunID(record.view.RunID) || !record.view.State.valid() || record.view.Revision < 1 ||
 		!validIdempotencyKey(record.idempotencyKey) || record.activeGroup != "" && !validIdempotencyKey(record.activeGroup) ||
 		!validReason(record.view.LastReason) || !validLifecycleCursor(record.lifecycleCursor) ||
@@ -510,6 +522,9 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 		if existing.view.RunID != candidate.resolved.RunID {
 			return nil, ErrConflict
 		}
+		if restartActive(existing.view) && existing.requestDigest != candidate.digest {
+			return nil, ErrRestartConflict
+		}
 		if (existing.requestDigest != candidate.digest || len(existing.pendingSnapshot) != 0) && existing.view.ReconcileUntil != nil && existing.view.ReconcileUntil.After(now) {
 			return nil, ErrConflict
 		}
@@ -564,6 +579,10 @@ func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, recla
 				return nil, ErrStoreUnavailable
 			}
 			if _, desired := desiredKeys[record.idempotencyKey]; !desired && administratorWorkstation(record) && !record.view.DeleteRequested {
+				if restartActive(record.view) {
+					_ = rows.Close()
+					return nil, ErrRestartConflict
+				}
 				pruneIDs = append(pruneIDs, record.view.RunID)
 			}
 		}
@@ -923,6 +942,9 @@ func (store *Store) UpdateStatus(ctx context.Context, input StatusInput) (Run, e
 		record.view.ReconcileUntil == nil || !record.view.ReconcileUntil.After(now) {
 		return Run{}, ErrOwnershipConflict
 	}
+	if record.view.RestartPhase == "quiescing" {
+		return Run{}, ErrInvalidTransition
+	}
 	if input.State == record.view.State {
 		if input.LifecycleCursor == nil || *input.LifecycleCursor == record.lifecycleCursor {
 			return record.view, nil
@@ -1020,10 +1042,11 @@ reconcile_owner=NULL,reconcile_until=NULL WHERE run_id=? AND revision=?`,
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE local_runs SET state=?,revision=?,updated_at=?,terminal_expires_at=?,
 	reconcile_owner=NULL,reconcile_until=NULL,deleted_at=?,last_reason=?,terminal_target=?,lifecycle_cursor=?,
+	restart_phase=CASE WHEN restart_phase='preparing' THEN CASE WHEN ?='running' THEN 'complete' ELSE 'failed' END ELSE restart_phase END,
 	pending_snapshot=CASE WHEN ?='stopping' THEN NULL ELSE pending_snapshot END,
 	pending_snapshot_digest=CASE WHEN ?='stopping' THEN '' ELSE pending_snapshot_digest END WHERE run_id=? AND revision=?`,
 		string(input.State), newRevision, formatTimestamp(now), formatOptionalTimestamp(terminalExpiry),
-		formatOptionalTimestamp(deletedAt), input.Reason, string(target), cursor, string(input.State), string(input.State), input.RunID, input.ExpectedRevision)
+		formatOptionalTimestamp(deletedAt), input.Reason, string(target), cursor, string(input.State), string(input.State), string(input.State), input.RunID, input.ExpectedRevision)
 	if err != nil || rowsAffected(result) != 1 {
 		return Run{}, ErrOwnershipConflict
 	}
@@ -1038,6 +1061,12 @@ reconcile_owner=NULL,reconcile_until=NULL WHERE run_id=? AND revision=?`,
 	record.view.ReconcileUntil = nil
 	record.view.LastReason = input.Reason
 	record.view.TerminalTarget = target
+	if record.view.RestartPhase == "preparing" {
+		record.view.RestartPhase = "failed"
+		if input.State == StateRunning {
+			record.view.RestartPhase = "complete"
+		}
+	}
 	if deletedAt != nil {
 		return Run{}, ErrGone
 	}
@@ -1094,6 +1123,9 @@ func (store *Store) requestStop(ctx context.Context, runID string, deleteRequest
 	record, err := loadForUpdate(ctx, tx, runID)
 	if err != nil {
 		return Run{}, err
+	}
+	if restartActive(record.view) {
+		return Run{}, ErrRestartConflict
 	}
 	if record.view.State.terminal() {
 		if !deleteRequested {

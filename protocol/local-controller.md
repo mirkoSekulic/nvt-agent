@@ -3,7 +3,8 @@
 `nvt-local-controller` owns durable lifecycle metadata and reconciliation for
 local resolved agent runs. Its controller loop uses a deliberately small local
 backend contract: idempotent `Ensure`, `Inspect`, and `Delete`, plus dependency
-readiness. The implementation reconciles Docker resources; future sandbox
+readiness. An optional `QuiesceForRestart` capability supports scoped persistent
+workstation restarts without storage deletion. The implementation reconciles Docker resources; future sandbox
 backends can implement the same contract without changing the run API
 or `agentd`.
 
@@ -33,7 +34,7 @@ Three credentials are deliberately non-interchangeable. A producer token is
 bound to one configured schedule and authorizes only that schedule's
 admission/status/cancel endpoints. The gateway route token authorizes only
 bounded `GET /v1/routes` metadata. A separately mounted administrator token
-authorizes only `/v1/runs` create/list/get/cancel/delete/claim/status. Missing,
+authorizes only `/v1/runs` create/list/get/cancel/delete/claim/status/restart. Missing,
 wrong, duplicated, or cross-audience bearer values are rejected before request
 body decoding or state access. Startup rejects reuse of a token across any two
 audiences. Omitting the administrator token disables the raw management API;
@@ -52,12 +53,58 @@ agent-reachable private proxy entrypoint participates in authorization.
 Requests and responses use `application/json`. JSON decoding rejects duplicate
 or unknown fields, trailing data, malformed content types, and bodies larger
 than 1,088 KiB. All timestamps are UTC RFC 3339 values. Error responses contain
-only a stable reason and `request denied`; raw database, configuration, and
+only a stable reason and a fixed safe message (`request denied`, or an actionable
+restart conflict/target explanation); raw database, configuration, and
 resolved-run diagnostics are never returned.
 
 ## Run API
 
 The version for request envelopes and responses is `nvt.local-runs/v1`.
+
+### Scoped workstation restart
+
+`POST /v1/runs/{workstation-name}/restart` requires the administrator audience:
+
+```json
+{"api_version":"nvt.local-runs/v1","request_id":"0123456789abcdef0123456789abcdef"}
+```
+
+`request_id` is a caller-generated 16-byte random value encoded as 32 lowercase
+hex characters. No configuration, snapshot, owner override, or destructive flag
+is accepted. The controller verifies the saved administrator-workstation
+identity, full persistent retention, zero TTL, non-deleted status, capacity,
+absence of staged configuration, and reconciliation ownership. Only running,
+failed, and completed records can start an operation. Unknown/deleted targets
+return 404/410, non-workstation targets return 409
+`not-administrator-workstation`, and busy/rollout conflicts return 409
+`restart-conflict`; audience failures return 401 before state access.
+
+The 202 response is the normal `Run` with optional `restart_id` and
+`restart_phase` fields. Poll the existing administrator `GET /v1/runs/{name}`.
+Phases are `quiescing`, `preparing`, `complete`, and `failed`. Success requires
+the same operation ID, `complete`, and `state: running`; a changed ID indicates
+supersession, not success for the old operation. Concurrent requests join the
+active operation and return its ID. Replaying the most recent ID does not
+restart again, including after completion. Only the most recent ID/result is
+retained; this is not an unlimited historical idempotency-key ledger.
+
+Quiescing is durable before backend mutation and uses normal reconciliation
+claims/revision fencing. It retains all storage and trust objects, stops only
+exact-owned runtime containers, and obtains an end-of-log lifecycle cursor
+after all writers have stopped. The controller commits that cursor and the
+preparing phase atomically before `Ensure` can start the replacement. A crash
+before commit safely repeats quiescing; a crash afterwards resumes preparation
+without discarding new lifecycle events. Old lease/status revisions cannot
+commit observations into the restarted generation. Rollout, cancel, and delete
+requests conflict while restart is active rather than discarding its intent.
+Backend ownership/data conflicts fail closed without pruning retained storage.
+An unsupported backend fails the operation; it does not fall back to deletion.
+
+The saved snapshot and stable ownership digest never change during restart.
+No current authored YAML or staged desired configuration is compiled/applied.
+This is a local controller capability, not a new Kubernetes/operator or agentd
+restart protocol. The public CLI's bounded wait and trusted connection are
+documented in [local development](../docs/local-development-agent.md#restart-one-workstation-without-applying-configuration).
 
 The administrator-authenticated raw run API consumes only a complete,
 already-authorized value. It is disabled when

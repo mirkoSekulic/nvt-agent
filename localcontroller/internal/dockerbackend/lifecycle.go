@@ -44,9 +44,10 @@ try:
     request = json.loads(raw)
 except Exception:
     stop("input")
-if not isinstance(request, dict) or set(request) != {"cursor"} or not isinstance(request["cursor"], str):
+if not isinstance(request, dict) or set(request) not in ({"cursor"}, {"cursor", "tail"}) or not isinstance(request["cursor"], str) or not isinstance(request.get("tail", False), bool):
     stop("input")
 cursor = request["cursor"]
+tail = request.get("tail", False)
 state_dir = os.environ.get("NVT_STATE_DIR", "")
 if not state_dir or not os.path.isabs(state_dir):
     stop("state-dir")
@@ -54,7 +55,7 @@ path = os.path.join(state_dir, "agentd", "events.jsonl")
 try:
     metadata = os.stat(path, follow_symlinks=False)
 except FileNotFoundError:
-    if cursor:
+    if cursor and not tail:
         stop("event-missing")
     print(json.dumps({"version": 1, "cursor": "", "events": []}, separators=(",", ":")))
     raise SystemExit(0)
@@ -62,6 +63,21 @@ except OSError:
     stop("event-stat")
 if not stat.S_ISREG(metadata.st_mode):
     stop("event-type")
+
+# Only the trusted restart quiesce operation requests this, after all writers
+# have stopped. Never replay a retained terminal event into the new runtime.
+if tail:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                stop("event-type")
+            cursor = "v1:%d:%d:%d" % (opened.st_dev, opened.st_ino, opened.st_size)
+    except OSError:
+        stop("event-read")
+    print(json.dumps({"version": 1, "cursor": cursor, "events": []}, separators=(",", ":")))
+    raise SystemExit(0)
 
 offset = 0
 if cursor:
@@ -126,6 +142,10 @@ func (backend *Backend) observeLifecycle(ctx context.Context, containerID string
 // mutable stopped agent. The helper has no network, capabilities, writable
 // root, Docker socket, broker identity, or credential-bearing environment.
 func (backend *Backend) observeStoppedLifecycle(ctx context.Context, desired controller.BackendRun, names resourceNames, labels ownedLabels) (string, controller.State, error) {
+	return backend.stoppedLifecycle(ctx, desired, names, labels, false)
+}
+
+func (backend *Backend) stoppedLifecycle(ctx context.Context, desired controller.BackendRun, names resourceNames, labels ownedLabels, tail bool) (string, controller.State, error) {
 	if len(desired.Resolved.Lifecycle.CompleteOn) == 0 && len(desired.Resolved.Lifecycle.FailOn) == 0 {
 		return desired.LifecycleCursor, "", nil
 	}
@@ -139,14 +159,18 @@ func (backend *Backend) observeStoppedLifecycle(ctx context.Context, desired con
 	}
 	arguments = append(arguments, labelArguments(labels)...)
 	arguments = append(arguments, "--entrypoint", "python3", backend.config.SeedImage, "-c", lifecycleEventReader)
-	return backend.readLifecycle(ctx, desired, arguments...)
+	return backend.readLifecycleMode(ctx, desired, tail, arguments...)
 }
 
 func (backend *Backend) readLifecycle(ctx context.Context, desired controller.BackendRun, arguments ...string) (string, controller.State, error) {
+	return backend.readLifecycleMode(ctx, desired, false, arguments...)
+}
+
+func (backend *Backend) readLifecycleMode(ctx context.Context, desired controller.BackendRun, tail bool, arguments ...string) (string, controller.State, error) {
 	if len(desired.Resolved.Lifecycle.CompleteOn) == 0 && len(desired.Resolved.Lifecycle.FailOn) == 0 {
 		return desired.LifecycleCursor, "", nil
 	}
-	request, _ := json.Marshal(map[string]string{"cursor": desired.LifecycleCursor})
+	request, _ := json.Marshal(map[string]any{"cursor": desired.LifecycleCursor, "tail": tail})
 	output, err := backend.docker.Run(ctx, bytes.NewReader(request), arguments...)
 	clear(request)
 	if err != nil {
@@ -165,6 +189,12 @@ func (backend *Backend) readLifecycle(ctx context.Context, desired controller.Ba
 	var trailing any
 	if !errors.Is(decoder.Decode(&trailing), io.EOF) {
 		return "", "", controller.ErrBackendRetryable
+	}
+	if tail {
+		if len(response.Events) != 0 {
+			return "", "", controller.ErrBackendRetryable
+		}
+		return response.Cursor, "", nil
 	}
 	complete := make(map[string]bool, len(desired.Resolved.Lifecycle.CompleteOn))
 	fail := make(map[string]bool, len(desired.Resolved.Lifecycle.FailOn))
