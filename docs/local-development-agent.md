@@ -101,12 +101,68 @@ server. The new route works only when the application is listening.
 - `make local-up` reconciles state and starts the control plane, portal,
   persistent workstations, and configured producers.
 - `make local-status` reports control-plane, producer, and workstation state.
+- `nvt-local restart <workstation-name> [--timeout 2m]` restarts only that
+  existing administrator-owned persistent workstation from its **applied**
+  configuration. See the scoped restart details below.
 - `make local-down` stops exact-owned containers while preserving volumes,
   credentials, databases, workspaces, and sessions.
 - `make local-reset` explicitly removes only resources carrying the complete
   expected local-platform or local-controller ownership labels. It destroys
   credentials and workstation state, including anonymous Docker volumes
   attached to those verified containers.
+
+### Restart one workstation without applying configuration
+
+```sh
+nvt-local restart personal
+nvt-local restart personal --timeout 5m
+# From a source checkout, without installing the CLI:
+cd localplatform
+go run ./cmd/nvt-local restart personal --timeout 5m
+```
+
+`NVT_LOCAL_PROJECT` selects the existing platform (default `nvt-local`). This
+command neither reads `nvt.local.yaml` nor runs `init`, `up`, Compose, or a
+controller restart. Unlike `up`, it cannot apply unrelated manifest edits.
+It uses Docker only to locate the exact-owned running controller and invoke
+its small administrator HTTP client. The mounted administrator bearer stays
+inside that trusted container; no token is exported to the CLI or workstation.
+Both CLI and controller image must support this command. Upgrading a running
+installation is a separate administrator operation, not part of restart.
+
+Running workstations and failed/completed workstations whose containers were
+cleaned up can be restarted. Unknown, deleted/pruned, ephemeral, non-owned,
+or missing-durable-data targets are refused; restart never creates a new
+workstation or substitutes empty volumes. Preparation, ordinary stopping,
+pending configuration rollouts, and active reconciliation leases can produce
+a conflict: wait for that operation to finish, then retry. Restart does not
+discard a pending change, bypass immutable-drift checks, or approve replacement.
+
+The controller durably records intent, gracefully stops the selected runtime
+containers, retains workspace/repository files (including uncommitted and
+untracked work), runtime home/session, Docker data, and existing trust/config
+volumes, then recreates that runtime from its saved snapshot. Broker identity
+and ownership revision remain unchanged. Previously cleaned-up ephemeral
+configuration/trust objects are prepared normally; restart does not restore
+material already removed by earlier cleanup. Existing CA material is validated
+normally, not silently rotated to bypass an error. The runtime uses its existing
+session-resume contract; restarting does not guarantee application-level
+recovery of an unmanaged development server. Other workstations, producers,
+and control-plane services are not restarted or reconfigured.
+
+After quiescing all old writers, the controller records the end of the retained
+lifecycle event log before starting the replacement. Old terminal events are
+not replayed; new failures/completions still count. This does not delete logs.
+Controller crashes resume the recorded operation idempotently. Concurrent
+restart requests join the active operation. A retry of the most recent request
+ID is idempotent even after it completes; a new CLI invocation after completion
+is a new restart request.
+
+The command waits for controller/backend readiness (default 2 minutes,
+`--timeout` from 1 second to 15 minutes) and exits nonzero on failure, conflict,
+supersession, or timeout. A timeout does **not** cancel accepted durable intent;
+check status before requesting another restart. No live restart is needed to
+validate the implementation: the test suites use isolated fixtures.
 
 Removing a workstation from the manifest is non-destructive and immutable
 drift fails closed by default. Administrators can opt into Flux-style

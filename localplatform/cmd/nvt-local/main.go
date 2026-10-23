@@ -37,8 +37,8 @@ type app struct {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		fail("usage: nvt-local <init|up|status|down|reset>")
+	if len(os.Args) < 2 || os.Args[1] != "restart" && len(os.Args) != 2 {
+		fail("usage: nvt-local <init|up|status|down|reset> | restart <workstation-name> [--timeout 2m]")
 	}
 	project := environment("NVT_LOCAL_PROJECT", defaultProject)
 	if !projectPattern.MatchString(project) {
@@ -52,6 +52,17 @@ func main() {
 	defer cancel()
 	var err error
 	switch os.Args[1] {
+	case "restart":
+		var name string
+		var timeout time.Duration
+		name, timeout, err = parseRestartArgs(os.Args[2:])
+		if err == nil {
+			fmt.Printf("requesting restart of %s from its applied configuration; waiting up to %s\n", name, timeout)
+			err = application.restart(ctx, name, timeout)
+			if err == nil {
+				fmt.Printf("workstation %s restarted and ready; persistent state preserved\n", name)
+			}
+		}
 	case "init":
 		_, err = application.prepare(ctx)
 		if err == nil {

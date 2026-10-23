@@ -71,6 +71,13 @@ type LocalBackend interface {
 	Delete(context.Context, BackendRun) error
 }
 
+// WorkstationRestarter quiesces an exact-owned persistent runtime, retains all
+// storage and trust material, and returns a fresh lifecycle boundary. It must
+// be idempotent and must never start the replacement runtime itself.
+type WorkstationRestarter interface {
+	QuiesceForRestart(context.Context, BackendRun) (BackendObservation, error)
+}
+
 type Reconciler struct {
 	store   *Store
 	backend LocalBackend
@@ -214,6 +221,21 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 	if err != nil {
 		return err
 	}
+	if run.RestartPhase == "quiescing" {
+		claimed, err := reconciler.claim(ctx, run)
+		if err != nil {
+			return err
+		}
+		restarter, ok := reconciler.backend.(WorkstationRestarter)
+		if !ok {
+			return reconciler.store.finishRestartQuiesce(ctx, claimed, reconciler.owner, backendRun.LifecycleCursor, true)
+		}
+		observation, err := restarter.QuiesceForRestart(ctx, backendRun)
+		if err != nil && !errors.Is(err, ErrBackendDesiredRunInvalid) {
+			return err
+		}
+		return reconciler.store.finishRestartQuiesce(ctx, claimed, reconciler.owner, observation.LifecycleCursor, err != nil)
+	}
 	switch run.State {
 	case StatePending:
 		claimed, err := reconciler.claim(ctx, run)
@@ -233,6 +255,9 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 		observation, ensureErr := reconciler.backend.Ensure(ctx, backendRun)
 		if ensureErr != nil && !errors.Is(ensureErr, ErrBackendDesiredRunInvalid) {
 			return ensureErr
+		}
+		if ensureErr != nil && run.RestartPhase == "preparing" {
+			return reconciler.store.failRestartPreparation(ctx, claimed, reconciler.owner)
 		}
 		if ensureErr == nil && observation.TerminalTarget != "" {
 			if observation.TerminalTarget != StateCompleted && observation.TerminalTarget != StateFailed {

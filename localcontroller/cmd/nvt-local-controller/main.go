@@ -15,6 +15,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		os.Exit(restartClient(os.Args[1:]))
+	}
 	logger := log.New(os.Stdout, "nvt-local-controller: ", log.LstdFlags|log.LUTC)
 	config, err := controller.ConfigFromEnvironment()
 	if err != nil {

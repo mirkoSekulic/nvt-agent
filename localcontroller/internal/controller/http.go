@@ -171,6 +171,23 @@ func (server *HTTPServer) route(response http.ResponseWriter, request *http.Requ
 		}
 	}
 	switch parts[1] {
+	case "restart":
+		if request.Method != http.MethodPost {
+			return server.writeMethod(response, runID)
+		}
+		var input struct {
+			APIVersion string `json:"api_version"`
+			RequestID  string `json:"request_id"`
+		}
+		if decodeRequest(request, &input) != nil || input.APIVersion != APIVersion {
+			return server.writeError(response, ErrInvalidRequest, runID)
+		}
+		run, err := server.store.RestartWorkstation(request.Context(), runID, input.RequestID)
+		if err != nil {
+			return server.writeError(response, err, runID)
+		}
+		server.writeJSON(response, http.StatusAccepted, run)
+		return http.StatusAccepted, "restart-requested", runID
 	case "cancel":
 		if request.Method != http.MethodPost {
 			return server.writeMethod(response, runID)
@@ -439,6 +456,10 @@ func (server *HTTPServer) writeMethod(response http.ResponseWriter, runID string
 func (server *HTTPServer) writeError(response http.ResponseWriter, err error, runID string) (int, string, string) {
 	status, reason := http.StatusInternalServerError, "internal-error"
 	switch {
+	case errors.Is(err, ErrRestartConflict):
+		status, reason = http.StatusConflict, "restart-conflict"
+	case errors.Is(err, ErrNotWorkstation):
+		status, reason = http.StatusConflict, "not-administrator-workstation"
 	case errors.Is(err, ErrInvalidRequest):
 		status, reason = http.StatusBadRequest, "invalid-request"
 	case errors.Is(err, ErrNotFound):
@@ -452,7 +473,13 @@ func (server *HTTPServer) writeError(response http.ResponseWriter, err error, ru
 	case errors.Is(err, ErrStoreUnavailable):
 		status, reason = http.StatusServiceUnavailable, "unavailable"
 	}
-	server.writeJSON(response, status, errorEnvelope{Error: apiError{Reason: reason, Message: "request denied"}})
+	message := "request denied"
+	if errors.Is(err, ErrRestartConflict) {
+		message = ErrRestartConflict.Error()
+	} else if errors.Is(err, ErrNotWorkstation) {
+		message = ErrNotWorkstation.Error()
+	}
+	server.writeJSON(response, status, errorEnvelope{Error: apiError{Reason: reason, Message: message}})
 	return status, reason, runID
 }
 
@@ -478,6 +505,8 @@ func routeClass(path string) string {
 		return "schedule"
 	case strings.HasSuffix(path, "/cancel"):
 		return "run-cancel"
+	case strings.HasSuffix(path, "/restart"):
+		return "run-restart"
 	case strings.HasSuffix(path, "/claim"):
 		return "run-claim"
 	case strings.HasSuffix(path, "/status"):

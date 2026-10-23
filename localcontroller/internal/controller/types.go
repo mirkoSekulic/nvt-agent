@@ -39,6 +39,8 @@ var (
 	ErrOwnershipConflict    = errors.New("local-run reconciliation ownership conflict")
 	ErrStoreUnavailable     = errors.New("local-run store unavailable")
 	ErrDestructiveReconcile = errors.New("destructive workstation reconciliation requires acknowledgement")
+	ErrRestartConflict      = errors.New("workstation restart conflicts with active reconciliation; wait for it to finish")
+	ErrNotWorkstation       = errors.New("target is not an administrator-owned persistent workstation")
 )
 
 func (state State) valid() bool {
@@ -99,6 +101,8 @@ type StatusInput struct {
 }
 
 type Run struct {
+	RestartID         string     `json:"restart_id,omitempty"`
+	RestartPhase      string     `json:"restart_phase,omitempty"`
 	APIVersion        string     `json:"api_version"`
 	RunID             string     `json:"run_id"`
 	State             State      `json:"state"`

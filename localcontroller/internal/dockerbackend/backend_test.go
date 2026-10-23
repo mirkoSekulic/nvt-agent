@@ -87,6 +87,7 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		}
 		var request struct {
 			Cursor string `json:"cursor"`
+			Tail   bool   `json:"tail"`
 		}
 		if json.Unmarshal(rawInput, &request) != nil {
 			return nil, errors.New("invalid lifecycle request")
@@ -94,6 +95,10 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		cursor := docker.lifecycleCursor
 		if cursor == "" {
 			cursor = request.Cursor
+		}
+		if request.Tail {
+			response, _ := json.Marshal(lifecycleReaderResponse{Version: 1, Cursor: cursor, Events: []string{}})
+			return response, nil
 		}
 		response, _ := json.Marshal(lifecycleReaderResponse{Version: 1, Cursor: cursor, Events: append([]string{}, docker.lifecycleEvents...)})
 		return append(response, '\n'), nil
@@ -120,8 +125,21 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 	if arguments[0] == "start" {
 		return nil, nil
 	}
-	if arguments[0] == "rm" && len(arguments) >= 3 {
-		delete(docker.containers, arguments[len(arguments)-1])
+	if arguments[0] == "rm" && len(arguments) >= 2 {
+		for _, id := range arguments[1:] {
+			if !strings.HasPrefix(id, "-") {
+				delete(docker.containers, id)
+			}
+		}
+		return nil, nil
+	}
+	if arguments[0] == "stop" && len(arguments) >= 4 && arguments[1] == "--time" {
+		for _, id := range arguments[3:] {
+			if _, exists := docker.containers[id]; !exists {
+				return nil, errors.New("missing")
+			}
+		}
+		docker.agentStatus = "stopped"
 		return nil, nil
 	}
 	if arguments[0] == "stop" && len(arguments) == 2 {
