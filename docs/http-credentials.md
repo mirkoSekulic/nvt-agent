@@ -1,5 +1,9 @@
 # Broker-backed HTTP credentials
 
+For optional broker-enforced method/path allowlists using the same providers and
+grants, see [HTTP endpoint authorization](http-authorization.md). The names-only
+form described here retains its existing host-wide behavior.
+
 `profiles.<name>.httpCredentials` explicitly grants **host-scoped credential
 use**, independently of Git checkout intent. It selects existing
 `brokerProviders` with `mediation.materialization: header-inject` and

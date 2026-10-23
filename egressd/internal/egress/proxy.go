@@ -3,6 +3,7 @@ package egress
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -154,7 +155,12 @@ func (p *Proxy) entryValidLocked(entry *cacheEntry) bool {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	material, err := p.material(r.Context(), r.Method, r.URL.RequestURI(), isUpgradeRequest(r))
 	if err != nil {
-		// err carries broker reasons only, never header values.
+		if errors.Is(err, ErrInjectionDenied) {
+			p.report(r.Method, r.URL.Path, http.StatusForbidden)
+			writeError(w, http.StatusForbidden, "egress-injection-forbidden")
+			return
+		}
+		// Never reflect broker response diagnostics to the workload.
 		log.Printf("egressd %s: injection material unavailable: %v", p.Route.Capability, err)
 		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
 		writeError(w, http.StatusBadGateway, "egress-injection-unavailable")

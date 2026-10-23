@@ -47,7 +47,7 @@ func TestHTTPCredentialsCompileWithoutCheckout(t *testing.T) {
 		}
 	}
 	p := m.Profiles["git-and-api"]
-	p.HTTPCredentials = []string{"forge-api", "forge-git"}
+	p.HTTPCredentials = []HTTPCredentialAccess{{Provider: "forge-api"}, {Provider: "forge-git"}}
 	m.Profiles["git-and-api"] = p
 	c2, err := Compile(m)
 	if err != nil {
@@ -67,12 +67,12 @@ func TestHTTPInvalidAndContradictoryBindings(t *testing.T) {
 	for name, mutate := range map[string]func(*Manifest){
 		"unknown": func(m *Manifest) {
 			p := m.Profiles["api-only"]
-			p.HTTPCredentials = []string{"missing"}
+			p.HTTPCredentials = []HTTPCredentialAccess{{Provider: "missing"}}
 			m.Profiles["api-only"] = p
 		},
 		"duplicate": func(m *Manifest) {
 			p := m.Profiles["api-only"]
-			p.HTTPCredentials = append(p.HTTPCredentials, "forge-api")
+			p.HTTPCredentials = append(p.HTTPCredentials, HTTPCredentialAccess{Provider: "forge-api"})
 			m.Profiles["api-only"] = p
 		},
 		"repository-scope": func(m *Manifest) {
@@ -134,7 +134,7 @@ func TestHTTPAndRepositoryScopedGitShareSecretWithoutBroadeningGit(t *testing.T)
 	git.Config["target-mode"] = "literal"
 	m.BrokerProviders["forge-git"] = git
 	p := m.Profiles["git-and-api"]
-	p.HTTPCredentials = []string{"forge-api"}
+	p.HTTPCredentials = []HTTPCredentialAccess{{Provider: "forge-api"}}
 	p.CredentialProviders = []string{"forge-git"}
 	m.Profiles["git-and-api"] = p
 	m.Repositories = map[string]Repository{"project": {URL: "https://forge.example.test/team/project.git", CheckoutTarget: "forge.example.test/team/project", BrokerRepository: "forge.example.test/team/project", CredentialProvider: "forge-git"}}

@@ -7,6 +7,7 @@ from urllib.parse import unquote
 from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
 from broker.core.errors import ProviderError
 from broker.plugins.static_target import normalize_target, target_mode
+from broker.plugins.static_token.http_policy import policy, allows, path_valid, host_valid, METHODS
 
 
 # The zero-entropy placeholder from protocol/injection.md. No injected header
@@ -27,8 +28,13 @@ class StaticTokenProvider:
         self.allow = entry.get("allow") or {}
         if not isinstance(self.allow, dict):
             fail(f"provider {self.name} allow must be a YAML object")
+        if set(self.allow) - {"repositories", "authorization"}:
+            fail(f"provider {self.name} allow supports only repositories and authorization")
         self.target_mode = target_mode(self.config, self.name)
         self.allowed_repositories = self._allowed_strings("repositories")
+        self.http_policy = policy(self.allow.get("authorization"))
+        if "authorization" in self.allow and self.http_policy is None:
+            fail(f"provider {self.name} allow.authorization must be an HTTP policy object")
         self.token = self._token()
         self.injection_hosts = injection_hosts(self.config, self.name)
         self.injection_git = self._injection_git()
@@ -150,6 +156,10 @@ class StaticTokenProvider:
         raise ProviderError("repo-not-allowed")
 
     def token_for_repo(self, repo, effective_repositories):
+        if self.http_policy is not None:
+            # A raw token would bypass every HTTP endpoint rule, even if an
+            # administrator accidentally also supplied a file-bundle grant.
+            raise ProviderError("http-policy-requires-injection", status=403)
         self._ensure_repo_allowed(repo, effective_repositories)
         return self.token, None
 
@@ -171,9 +181,17 @@ class StaticTokenProvider:
         raise ProviderError("identity-not-supported", f"provider {self.name} does not support commit identity; use identity.mode=explicit")
 
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
+        # Defense in depth for direct builtin callers; core authorizes the full
+        # request URI and upgrade intent before invoking materialization.
+        decision = self.authorize_injection(host, method, path, False, agent_id, request_id, grant or {})
+        if decision is not None and not decision["allowed"]:
+            raise ProviderError("operation-not-allowed", status=403)
         if self.injection_git:
-            repo = self._injection_repository(host, method, path)
-            self._ensure_repo_allowed(repo, (grant or {}).get("repositories"))
+            try:
+                repo = self._injection_repository(host, method, path)
+                self._ensure_repo_allowed(repo, (grant or {}).get("repositories"))
+            except ProviderError as error:
+                raise ProviderError(error.reason, status=403) from None
         if self.injection_basic_username is not None:
             encoded = base64.b64encode(f"{self.injection_basic_username}:{self.token}".encode("utf-8")).decode("ascii")
             value = f"Basic {encoded}"
@@ -185,6 +203,21 @@ class StaticTokenProvider:
         # agent's placeholder version is removed before injection.
         strip = list(headers.keys())
         return headers, None, strip
+
+    def authorize_injection(self, host, method, path, upgrade, agent_id, request_id, grant):
+        grant_policy = policy(grant.get("authorization"))
+        if self.http_policy is None and grant_policy is None:
+            return None  # Legacy host/Git behavior is unchanged.
+        valid = host_valid(host) and host in self.injection_hosts and method in METHODS and path_valid(path) and not upgrade
+        allowed = valid and allows(self.http_policy, host, method, path) and allows(grant_policy, host, method, path)
+        # Never use HTTP policy as fallback from a failed repository check.
+        if allowed and self.injection_git:
+            try:
+                self._ensure_repo_allowed(self._injection_repository(host, method, path), grant.get("repositories"))
+            except ProviderError:
+                allowed = False
+        return {"allowed": bool(allowed), "operation": "http." + method if method in METHODS else "http.invalid",
+                "resource": "http/" + host + path if valid else "http/invalid"}
 
     def _injection_repository(self, host, method, path):
         if not path.startswith("/") or not path[1:] or any(not part for part in path[1:].split("/")):

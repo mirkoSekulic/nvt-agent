@@ -1,0 +1,44 @@
+# Provision this broker-only Secret separately with key EXAMPLE_API_TOKEN.
+broker:
+  envSecretName: example-api-token
+  config:
+    providers:
+      - name: api
+        plugin: token
+        config:
+          token-env: EXAMPLE_API_TOKEN
+          injection-hosts: [api.example.test]
+          injection-git: false
+        allow:
+          authorization:
+            defaultAction: deny
+            rules:
+              - {operation: http.POST, resource: http/api.example.test/graphql}
+              - {operation: http.POST, resource: http/api.example.test/designer/api/*/*/deployments/undeploy}
+egress: {networkPolicyCapable: true}
+agentSchedule:
+  template:
+    workspace: {mode: Ephemeral}
+  profiles:
+    - name: api-client
+      runtime: {type: codex, autonomy: trusted-local}
+      agentRuntimeConfig:
+        command: bash
+        args: [-lc, "sleep infinity"]
+        proxy: {provider: api}
+      egress: mediated
+      egressEnforcement: true
+      egressTransport: forward-proxy
+      egressDomainPolicy:
+        defaultAction: deny
+        allow: [api.example.test]
+      broker:
+        grants:
+          - provider: api
+            materialization: header-inject
+            egressHosts: [api.example.test:443]
+            authorization:
+              defaultAction: deny
+              rules:
+                - {operation: http.POST, resource: http/api.example.test/graphql}
+  profileSelection: {defaultProfile: api-client, onNoMatch: useDefault}

@@ -1,0 +1,18 @@
+# Illustrative SHA-256 digests only. Provision distinct real broker identities
+# privately; never put them in the agent when using enforced mediated egress.
+agents:
+  - id: example-agent
+    role: agent
+    token-sha256: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    grants:
+      - provider: api
+        materialization: header-inject
+        authorization:
+          defaultAction: deny
+          rules:
+            - {operation: http.POST, resource: http/api.example.test/graphql}
+  - id: example-egress
+    role: egress
+    paired-agent: example-agent
+    token-sha256: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    grants: []

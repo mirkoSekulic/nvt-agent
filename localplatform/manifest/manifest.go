@@ -117,20 +117,20 @@ type BrokerProviderMediation struct {
 }
 
 type Profile struct {
-	Runtime                   Runtime            `json:"runtime"`
-	Accounts                  []string           `json:"accounts,omitempty"`
-	CredentialProviders       []string           `json:"credentialProviders,omitempty"`
-	HTTPCredentials           []string           `json:"httpCredentials,omitempty"` // host-scoped, independent of checkout
-	DefaultCredentialProvider string             `json:"defaultCredentialProvider,omitempty"`
-	Tools                     Tools              `json:"tools,omitempty"`
-	Capabilities              []string           `json:"capabilities,omitempty"`
-	Instructions              *FileRef           `json:"instructions,omitempty"`
-	Editor                    Editor             `json:"editor,omitempty"`
-	Plugins                   []Plugin           `json:"plugins,omitempty"`
-	Egress                    *ProfileEgress     `json:"egress,omitempty"`
-	Kubernetes                []KubernetesAccess `json:"kubernetes,omitempty"`
-	Azure                     []AzureAccess      `json:"azure,omitempty"`
-	Expose                    *ProfileExpose     `json:"expose,omitempty"`
+	Runtime                   Runtime                `json:"runtime"`
+	Accounts                  []string               `json:"accounts,omitempty"`
+	CredentialProviders       []string               `json:"credentialProviders,omitempty"`
+	HTTPCredentials           []HTTPCredentialAccess `json:"httpCredentials,omitempty"` // independent of checkout
+	DefaultCredentialProvider string                 `json:"defaultCredentialProvider,omitempty"`
+	Tools                     Tools                  `json:"tools,omitempty"`
+	Capabilities              []string               `json:"capabilities,omitempty"`
+	Instructions              *FileRef               `json:"instructions,omitempty"`
+	Editor                    Editor                 `json:"editor,omitempty"`
+	Plugins                   []Plugin               `json:"plugins,omitempty"`
+	Egress                    *ProfileEgress         `json:"egress,omitempty"`
+	Kubernetes                []KubernetesAccess     `json:"kubernetes,omitempty"`
+	Azure                     []AzureAccess          `json:"azure,omitempty"`
+	Expose                    *ProfileExpose         `json:"expose,omitempty"`
 }
 
 // KubernetesAccess selects context resources from one generic kubeconfig
@@ -464,14 +464,27 @@ func (m Manifest) Validate() error {
 		if err := uniqueRefs(profile.CredentialProviders, m.BrokerProviders, "credential provider"); err != nil {
 			return fmt.Errorf("profile %q: %w", name, err)
 		}
-		if err := uniqueRefs(profile.HTTPCredentials, m.BrokerProviders, "HTTP credential provider"); err != nil {
+		if err := uniqueRefs(httpCredentialNames(profile.HTTPCredentials), m.BrokerProviders, "HTTP credential provider"); err != nil {
 			return fmt.Errorf("profile %q: %w", name, err)
 		}
 		if len(profile.HTTPCredentials) > MaxItems {
 			return fmt.Errorf("profile %q has too many HTTP credentials", name)
 		}
-		for _, providerName := range profile.HTTPCredentials {
+		for _, access := range profile.HTTPCredentials {
+			providerName := access.Provider
 			provider := m.BrokerProviders[providerName]
+			ceiling, err := tokenHTTPAuthorization(provider)
+			if err != nil {
+				return err
+			}
+			if (ceiling == nil) != (access.Authorization == nil) {
+				return fmt.Errorf("profile %q HTTP authorization requires both provider ceiling and grant policy", name)
+			}
+			if access.Authorization != nil {
+				if err := validateHTTPAuthorization(access.Authorization); err != nil {
+					return err
+				}
+			}
 			if provider.Mediation.Materialization != "header-inject" || provider.Mediation.Git || len(provider.Mediation.Hosts) == 0 || contains(profile.CredentialProviders, providerName) {
 				return fmt.Errorf("profile %q HTTP credentials require a separate host-scoped header-inject provider", name)
 			}
@@ -530,7 +543,7 @@ func (m Manifest) Validate() error {
 			if err := validateConfig(plugin.Config, 0); err != nil {
 				return fmt.Errorf("profile %q plugin %q config: %w", name, plugin.Name, err)
 			}
-			if plugin.Egress != nil && !((has(m.Accounts, plugin.Egress.Provider) && contains(profile.Accounts, plugin.Egress.Provider)) || (has(m.BrokerProviders, plugin.Egress.Provider) && contains(profile.CredentialProviders, plugin.Egress.Provider)) || contains(profile.HTTPCredentials, plugin.Egress.Provider) || hasAzureAccess(profile, plugin.Egress.Provider)) {
+			if plugin.Egress != nil && !((has(m.Accounts, plugin.Egress.Provider) && contains(profile.Accounts, plugin.Egress.Provider)) || (has(m.BrokerProviders, plugin.Egress.Provider) && contains(profile.CredentialProviders, plugin.Egress.Provider)) || contains(httpCredentialNames(profile.HTTPCredentials), plugin.Egress.Provider) || hasAzureAccess(profile, plugin.Egress.Provider)) {
 				return fmt.Errorf("profile %q plugin %q has an invalid egress provider", name, plugin.Name)
 			}
 		}
@@ -1162,7 +1175,9 @@ func validateBrokerProvider(name string, provider BrokerProvider, secrets map[st
 		return validateAzureProvider(provider)
 	}
 	if provider.Allow != nil {
-		return fmt.Errorf("broker provider %q does not support an explicit allow ceiling", name)
+		if _, err := tokenHTTPAuthorization(provider); err != nil {
+			return fmt.Errorf("broker provider %q: %w", name, err)
+		}
 	}
 	if len(provider.Secrets) == 0 {
 		return fmt.Errorf("broker provider %q must declare secret bindings", name)

@@ -1,5 +1,13 @@
 # broker Protocol
 
+The builtin token provider's optional [HTTP endpoint authorization](../docs/http-authorization.md)
+uses the existing provider-owned `injection.authorization` decision contract:
+operations `http.METHOD`, resources `http/exact-host/path`, default-deny rules,
+and independent provider/grant intersection. Whole-segment `*` is supported only
+by that provider's HTTP vocabulary, not by generic broker resource matching.
+Explicit broker 403 injection denials are propagated as sanitized egress 403s;
+broker/upstream failures remain distinguishable as 502s.
+
 `brokerd` is the trusted authority API for nvt-agent. It is the trusted-side
 counterpart to `agentd`:
 

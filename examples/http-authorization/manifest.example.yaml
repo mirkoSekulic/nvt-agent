@@ -1,0 +1,33 @@
+apiVersion: nvt.dev/local/v1
+secrets:
+  api-token: {file: ./.nvt-local/secrets/example-api-token}
+brokerProviders:
+  api:
+    plugin: token
+    config:
+      injection-hosts: [api.example.test]
+      injection-git: false
+    secrets: {token-file: api-token}
+    mediation: {hosts: [api.example.test], materialization: header-inject, git: false}
+    allow:
+      authorization:
+        defaultAction: deny
+        rules:
+          - {operation: http.POST, resource: http/api.example.test/graphql}
+          - {operation: http.POST, resource: http/api.example.test/designer/api/*/*/deployments/undeploy}
+retentionPolicies:
+  persistent:
+    persistence: {workspace: true, runtimeState: true, dockerData: true}
+profiles:
+  api-client:
+    runtime: {preset: shell, autonomy: approval-required}
+    httpCredentials:
+      - provider: api
+        authorization:
+          defaultAction: deny
+          rules:
+            - {operation: http.POST, resource: http/api.example.test/graphql}
+    egress:
+      domainPolicy: {defaultAction: deny, allow: [api.example.test]}
+workstations:
+  - {name: api-client, profile: api-client}

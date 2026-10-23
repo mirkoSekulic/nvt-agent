@@ -8,6 +8,8 @@ on:
       - ".github/scripts/chart-version-exists.sh"
       - ".github/scripts/release-*.sh"
       - "tests/operator/helm/**"
+      - "tests/http-authorization/**"
+      - "examples/http-authorization/**"
   push:
     branches:
       - main
@@ -59,6 +61,7 @@ jobs:
           bash .github/scripts/release-scripts-test.sh
           bash tests/operator/helm/test.sh
           bash tests/operator/helm/azure-test.sh
+          bash tests/operator/helm/http-authorization-test.sh
 
   release_metadata:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')

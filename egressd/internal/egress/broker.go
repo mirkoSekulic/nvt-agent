@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -25,6 +26,9 @@ type BrokerClient struct {
 	Token  string
 	Client *http.Client
 }
+
+// ErrInjectionDenied marks a broker policy denial, not an upstream outage.
+var ErrInjectionDenied = errors.New("broker injection forbidden")
 
 type injectionRequest struct {
 	Capability string `json:"capability"`
@@ -68,14 +72,18 @@ func (b *BrokerClient) FetchHeaders(ctx context.Context, capability, host, metho
 		return nil, fmt.Errorf("broker unreachable: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode == http.StatusForbidden {
+		return nil, ErrInjectionDenied
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("broker injection failed: status %d", response.StatusCode)
+	}
 	var decoded injectionResponse
 	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
 		return nil, fmt.Errorf("decode injection response: %w", err)
 	}
-	if response.StatusCode != http.StatusOK || !decoded.OK {
-		// decoded.Error is a machine reason (e.g. provider-not-granted),
-		// never a header value; safe to wrap.
-		return nil, fmt.Errorf("broker denied injection: %s", decoded.Error)
+	if !decoded.OK {
+		return nil, errors.New("broker injection failed")
 	}
 	if overlappingHeaderNames(decoded.Headers, decoded.AppendHeaders, decoded.StripRequestHeaders) {
 		return nil, fmt.Errorf("broker returned overlapping replacement, append, or strip headers")
